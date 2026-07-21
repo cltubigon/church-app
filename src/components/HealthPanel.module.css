@@ -1,0 +1,55 @@
+.health {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #ded8cd;
+}
+.health h3 {
+  margin: 0 0 0.75rem;
+  color: #274d43;
+  font-size: 1.05rem;
+}
+.health button {
+  padding: 0.65rem 0.9rem;
+  color: #fff;
+  background: #27594b;
+  border: 2px solid #27594b;
+  border-radius: 0.35rem;
+  cursor: pointer;
+  font-weight: 700;
+}
+.health button:hover:not(:disabled) {
+  background: #173f35;
+}
+.health button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+.result {
+  display: grid;
+  gap: 0.55rem;
+  margin: 1rem 0 0;
+}
+.result div {
+  display: grid;
+  grid-template-columns: minmax(8rem, 10rem) 1fr;
+  gap: 0.5rem;
+}
+.result dt {
+  font-weight: 700;
+}
+.result dd {
+  margin: 0;
+}
+.error {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  color: #702f1a;
+  background: #fff2ec;
+  border-left: 0.25rem solid #b44d20;
+}
+@media (max-width: 30rem) {
+  .result div {
+    grid-template-columns: 1fr;
+    gap: 0.1rem;
+  }
+}

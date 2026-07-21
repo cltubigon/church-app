@@ -1,0 +1,18 @@
+[package]
+name = "church-app-foundation"
+version = "0.1.0"
+description = "Non-production Church App desktop foundation"
+authors = ["Church App contributors"]
+edition = "2024"
+rust-version = "1.97.1"
+
+[lib]
+name = "church_app_foundation_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+tauri = { version = "=2.11.5", features = [] }

@@ -1,0 +1,108 @@
+.app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+}
+.skipLink {
+  position: fixed;
+  z-index: 10;
+  top: 0.75rem;
+  left: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  color: #fff;
+  background: #173f35;
+  border-radius: 0.35rem;
+  transform: translateY(-180%);
+}
+.skipLink:focus {
+  transform: translateY(0);
+}
+.header {
+  padding: clamp(1.5rem, 5vw, 3.5rem) clamp(1.25rem, 6vw, 5rem) 1.75rem;
+  background: #f2eee6;
+  border-bottom: 1px solid #d8d0c2;
+}
+.header h1 {
+  margin: 0.2rem 0 0.35rem;
+  color: #173f35;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(2rem, 6vw, 3.5rem);
+  font-weight: 600;
+  line-height: 1;
+}
+.kicker,
+.eyebrow {
+  margin: 0;
+  color: #6c4f31;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+.subtitle {
+  margin: 0;
+  color: #49564f;
+}
+.navigation {
+  padding: 0.8rem clamp(1.25rem, 6vw, 5rem);
+  background: #fff;
+  border-bottom: 1px solid #ded8cd;
+  overflow-x: auto;
+}
+.navigation ul {
+  display: flex;
+  gap: 0.45rem;
+  min-width: max-content;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.navLink,
+.activeLink,
+.returnLink {
+  display: inline-block;
+  padding: 0.55rem 0.75rem;
+  color: #274d43;
+  border-radius: 0.3rem;
+  font-weight: 650;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.22em;
+}
+.activeLink {
+  color: #fff;
+  background: #27594b;
+  text-decoration: none;
+}
+.main {
+  width: min(100% - 2rem, 54rem);
+  margin-inline: auto;
+  padding: clamp(1.5rem, 5vw, 3.5rem) 0;
+}
+.panel {
+  padding: clamp(1.25rem, 4vw, 2.25rem);
+  background: #fff;
+  border: 1px solid #ddd5c8;
+  border-radius: 0.6rem;
+  box-shadow: 0 0.8rem 2rem rgb(55 45 31 / 7%);
+}
+.panel h2 {
+  margin: 0.35rem 0 0.8rem;
+  color: #1f3f37;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.5rem, 4vw, 2.25rem);
+}
+.panel p {
+  max-width: 65ch;
+}
+.footer {
+  padding: 1rem clamp(1.25rem, 6vw, 5rem);
+  color: #526159;
+  background: #ece8df;
+  border-top: 1px solid #d8d0c2;
+  font-size: 0.9rem;
+}
+@media (max-width: 34rem) {
+  .main {
+    width: min(100% - 1.25rem, 54rem);
+  }
+}

@@ -1,0 +1,27 @@
+:root {
+  color: #27342f;
+  background: #f7f4ee;
+  font-family: Inter, Aptos, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  min-width: 20rem;
+  min-height: 100vh;
+  background: #f7f4ee;
+}
+body {
+  margin: 0;
+}
+button,
+a {
+  font: inherit;
+}
+:focus-visible {
+  outline: 3px solid #b44d20;
+  outline-offset: 3px;
+}
