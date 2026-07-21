@@ -1,5 +1,8 @@
 use serde::Serialize;
 
+#[cfg(all(test, target_os = "windows"))]
+mod sqlcipher_windows_feasibility;
+
 const SAFE_HEALTH_MESSAGE: &str = "The application foundation could not confirm its status.";
 
 #[derive(Debug, PartialEq, Serialize)]

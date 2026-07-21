@@ -10,6 +10,7 @@ React is presentation and interaction only. Privileged operations belong in Rust
 
 ## Change safety
 
+- Inspect root-level `PLANS.md` when an active substantial implementation initiative exists.
 - Inspect `git status --short`, `git diff --stat`, and relevant files before editing.
 - Preserve unrelated modified and untracked work. Never reset, clean, stash, stage, commit, or push unless explicitly requested.
 - Obtain approval before adding or changing packages beyond the dependencies required by the current task.
