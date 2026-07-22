@@ -1,8 +1,8 @@
-# Church App foundation
+# Church App
 
 This repository contains the initial Windows-first desktop foundation for a future Roman Catholic parish application. It is an unfinished application shell, not an implemented parish product. Do not enter real parish or personal data.
 
-The current scaffold uses Tauri 2, Rust, React, TypeScript, Vite, and npm. Rust is the trusted desktop boundary; React provides presentation and interaction only.
+The current scaffold uses Tauri 2, Rust, React, TypeScript, Vite, and npm. Rust is the trusted desktop boundary; React provides presentation and interaction only. The permanent production identifier is `io.github.cltubigon.churchapp`; it is fixed for production storage-path purposes.
 
 ## Prerequisites
 
@@ -38,9 +38,9 @@ See `docs/verification.md` for scope, environment-dependent checks, and manual v
 
 ## Current limitations
 
-The four visible staff areas are unavailable placeholders. There is no database, authentication, parish workflow, central service, backup, PDF, updater, release signing, telemetry, or production configuration. The development health check returns only the application name, bootstrap status, and package version.
+The four visible staff areas are unavailable placeholders. There is no production database, authentication, parish workflow, central service, backup, PDF, updater, release signing, telemetry, or production storage implementation. The development health check returns only the application name, bootstrap status, and package version. No real parish or personal data should be entered.
 
-The non-production product name is `Church App Foundation`, the identifier is `org.churchapp.foundation`, and the version is `0.1.0`. These values require release-specific review before distribution.
+The production display name is `Church App`, the permanent application identifier is `io.github.cltubigon.churchapp`, and the version remains `0.1.0`. The repository is still only an unfinished foundation and is not production-ready.
 
 If Git reports dubious ownership, do not change global or repository Git configuration without approval. A one-command inspection can use a temporary override such as:
 

@@ -1,5 +1,8 @@
 use serde::Serialize;
 
+pub mod installation_state;
+pub mod storage_foundation;
+
 #[cfg(all(test, target_os = "windows"))]
 mod sqlcipher_windows_feasibility;
 
@@ -38,7 +41,7 @@ fn build_health_response(
 
 #[tauri::command]
 fn health_check() -> Result<HealthResponse, HealthError> {
-    let result = build_health_response("Church App Foundation", env!("CARGO_PKG_VERSION"));
+    let result = build_health_response("Church App", env!("CARGO_PKG_VERSION"));
     match &result {
         Ok(_) => eprintln!(r#"event="health_check" outcome="success""#),
         Err(error) => eprintln!(
@@ -63,8 +66,10 @@ mod tests {
 
     #[test]
     fn health_check_returns_only_safe_bootstrap_metadata() {
-        let result = health_check().expect("health check should succeed");
-        assert_eq!(result.application_name, "Church App Foundation");
+        let command_without_frontend_arguments: fn() -> Result<HealthResponse, HealthError> =
+            health_check;
+        let result = command_without_frontend_arguments().expect("health check should succeed");
+        assert_eq!(result.application_name, "Church App");
         assert_eq!(result.bootstrap_status, "ready");
         assert_eq!(result.application_version, env!("CARGO_PKG_VERSION"));
     }
