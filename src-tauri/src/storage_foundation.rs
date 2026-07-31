@@ -49,6 +49,14 @@ pub struct ParishIdentifier([u8; 16]);
 pub struct InvalidParishIdentifier;
 
 impl ParishIdentifier {
+    pub fn from_bytes(value: [u8; 16]) -> Result<Self, InvalidParishIdentifier> {
+        if value == [0; 16] {
+            return Err(InvalidParishIdentifier);
+        }
+
+        Ok(Self(value))
+    }
+
     pub fn parse(value: &str) -> Result<Self, InvalidParishIdentifier> {
         if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(InvalidParishIdentifier);
@@ -59,11 +67,7 @@ impl ParishIdentifier {
             bytes[index] = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
         }
 
-        if bytes == [0; 16] {
-            return Err(InvalidParishIdentifier);
-        }
-
-        Ok(Self(bytes))
+        Self::from_bytes(bytes)
     }
 
     pub const fn as_bytes(&self) -> &[u8; 16] {
@@ -523,5 +527,93 @@ mod tests {
         assert!(ParishIdentifier::parse("00000000000000000000000000000000").is_err());
         assert!(ParishIdentifier::parse("parish-name-should-never-be-an-id").is_err());
         assert!(ParishIdentifier::parse("3f6a819cc2044ae3976c5e8b37d2914g").is_err());
+    }
+
+    #[test]
+    fn parish_identifier_byte_construction_is_exact_and_rejects_zero() {
+        let bytes = [
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ];
+
+        let identifier = ParishIdentifier::from_bytes(bytes)
+            .expect("synthetic nonzero parish bytes should be valid");
+
+        assert_eq!(identifier.as_bytes(), &bytes);
+        assert_eq!(
+            ParishIdentifier::from_bytes([0; 16]),
+            Err(InvalidParishIdentifier)
+        );
+    }
+
+    #[test]
+    fn parish_identifier_text_and_bytes_construct_the_same_typed_value() {
+        let bytes = [
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ];
+
+        assert_eq!(
+            ParishIdentifier::from_bytes(bytes).unwrap(),
+            ParishIdentifier::parse("101112131415161718191a1b1c1d1e1f").unwrap()
+        );
+    }
+
+    #[test]
+    fn parish_byte_constructor_has_no_text_bridge_or_broader_surface() {
+        const SOURCE: &str = include_str!("storage_foundation.rs");
+        let production_source = SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("module should contain a test boundary");
+        let constructor = production_source
+            .split_once("pub fn from_bytes(value: [u8; 16])")
+            .expect("parish byte constructor should have one exact signature")
+            .1
+            .split_once("pub fn parse")
+            .expect("text parser should remain separate")
+            .0;
+
+        assert_eq!(
+            production_source
+                .matches("pub fn from_bytes(value: [u8; 16])")
+                .count(),
+            1
+        );
+        for forbidden in [
+            "parse",
+            "hex",
+            "str",
+            "String",
+            "format!",
+            "getrandom",
+            "rand::",
+            "std::fs",
+            "std::env",
+            "std::time",
+            "rusqlite",
+            "sqlx",
+            "windows::",
+            "tauri::",
+            "serde",
+        ] {
+            assert!(
+                !constructor.contains(forbidden),
+                "parish byte constructor unexpectedly contains {forbidden}"
+            );
+        }
+
+        for forbidden in [
+            "as_bytes_mut",
+            "impl From<",
+            "impl Into<",
+            "Serialize",
+            "Deserialize",
+        ] {
+            assert!(
+                !production_source.contains(forbidden),
+                "storage identity surface unexpectedly contains {forbidden}"
+            );
+        }
     }
 }

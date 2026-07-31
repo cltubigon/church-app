@@ -80,6 +80,10 @@ impl EvidenceFormatVersion {
 pub struct PermanentApplicationIdentifier(&'static str);
 
 impl PermanentApplicationIdentifier {
+    pub(crate) const fn canonical() -> Self {
+        Self(PERMANENT_APPLICATION_IDENTIFIER)
+    }
+
     pub const fn as_str(self) -> &'static str {
         self.0
     }
@@ -434,9 +438,7 @@ impl<'a> UnvalidatedInstallationEvidenceContract<'a> {
         Ok(StructurallyValidatedInstallationEvidence {
             evidence_format_identity: INSTALLATION_EVIDENCE_FORMAT_IDENTITY,
             evidence_format_version: EvidenceFormatVersion(SUPPORTED_EVIDENCE_FORMAT_VERSION),
-            permanent_application_identifier: PermanentApplicationIdentifier(
-                PERMANENT_APPLICATION_IDENTIFIER,
-            ),
+            permanent_application_identifier: PermanentApplicationIdentifier::canonical(),
             application_database_format_identity: APPLICATION_DATABASE_FORMAT_IDENTITY,
             parish_identifier: ParishIdentifier::parse(self.parish_identifier)
                 .map_err(|_| ContractValidationError::InvalidParishIdentifier)?,
@@ -1307,6 +1309,31 @@ mod tests {
             evidence.creation_timestamp().unix_seconds(),
             CREATION_TIMESTAMP
         );
+    }
+
+    #[test]
+    fn permanent_application_identifier_has_one_fixed_typed_construction() {
+        let canonical_constructor: fn() -> PermanentApplicationIdentifier =
+            PermanentApplicationIdentifier::canonical;
+
+        assert_eq!(
+            canonical_constructor().as_str(),
+            "io.github.cltubigon.churchapp"
+        );
+
+        const SOURCE: &str = include_str!("installation_evidence_contract.rs");
+        let production_source = SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("module should contain a test boundary");
+        assert_eq!(
+            production_source
+                .matches("pub(crate) const fn canonical() -> Self")
+                .count(),
+            1
+        );
+        assert!(!production_source.contains("PermanentApplicationIdentifier::parse"));
+        assert!(!production_source.contains("PermanentApplicationIdentifier::from_str"));
     }
 
     #[test]
