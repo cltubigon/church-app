@@ -1,15 +1,20 @@
-//! Windows-only, test-owned single-wrapper publication proof.
+//! Windows-only installation-evidence filesystem boundary.
 //!
-//! The production surface is compile-only binding and policy preflight. The
-//! executable proof is compiler-gated to Windows tests and operates solely
-//! beneath unique test-owned temporary roots.
+//! Production compilation includes only private read-hardening primitives for
+//! already-supplied paths. They have no production caller. Filesystem mutation,
+//! publication, replacement, cleanup, and host-classification behavior remains
+//! compiler-gated to tests beneath unique test-owned temporary roots.
 
 #![allow(dead_code)]
 
 use std::{
+    ffi::OsStr,
     ffi::c_void,
+    fmt,
     fs::File,
+    os::windows::ffi::OsStrExt,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+    path::Path,
 };
 
 use windows_sys::{
@@ -33,6 +38,13 @@ use windows_sys::{
         },
     },
     core::{BOOL, PCWSTR, PWSTR},
+};
+
+use crate::installation_evidence_protection::EncodedProtectedWrapper;
+
+use super::{
+    BoundedReadError, MAXIMUM_PROTECTED_WRAPPER_LENGTH, MINIMUM_PROTECTED_WRAPPER_LENGTH,
+    ProtectedWrapperBytes, read_bounded_protected_wrapper,
 };
 
 type CreateFileWBinding = unsafe extern "system" fn(
@@ -135,6 +147,512 @@ const STANDARD_INFORMATION_CLASS: FILE_INFO_BY_HANDLE_CLASS = FileStandardInfo;
 const ATTRIBUTE_TAG_INFORMATION_CLASS: FILE_INFO_BY_HANDLE_CLASS = FileAttributeTagInfo;
 const FILE_ID_INFORMATION_CLASS: FILE_INFO_BY_HANDLE_CLASS = FileIdInfo;
 
+// PRODUCTION READ-HARDENING CORE START: private, read-only, and currently uncalled.
+const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
+const VOLUME_GUID_PREFIX_UNITS: usize = 49;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct HandleIdentity {
+    volume_serial: u64,
+    file_id: [u8; 16],
+}
+
+impl fmt::Debug for HandleIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HandleIdentity([REDACTED])")
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct HardeningObservation {
+    identity: HandleIdentity,
+    size: u64,
+    attributes: u32,
+    reparse_tag: u32,
+    link_count: u32,
+    final_path: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HardeningError {
+    PathUnavailable,
+    ComponentReparse,
+    WrongEntryType,
+    IdentityChanged,
+    HardLinkRejected,
+    FinalPathMismatch,
+    SameVolumeMismatch,
+    InspectionUnavailable,
+    FactsChanged,
+    ReadUnavailable,
+    WrapperInvalid,
+}
+
+impl fmt::Debug for HardeningError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::PathUnavailable => "PathUnavailable",
+            Self::ComponentReparse => "ComponentReparse",
+            Self::WrongEntryType => "WrongEntryType",
+            Self::IdentityChanged => "IdentityChanged",
+            Self::HardLinkRejected => "HardLinkRejected",
+            Self::FinalPathMismatch => "FinalPathMismatch",
+            Self::SameVolumeMismatch => "SameVolumeMismatch",
+            Self::InspectionUnavailable => "InspectionUnavailable",
+            Self::FactsChanged => "FactsChanged",
+            Self::ReadUnavailable => "ReadUnavailable",
+            Self::WrapperInvalid => "WrapperInvalid",
+        })
+    }
+}
+
+struct RetainedDirectory {
+    handle: File,
+    initial: HardeningObservation,
+}
+
+fn checked_buffer_length(length: usize) -> Option<u32> {
+    u32::try_from(length).ok()
+}
+
+fn encode_utf16_path(path: &Path) -> Result<Vec<u16>, HardeningError> {
+    let mut encoded = Vec::new();
+    for unit in path.as_os_str().encode_wide() {
+        if unit == 0 {
+            return Err(HardeningError::PathUnavailable);
+        }
+        encoded.push(unit);
+    }
+    encoded.push(0);
+    Ok(encoded)
+}
+
+fn open_for_read(path: &[u16]) -> Result<File, HardeningError> {
+    // SAFETY: `path` is NUL-terminated and lives for the call; optional pointers
+    // are null, and no overlapped I/O flag is supplied.
+    let raw = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            ACTIVE_READ_ACCESS,
+            ACTIVE_READ_SHARE,
+            NULL_CREATE_SECURITY_ATTRIBUTES,
+            ACTIVE_READ_DISPOSITION,
+            ACTIVE_READ_FLAGS,
+            NULL_CREATE_TEMPLATE_HANDLE,
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(HardeningError::InspectionUnavailable);
+    }
+    // SAFETY: `raw` is a fresh successful CreateFileW handle and ownership is
+    // transferred immediately to exactly one OwnedHandle, then to File.
+    let owned = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+    Ok(File::from(owned))
+}
+
+fn validate_disk_handle(file: &File) -> Result<(), HardeningError> {
+    let handle = file.as_raw_handle() as HANDLE;
+    // SAFETY: `handle` is owned by the live File for the duration of the call.
+    let file_type = unsafe { GetFileType(handle) };
+    if file_type != FILE_TYPE_DISK {
+        return Err(HardeningError::WrongEntryType);
+    }
+    Ok(())
+}
+
+fn query_entry_information(
+    file: &File,
+) -> Result<(FILE_STANDARD_INFO, FILE_ATTRIBUTE_TAG_INFO), HardeningError> {
+    let handle = file.as_raw_handle() as HANDLE;
+    let mut standard = FILE_STANDARD_INFO::default();
+    let standard_size = checked_buffer_length(std::mem::size_of::<FILE_STANDARD_INFO>())
+        .ok_or(HardeningError::InspectionUnavailable)?;
+    // SAFETY: `standard` is initialized writable storage of exactly the reported
+    // checked size, and `handle` remains owned by the live File.
+    let standard_ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            (&raw mut standard).cast::<c_void>(),
+            standard_size,
+        )
+    };
+    if standard_ok == 0 {
+        return Err(HardeningError::InspectionUnavailable);
+    }
+
+    let mut attributes = FILE_ATTRIBUTE_TAG_INFO::default();
+    let attributes_size = checked_buffer_length(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>())
+        .ok_or(HardeningError::InspectionUnavailable)?;
+    // SAFETY: `attributes` is initialized writable storage of exactly the
+    // reported checked size, and `handle` remains owned by the live File.
+    let attributes_ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&raw mut attributes).cast::<c_void>(),
+            attributes_size,
+        )
+    };
+    if attributes_ok == 0 {
+        return Err(HardeningError::InspectionUnavailable);
+    }
+    Ok((standard, attributes))
+}
+
+fn query_handle_identity(file: &File) -> Result<HandleIdentity, HardeningError> {
+    let mut information = FileIdFileInformation::default();
+    let size = checked_buffer_length(std::mem::size_of::<FileIdFileInformation>())
+        .ok_or(HardeningError::InspectionUnavailable)?;
+    // SAFETY: `information` is initialized writable storage of the exact checked
+    // size and the live File owns `handle` for the duration of the call.
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileIdInfo,
+            (&raw mut information).cast::<c_void>(),
+            size,
+        )
+    };
+    if succeeded == 0 {
+        return Err(HardeningError::InspectionUnavailable);
+    }
+    Ok(HandleIdentity {
+        volume_serial: information.VolumeSerialNumber,
+        file_id: information.FileId.Identifier,
+    })
+}
+
+fn query_link_count(file: &File) -> Result<u32, HardeningError> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `information` is initialized writable storage and the live File
+    // owns the handle for the duration of the call.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &raw mut information) };
+    if succeeded == 0 {
+        return Err(HardeningError::InspectionUnavailable);
+    }
+    Ok(information.nNumberOfLinks)
+}
+
+fn query_hardening_observation(file: &File) -> Result<HardeningObservation, HardeningError> {
+    validate_disk_handle(file)?;
+    let (standard, attribute_tag) = query_entry_information(file)?;
+    let size = u64::try_from(standard.EndOfFile).map_err(|_| HardeningError::WrongEntryType)?;
+    Ok(HardeningObservation {
+        identity: query_handle_identity(file)?,
+        size,
+        attributes: attribute_tag.FileAttributes,
+        reparse_tag: attribute_tag.ReparseTag,
+        link_count: query_link_count(file)?,
+        final_path: query_bounded_final_guid_path(file)?,
+    })
+}
+
+fn query_bounded_final_guid_path(file: &File) -> Result<Vec<u16>, HardeningError> {
+    let handle = file.as_raw_handle() as HANDLE;
+    // SAFETY: this is the documented size query and the live File retains the
+    // handle; no output storage is accessed.
+    let required = unsafe {
+        GetFinalPathNameByHandleW(
+            handle,
+            std::ptr::null_mut(),
+            0,
+            NORMALIZED_GUID_FINAL_PATH_FLAGS,
+        )
+    };
+    let capacity = usize::try_from(required).map_err(|_| HardeningError::PathUnavailable)?;
+    if required == 0 || capacity > MAXIMUM_FINAL_PATH_UNITS {
+        return Err(HardeningError::PathUnavailable);
+    }
+    let mut output = vec![0_u16; capacity];
+    let capacity_u32 = checked_buffer_length(capacity).ok_or(HardeningError::PathUnavailable)?;
+    // SAFETY: `output` is initialized writable storage of the checked capacity
+    // and the live File retains the handle for the call.
+    let written = unsafe {
+        GetFinalPathNameByHandleW(
+            handle,
+            output.as_mut_ptr(),
+            capacity_u32,
+            NORMALIZED_GUID_FINAL_PATH_FLAGS,
+        )
+    };
+    let written = usize::try_from(written).map_err(|_| HardeningError::PathUnavailable)?;
+    if written == 0 || written >= output.len() || written > MAXIMUM_FINAL_PATH_UNITS {
+        return Err(HardeningError::PathUnavailable);
+    }
+    output.truncate(written);
+    Ok(output)
+}
+
+fn validate_reparse_facts(attributes: u32, tag: u32) -> Result<(), HardeningError> {
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || tag != 0 {
+        return Err(HardeningError::ComponentReparse);
+    }
+    Ok(())
+}
+
+fn validate_wrapper_link_count(link_count: u32) -> Result<(), HardeningError> {
+    if link_count != 1 {
+        return Err(HardeningError::HardLinkRejected);
+    }
+    Ok(())
+}
+
+fn ascii_units(value: &str) -> Vec<u16> {
+    value.encode_utf16().collect()
+}
+
+fn is_ascii_hex(unit: u16) -> bool {
+    (b'0' as u16..=b'9' as u16).contains(&unit)
+        || (b'a' as u16..=b'f' as u16).contains(&unit)
+        || (b'A' as u16..=b'F' as u16).contains(&unit)
+}
+
+fn ascii_hex_fold(unit: u16) -> u16 {
+    if (b'A' as u16..=b'F' as u16).contains(&unit) {
+        unit + u16::from(b'a' - b'A')
+    } else {
+        unit
+    }
+}
+
+fn validated_volume_guid_prefix(path: &[u16]) -> Result<&[u16], HardeningError> {
+    if path.is_empty()
+        || path.len() > MAXIMUM_FINAL_PATH_UNITS
+        || path.contains(&0)
+        || path.len() < VOLUME_GUID_PREFIX_UNITS
+    {
+        return Err(HardeningError::PathUnavailable);
+    }
+    let fixed_prefix = ascii_units(r"\\?\Volume{");
+    if path.get(..fixed_prefix.len()) != Some(fixed_prefix.as_slice())
+        || path[47] != b'}' as u16
+        || path[48] != b'\\' as u16
+    {
+        return Err(HardeningError::FinalPathMismatch);
+    }
+    for (offset, unit) in path[11..47].iter().copied().enumerate() {
+        if matches!(offset, 8 | 13 | 18 | 23) {
+            if unit != b'-' as u16 {
+                return Err(HardeningError::FinalPathMismatch);
+            }
+        } else if !is_ascii_hex(unit) {
+            return Err(HardeningError::FinalPathMismatch);
+        }
+    }
+    Ok(&path[..VOLUME_GUID_PREFIX_UNITS])
+}
+
+fn same_volume_guid(left: &[u16], right: &[u16]) -> Result<bool, HardeningError> {
+    let left = validated_volume_guid_prefix(left)?;
+    let right = validated_volume_guid_prefix(right)?;
+    Ok(left[..11] == right[..11]
+        && left[47..] == right[47..]
+        && left[11..47]
+            .iter()
+            .zip(&right[11..47])
+            .all(|(left, right)| ascii_hex_fold(*left) == ascii_hex_fold(*right)))
+}
+
+fn exact_child_final_path(
+    parent: &[u16],
+    actual: &[u16],
+    expected_component: &[u16],
+) -> Result<(), HardeningError> {
+    if expected_component.is_empty()
+        || expected_component
+            .iter()
+            .any(|unit| matches!(*unit, 0 | 47 | 92))
+        || !same_volume_guid(parent, actual)?
+    {
+        return Err(HardeningError::FinalPathMismatch);
+    }
+    let mut expected = parent.to_vec();
+    if expected.last() != Some(&(b'\\' as u16)) {
+        expected.push(b'\\' as u16);
+    }
+    expected.extend_from_slice(expected_component);
+    if expected.len() != actual.len()
+        || expected[..11] != actual[..11]
+        || expected[47..] != actual[47..]
+        || !expected[11..47]
+            .iter()
+            .zip(&actual[11..47])
+            .all(|(left, right)| ascii_hex_fold(*left) == ascii_hex_fold(*right))
+    {
+        return Err(HardeningError::FinalPathMismatch);
+    }
+    Ok(())
+}
+
+fn validate_same_volume(
+    parent: &HardeningObservation,
+    child: &HardeningObservation,
+) -> Result<(), HardeningError> {
+    if parent.identity.volume_serial != child.identity.volume_serial
+        || !same_volume_guid(&parent.final_path, &child.final_path)?
+    {
+        return Err(HardeningError::SameVolumeMismatch);
+    }
+    Ok(())
+}
+
+fn open_hardened_directory(
+    path: &Path,
+    parent: Option<(&HardeningObservation, &[u16])>,
+) -> Result<RetainedDirectory, HardeningError> {
+    let encoded = encode_utf16_path(path)?;
+    // SAFETY: `encoded` is NUL-terminated and live for the call; the exact
+    // directory flags open the entry itself and request no mutation access.
+    let raw = unsafe {
+        CreateFileW(
+            encoded.as_ptr(),
+            DIRECTORY_OPEN_ACCESS,
+            DIRECTORY_OPEN_SHARE,
+            NULL_CREATE_SECURITY_ATTRIBUTES,
+            DIRECTORY_OPEN_DISPOSITION,
+            DIRECTORY_OPEN_FLAGS,
+            NULL_CREATE_TEMPLATE_HANDLE,
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(HardeningError::InspectionUnavailable);
+    }
+    // SAFETY: ownership of the fresh successful handle is transferred once.
+    let handle = File::from(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) });
+    let observation = query_hardening_observation(&handle)?;
+    if observation.attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(HardeningError::WrongEntryType);
+    }
+    validate_reparse_facts(observation.attributes, observation.reparse_tag)?;
+    validated_volume_guid_prefix(&observation.final_path)?;
+    if let Some((parent, expected_component)) = parent {
+        validate_same_volume(parent, &observation)?;
+        exact_child_final_path(
+            &parent.final_path,
+            &observation.final_path,
+            expected_component,
+        )?;
+    }
+    Ok(RetainedDirectory {
+        handle,
+        initial: observation,
+    })
+}
+
+fn validate_stable_observations(
+    before: Option<&HardeningObservation>,
+    after: Option<&HardeningObservation>,
+) -> Result<(), HardeningError> {
+    let (before, after) = before
+        .zip(after)
+        .ok_or(HardeningError::InspectionUnavailable)?;
+    if before.identity.volume_serial != after.identity.volume_serial {
+        return Err(HardeningError::SameVolumeMismatch);
+    }
+    if before.identity.file_id != after.identity.file_id {
+        return Err(HardeningError::IdentityChanged);
+    }
+    if before.link_count != after.link_count {
+        return Err(HardeningError::HardLinkRejected);
+    }
+    if before.final_path != after.final_path {
+        return Err(HardeningError::FinalPathMismatch);
+    }
+    if !same_volume_guid(&before.final_path, &after.final_path)? {
+        return Err(HardeningError::SameVolumeMismatch);
+    }
+    if before.size != after.size
+        || before.attributes != after.attributes
+        || before.reparse_tag != after.reparse_tag
+    {
+        return Err(HardeningError::FactsChanged);
+    }
+    Ok(())
+}
+
+fn inspect_hardened_authentication_key_wrapper(
+    path: &Path,
+    expected_name: &str,
+    retained: &[RetainedDirectory],
+) -> Result<Vec<u8>, HardeningError> {
+    inspect_hardened_authentication_key_wrapper_with(
+        path,
+        expected_name,
+        retained,
+        || {},
+        read_bounded_protected_wrapper,
+    )
+}
+
+fn inspect_hardened_authentication_key_wrapper_with<M, R>(
+    path: &Path,
+    expected_name: &str,
+    retained: &[RetainedDirectory],
+    mutation: M,
+    reader: R,
+) -> Result<Vec<u8>, HardeningError>
+where
+    M: FnOnce(),
+    R: FnOnce(&mut File, u64) -> Result<ProtectedWrapperBytes, BoundedReadError>,
+{
+    let parent = retained
+        .last()
+        .ok_or(HardeningError::InspectionUnavailable)?;
+    let directory_identities_before = retained
+        .iter()
+        .map(|directory| query_handle_identity(&directory.handle))
+        .collect::<Result<Vec<_>, _>>()?;
+    let encoded = encode_utf16_path(path)?;
+    let mut file = open_for_read(&encoded)?;
+    let before = query_hardening_observation(&file)?;
+    if before.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        return Err(HardeningError::WrongEntryType);
+    }
+    validate_reparse_facts(before.attributes, before.reparse_tag)?;
+    validate_wrapper_link_count(before.link_count)?;
+    if !(MINIMUM_PROTECTED_WRAPPER_LENGTH..=MAXIMUM_PROTECTED_WRAPPER_LENGTH).contains(&before.size)
+    {
+        return Err(HardeningError::WrongEntryType);
+    }
+    validate_approved_wrapper_name(path, expected_name)?;
+    validate_same_volume(&parent.initial, &before)?;
+    exact_child_final_path(
+        &parent.initial.final_path,
+        &before.final_path,
+        &ascii_units(expected_name),
+    )?;
+
+    mutation();
+    let loaded = reader(&mut file, before.size).map_err(|_| HardeningError::ReadUnavailable)?;
+    EncodedProtectedWrapper::validate_authentication_key_bytes(loaded.as_bytes())
+        .map_err(|_| HardeningError::WrapperInvalid)?;
+    let after = query_hardening_observation(&file)?;
+    validate_stable_observations(Some(&before), Some(&after))?;
+    let directory_identities_after = retained
+        .iter()
+        .map(|directory| query_handle_identity(&directory.handle))
+        .collect::<Result<Vec<_>, _>>()?;
+    if directory_identities_before != directory_identities_after
+        || retained
+            .iter()
+            .map(|directory| directory.initial.identity)
+            .ne(directory_identities_after)
+    {
+        return Err(HardeningError::IdentityChanged);
+    }
+    Ok(loaded.as_bytes().to_vec())
+}
+
+fn validate_approved_wrapper_name(path: &Path, expected_name: &str) -> Result<(), HardeningError> {
+    if path.file_name() != Some(OsStr::new(expected_name)) {
+        return Err(HardeningError::FinalPathMismatch);
+    }
+    Ok(())
+}
+// PRODUCTION READ-HARDENING CORE END.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,10 +692,6 @@ mod tests {
         buffer.as_mut_ptr()
     }
 
-    fn checked_buffer_length(length: usize) -> Option<u32> {
-        u32::try_from(length).ok()
-    }
-
     #[derive(Clone, Copy, Eq, PartialEq)]
     pub(crate) enum TemporaryPublicationError {
         PathEncodingFailed,
@@ -210,6 +724,16 @@ mod tests {
                 Self::InitialPublicationFailed => "InitialPublicationFailed",
                 Self::StateChangedDuringInspection => "StateChangedDuringInspection",
             })
+        }
+    }
+
+    impl From<HardeningError> for TemporaryPublicationError {
+        fn from(error: HardeningError) -> Self {
+            match error {
+                HardeningError::PathUnavailable => Self::PathEncodingFailed,
+                HardeningError::WrongEntryType => Self::EntryTypeInvalid,
+                _ => Self::OpenFailed,
+            }
         }
     }
 
@@ -315,18 +839,6 @@ mod tests {
         Ok(())
     }
 
-    fn encode_utf16_path(path: &Path) -> Result<Vec<u16>, TemporaryPublicationError> {
-        let mut encoded = Vec::new();
-        for unit in path.as_os_str().encode_wide() {
-            if unit == 0 {
-                return Err(TemporaryPublicationError::PathEncodingFailed);
-            }
-            encoded.push(unit);
-        }
-        encoded.push(0);
-        Ok(encoded)
-    }
-
     fn create_stage_file(path: &[u16]) -> Result<OwnedHandle, TemporaryPublicationError> {
         // SAFETY: `path` is NUL-terminated and lives for the call; optional pointers
         // are null, and no overlapped I/O flag is supplied.
@@ -356,31 +868,6 @@ mod tests {
         // SAFETY: `raw` is a fresh successful CreateFileW handle and ownership is
         // transferred immediately to exactly one OwnedHandle.
         Ok(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
-    }
-
-    fn open_for_read(path: &[u16]) -> Result<File, TemporaryPublicationError> {
-        // SAFETY: `path` is NUL-terminated and lives for the call; optional pointers
-        // are null, and no overlapped I/O flag is supplied.
-        let raw = unsafe {
-            CreateFileW(
-                path.as_ptr(),
-                ACTIVE_READ_ACCESS,
-                ACTIVE_READ_SHARE,
-                NULL_CREATE_SECURITY_ATTRIBUTES,
-                ACTIVE_READ_DISPOSITION,
-                ACTIVE_READ_FLAGS,
-                NULL_CREATE_TEMPLATE_HANDLE,
-            )
-        };
-        if raw == INVALID_HANDLE_VALUE {
-            // SAFETY: called immediately after the failed native operation.
-            let _native_error = unsafe { GetLastError() };
-            return Err(TemporaryPublicationError::OpenFailed);
-        }
-        // SAFETY: `raw` is a fresh successful CreateFileW handle and ownership is
-        // transferred immediately to exactly one OwnedHandle, then to File.
-        let owned = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
-        Ok(File::from(owned))
     }
 
     fn open_and_validate_directory(
@@ -470,64 +957,6 @@ mod tests {
             .map_err(|_| TemporaryPublicationError::WrapperValidationFailed)?;
         drop(file);
         Ok(())
-    }
-
-    fn validate_disk_handle(file: &File) -> Result<(), TemporaryPublicationError> {
-        let handle = file.as_raw_handle() as HANDLE;
-        // SAFETY: `handle` is owned by the live File for the duration of the call.
-        let file_type = unsafe { GetFileType(handle) };
-        if file_type != FILE_TYPE_DISK {
-            if file_type == 0 {
-                // SAFETY: called immediately after the potentially failed native operation.
-                let _native_error = unsafe { GetLastError() };
-            }
-            return Err(TemporaryPublicationError::EntryTypeInvalid);
-        }
-        Ok(())
-    }
-
-    fn query_entry_information(
-        file: &File,
-    ) -> Result<(FILE_STANDARD_INFO, FILE_ATTRIBUTE_TAG_INFO), TemporaryPublicationError> {
-        let handle = file.as_raw_handle() as HANDLE;
-        let mut standard = FILE_STANDARD_INFO::default();
-        let standard_size = checked_buffer_length(std::mem::size_of::<FILE_STANDARD_INFO>())
-            .ok_or(TemporaryPublicationError::OpenFailed)?;
-        // SAFETY: `standard` is initialized writable storage of exactly the reported
-        // checked size, and `handle` remains owned by the live File.
-        let standard_ok = unsafe {
-            GetFileInformationByHandleEx(
-                handle,
-                FileStandardInfo,
-                (&raw mut standard).cast::<c_void>(),
-                standard_size,
-            )
-        };
-        if standard_ok == 0 {
-            // SAFETY: called immediately after the failed native operation.
-            let _native_error = unsafe { GetLastError() };
-            return Err(TemporaryPublicationError::OpenFailed);
-        }
-
-        let mut attributes = FILE_ATTRIBUTE_TAG_INFO::default();
-        let attributes_size = checked_buffer_length(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>())
-            .ok_or(TemporaryPublicationError::OpenFailed)?;
-        // SAFETY: `attributes` is initialized writable storage of exactly the
-        // reported checked size, and `handle` remains owned by the live File.
-        let attributes_ok = unsafe {
-            GetFileInformationByHandleEx(
-                handle,
-                FileAttributeTagInfo,
-                (&raw mut attributes).cast::<c_void>(),
-                attributes_size,
-            )
-        };
-        if attributes_ok == 0 {
-            // SAFETY: called immediately after the failed native operation.
-            let _native_error = unsafe { GetLastError() };
-            return Err(TemporaryPublicationError::OpenFailed);
-        }
-        Ok((standard, attributes))
     }
 
     fn size_from_standard_information(
@@ -1297,437 +1726,12 @@ mod tests {
         fixture.cleanup();
     }
 
-    // HARDENING PROOF START: executable code remains inside the Windows test module.
+    // HARDENING PROOF START: fixture orchestration remains inside the Windows test module.
     const HARDENING_INTERMEDIATE_NAME: &str = "ordinary-component";
-    const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
-    const VOLUME_GUID_PREFIX_UNITS: usize = 49;
-
-    #[derive(Clone, Copy, Eq, PartialEq)]
-    struct HandleIdentity {
-        volume_serial: u64,
-        file_id: [u8; 16],
-    }
-
-    impl fmt::Debug for HandleIdentity {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("HandleIdentity([REDACTED])")
-        }
-    }
-
-    #[derive(Clone, Eq, PartialEq)]
-    struct HardeningObservation {
-        identity: HandleIdentity,
-        size: u64,
-        attributes: u32,
-        reparse_tag: u32,
-        link_count: u32,
-        final_path: Vec<u16>,
-    }
-
-    #[derive(Clone, Copy, Eq, PartialEq)]
-    enum HardeningError {
-        PathUnavailable,
-        ComponentReparse,
-        WrongEntryType,
-        IdentityChanged,
-        HardLinkRejected,
-        FinalPathMismatch,
-        SameVolumeMismatch,
-        InspectionUnavailable,
-        FactsChanged,
-        ReadUnavailable,
-        WrapperInvalid,
-    }
-
-    impl fmt::Debug for HardeningError {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str(match self {
-                Self::PathUnavailable => "PathUnavailable",
-                Self::ComponentReparse => "ComponentReparse",
-                Self::WrongEntryType => "WrongEntryType",
-                Self::IdentityChanged => "IdentityChanged",
-                Self::HardLinkRejected => "HardLinkRejected",
-                Self::FinalPathMismatch => "FinalPathMismatch",
-                Self::SameVolumeMismatch => "SameVolumeMismatch",
-                Self::InspectionUnavailable => "InspectionUnavailable",
-                Self::FactsChanged => "FactsChanged",
-                Self::ReadUnavailable => "ReadUnavailable",
-                Self::WrapperInvalid => "WrapperInvalid",
-            })
-        }
-    }
-
-    struct RetainedDirectory {
-        handle: File,
-        initial: HardeningObservation,
-    }
-
     struct HardeningProof {
         retained_directory_count: usize,
         directory_identities_stable: bool,
         wrapper_facts_stable: bool,
-    }
-
-    fn query_handle_identity(file: &File) -> Result<HandleIdentity, HardeningError> {
-        let mut information = FileIdFileInformation::default();
-        let size = checked_buffer_length(std::mem::size_of::<FileIdFileInformation>())
-            .ok_or(HardeningError::InspectionUnavailable)?;
-        // SAFETY: `information` is initialized writable storage of the exact checked
-        // size and the live File owns `handle` for the duration of the call.
-        let succeeded = unsafe {
-            GetFileInformationByHandleEx(
-                file.as_raw_handle() as HANDLE,
-                FileIdInfo,
-                (&raw mut information).cast::<c_void>(),
-                size,
-            )
-        };
-        if succeeded == 0 {
-            return Err(HardeningError::InspectionUnavailable);
-        }
-        Ok(HandleIdentity {
-            volume_serial: information.VolumeSerialNumber,
-            file_id: information.FileId.Identifier,
-        })
-    }
-
-    fn query_link_count(file: &File) -> Result<u32, HardeningError> {
-        let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: `information` is initialized writable storage and the live File
-        // owns the handle for the duration of the call.
-        let succeeded = unsafe {
-            GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &raw mut information)
-        };
-        if succeeded == 0 {
-            return Err(HardeningError::InspectionUnavailable);
-        }
-        Ok(information.nNumberOfLinks)
-    }
-
-    fn query_hardening_observation(file: &File) -> Result<HardeningObservation, HardeningError> {
-        validate_disk_handle(file).map_err(|_| HardeningError::WrongEntryType)?;
-        let (standard, attribute_tag) =
-            query_entry_information(file).map_err(|_| HardeningError::InspectionUnavailable)?;
-        let size = u64::try_from(standard.EndOfFile).map_err(|_| HardeningError::WrongEntryType)?;
-        Ok(HardeningObservation {
-            identity: query_handle_identity(file)?,
-            size,
-            attributes: attribute_tag.FileAttributes,
-            reparse_tag: attribute_tag.ReparseTag,
-            link_count: query_link_count(file)?,
-            final_path: query_bounded_final_guid_path(file)?,
-        })
-    }
-
-    fn query_bounded_final_guid_path(file: &File) -> Result<Vec<u16>, HardeningError> {
-        let handle = file.as_raw_handle() as HANDLE;
-        // SAFETY: this is the documented size query and the live File retains the
-        // handle; no output storage is accessed.
-        let required = unsafe {
-            GetFinalPathNameByHandleW(
-                handle,
-                std::ptr::null_mut(),
-                0,
-                NORMALIZED_GUID_FINAL_PATH_FLAGS,
-            )
-        };
-        let capacity = usize::try_from(required).map_err(|_| HardeningError::PathUnavailable)?;
-        if required == 0 || capacity > MAXIMUM_FINAL_PATH_UNITS {
-            return Err(HardeningError::PathUnavailable);
-        }
-        let mut output = vec![0_u16; capacity];
-        let capacity_u32 =
-            checked_buffer_length(capacity).ok_or(HardeningError::PathUnavailable)?;
-        // SAFETY: `output` is initialized writable storage of the checked capacity
-        // and the live File retains the handle for the call.
-        let written = unsafe {
-            GetFinalPathNameByHandleW(
-                handle,
-                output.as_mut_ptr(),
-                capacity_u32,
-                NORMALIZED_GUID_FINAL_PATH_FLAGS,
-            )
-        };
-        let written = usize::try_from(written).map_err(|_| HardeningError::PathUnavailable)?;
-        if written == 0 || written >= output.len() || written > MAXIMUM_FINAL_PATH_UNITS {
-            return Err(HardeningError::PathUnavailable);
-        }
-        output.truncate(written);
-        Ok(output)
-    }
-
-    fn validate_reparse_facts(attributes: u32, tag: u32) -> Result<(), HardeningError> {
-        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || tag != 0 {
-            return Err(HardeningError::ComponentReparse);
-        }
-        Ok(())
-    }
-
-    fn validate_wrapper_link_count(link_count: u32) -> Result<(), HardeningError> {
-        if link_count != 1 {
-            return Err(HardeningError::HardLinkRejected);
-        }
-        Ok(())
-    }
-
-    fn ascii_units(value: &str) -> Vec<u16> {
-        value.encode_utf16().collect()
-    }
-
-    fn is_ascii_hex(unit: u16) -> bool {
-        (b'0' as u16..=b'9' as u16).contains(&unit)
-            || (b'a' as u16..=b'f' as u16).contains(&unit)
-            || (b'A' as u16..=b'F' as u16).contains(&unit)
-    }
-
-    fn ascii_hex_fold(unit: u16) -> u16 {
-        if (b'A' as u16..=b'F' as u16).contains(&unit) {
-            unit + u16::from(b'a' - b'A')
-        } else {
-            unit
-        }
-    }
-
-    fn validated_volume_guid_prefix(path: &[u16]) -> Result<&[u16], HardeningError> {
-        if path.is_empty()
-            || path.len() > MAXIMUM_FINAL_PATH_UNITS
-            || path.contains(&0)
-            || path.len() < VOLUME_GUID_PREFIX_UNITS
-        {
-            return Err(HardeningError::PathUnavailable);
-        }
-        let fixed_prefix = ascii_units(r"\\?\Volume{");
-        if path.get(..fixed_prefix.len()) != Some(fixed_prefix.as_slice())
-            || path[47] != b'}' as u16
-            || path[48] != b'\\' as u16
-        {
-            return Err(HardeningError::FinalPathMismatch);
-        }
-        for (offset, unit) in path[11..47].iter().copied().enumerate() {
-            if matches!(offset, 8 | 13 | 18 | 23) {
-                if unit != b'-' as u16 {
-                    return Err(HardeningError::FinalPathMismatch);
-                }
-            } else if !is_ascii_hex(unit) {
-                return Err(HardeningError::FinalPathMismatch);
-            }
-        }
-        Ok(&path[..VOLUME_GUID_PREFIX_UNITS])
-    }
-
-    fn same_volume_guid(left: &[u16], right: &[u16]) -> Result<bool, HardeningError> {
-        let left = validated_volume_guid_prefix(left)?;
-        let right = validated_volume_guid_prefix(right)?;
-        Ok(left[..11] == right[..11]
-            && left[47..] == right[47..]
-            && left[11..47]
-                .iter()
-                .zip(&right[11..47])
-                .all(|(left, right)| ascii_hex_fold(*left) == ascii_hex_fold(*right)))
-    }
-
-    fn exact_child_final_path(
-        parent: &[u16],
-        actual: &[u16],
-        expected_component: &[u16],
-    ) -> Result<(), HardeningError> {
-        if expected_component.is_empty()
-            || expected_component
-                .iter()
-                .any(|unit| matches!(*unit, 0 | 47 | 92))
-            || !same_volume_guid(parent, actual)?
-        {
-            return Err(HardeningError::FinalPathMismatch);
-        }
-        let mut expected = parent.to_vec();
-        if expected.last() != Some(&(b'\\' as u16)) {
-            expected.push(b'\\' as u16);
-        }
-        expected.extend_from_slice(expected_component);
-        if expected.len() != actual.len()
-            || expected[..11] != actual[..11]
-            || expected[47..] != actual[47..]
-            || !expected[11..47]
-                .iter()
-                .zip(&actual[11..47])
-                .all(|(left, right)| ascii_hex_fold(*left) == ascii_hex_fold(*right))
-        {
-            return Err(HardeningError::FinalPathMismatch);
-        }
-        Ok(())
-    }
-
-    fn validate_same_volume(
-        parent: &HardeningObservation,
-        child: &HardeningObservation,
-    ) -> Result<(), HardeningError> {
-        if parent.identity.volume_serial != child.identity.volume_serial
-            || !same_volume_guid(&parent.final_path, &child.final_path)?
-        {
-            return Err(HardeningError::SameVolumeMismatch);
-        }
-        Ok(())
-    }
-
-    fn open_hardened_directory(
-        path: &Path,
-        parent: Option<(&HardeningObservation, &[u16])>,
-    ) -> Result<RetainedDirectory, HardeningError> {
-        let encoded = encode_utf16_path(path).map_err(|_| HardeningError::PathUnavailable)?;
-        // SAFETY: `encoded` is NUL-terminated and live for the call; the exact
-        // directory flags open the entry itself and request no mutation access.
-        let raw = unsafe {
-            CreateFileW(
-                encoded.as_ptr(),
-                DIRECTORY_OPEN_ACCESS,
-                DIRECTORY_OPEN_SHARE,
-                NULL_CREATE_SECURITY_ATTRIBUTES,
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                NULL_CREATE_TEMPLATE_HANDLE,
-            )
-        };
-        if raw == INVALID_HANDLE_VALUE {
-            return Err(HardeningError::InspectionUnavailable);
-        }
-        // SAFETY: ownership of the fresh successful handle is transferred once.
-        let handle = File::from(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) });
-        let observation = query_hardening_observation(&handle)?;
-        if observation.attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
-            return Err(HardeningError::WrongEntryType);
-        }
-        validate_reparse_facts(observation.attributes, observation.reparse_tag)?;
-        validated_volume_guid_prefix(&observation.final_path)?;
-        if let Some((parent, expected_component)) = parent {
-            validate_same_volume(parent, &observation)?;
-            exact_child_final_path(
-                &parent.final_path,
-                &observation.final_path,
-                expected_component,
-            )?;
-        }
-        Ok(RetainedDirectory {
-            handle,
-            initial: observation,
-        })
-    }
-
-    fn validate_stable_observations(
-        before: Option<&HardeningObservation>,
-        after: Option<&HardeningObservation>,
-    ) -> Result<(), HardeningError> {
-        let (before, after) = before
-            .zip(after)
-            .ok_or(HardeningError::InspectionUnavailable)?;
-        if before.identity.volume_serial != after.identity.volume_serial {
-            return Err(HardeningError::SameVolumeMismatch);
-        }
-        if before.identity.file_id != after.identity.file_id {
-            return Err(HardeningError::IdentityChanged);
-        }
-        if before.link_count != after.link_count {
-            return Err(HardeningError::HardLinkRejected);
-        }
-        if before.final_path != after.final_path {
-            return Err(HardeningError::FinalPathMismatch);
-        }
-        if before.identity.volume_serial != after.identity.volume_serial
-            || !same_volume_guid(&before.final_path, &after.final_path)?
-        {
-            return Err(HardeningError::SameVolumeMismatch);
-        }
-        if before.size != after.size
-            || before.attributes != after.attributes
-            || before.reparse_tag != after.reparse_tag
-        {
-            return Err(HardeningError::FactsChanged);
-        }
-        Ok(())
-    }
-
-    fn inspect_hardened_wrapper(
-        path: &Path,
-        expected_name: &str,
-        retained: &[RetainedDirectory],
-    ) -> Result<Vec<u8>, HardeningError> {
-        inspect_hardened_wrapper_with(
-            path,
-            expected_name,
-            retained,
-            || {},
-            read_bounded_protected_wrapper,
-        )
-    }
-
-    fn inspect_hardened_wrapper_with<M, R>(
-        path: &Path,
-        expected_name: &str,
-        retained: &[RetainedDirectory],
-        mutation: M,
-        reader: R,
-    ) -> Result<Vec<u8>, HardeningError>
-    where
-        M: FnOnce(),
-        R: FnOnce(&mut File, u64) -> Result<super::super::ProtectedWrapperBytes, BoundedReadError>,
-    {
-        let parent = retained
-            .last()
-            .ok_or(HardeningError::InspectionUnavailable)?;
-        let directory_identities_before = retained
-            .iter()
-            .map(|directory| query_handle_identity(&directory.handle))
-            .collect::<Result<Vec<_>, _>>()?;
-        let encoded = encode_utf16_path(path).map_err(|_| HardeningError::PathUnavailable)?;
-        let mut file =
-            open_for_read(&encoded).map_err(|_| HardeningError::InspectionUnavailable)?;
-        let before = query_hardening_observation(&file)?;
-        if before.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-            return Err(HardeningError::WrongEntryType);
-        }
-        validate_reparse_facts(before.attributes, before.reparse_tag)?;
-        validate_wrapper_link_count(before.link_count)?;
-        if !(MINIMUM_PROTECTED_WRAPPER_LENGTH..=MAXIMUM_PROTECTED_WRAPPER_LENGTH)
-            .contains(&before.size)
-        {
-            return Err(HardeningError::WrongEntryType);
-        }
-        validate_approved_wrapper_name(path, expected_name)?;
-        validate_same_volume(&parent.initial, &before)?;
-        exact_child_final_path(
-            &parent.initial.final_path,
-            &before.final_path,
-            &ascii_units(expected_name),
-        )?;
-
-        mutation();
-        let loaded = reader(&mut file, before.size).map_err(|_| HardeningError::ReadUnavailable)?;
-        EncodedProtectedWrapper::validate_authentication_key_bytes(loaded.as_bytes())
-            .map_err(|_| HardeningError::WrapperInvalid)?;
-        let after = query_hardening_observation(&file)?;
-        validate_stable_observations(Some(&before), Some(&after))?;
-        let directory_identities_after = retained
-            .iter()
-            .map(|directory| query_handle_identity(&directory.handle))
-            .collect::<Result<Vec<_>, _>>()?;
-        if directory_identities_before != directory_identities_after
-            || retained
-                .iter()
-                .map(|directory| directory.initial.identity)
-                .ne(directory_identities_after)
-        {
-            return Err(HardeningError::IdentityChanged);
-        }
-        Ok(loaded.as_bytes().to_vec())
-    }
-
-    fn validate_approved_wrapper_name(
-        path: &Path,
-        expected_name: &str,
-    ) -> Result<(), HardeningError> {
-        if path.file_name() != Some(OsStr::new(expected_name)) {
-            return Err(HardeningError::FinalPathMismatch);
-        }
-        Ok(())
     }
 
     fn open_retained_hardening_directories(
@@ -1769,7 +1773,7 @@ mod tests {
             HARDENING_INTERMEDIATE_NAME,
             &fixture.paths,
         )?;
-        inspect_hardened_wrapper(leaf, expected_name, &retained)?;
+        inspect_hardened_authentication_key_wrapper(leaf, expected_name, &retained)?;
         Ok(HardeningProof {
             retained_directory_count: retained.len(),
             directory_identities_stable: true,
@@ -2031,7 +2035,7 @@ mod tests {
 
             let mutation_calls = Cell::new(0_u8);
             let bounded_read_calls = Cell::new(0_u8);
-            let result = inspect_hardened_wrapper_with(
+            let result = inspect_hardened_authentication_key_wrapper_with(
                 &fixture.wrapper,
                 expected_name,
                 &retained,
@@ -7078,7 +7082,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_tree_handle_path_hardening_errors_identity_and_source_are_redacted_and_test_only() {
+    fn normal_tree_handle_path_hardening_core_is_production_compiled_private_and_redacted() {
         let identity = HandleIdentity {
             volume_serial: 987_654_321,
             file_id: [222; 16],
@@ -7106,7 +7110,54 @@ mod tests {
         }
         let source = include_str!("windows_filesystem.rs");
         let (production, tests) = source.split_once("#[cfg(test)]").unwrap();
-        assert!(!production.contains("fn query_handle_identity"));
+        let core = production
+            .split_once("// PRODUCTION READ-HARDENING CORE START")
+            .unwrap()
+            .1
+            .split_once("// PRODUCTION READ-HARDENING CORE END")
+            .unwrap()
+            .0;
+        for required in [
+            "fn encode_utf16_path",
+            "fn open_for_read",
+            "fn query_entry_information",
+            "fn query_handle_identity",
+            "fn query_link_count",
+            "fn query_bounded_final_guid_path",
+            "fn validate_reparse_facts",
+            "fn validate_wrapper_link_count",
+            "fn exact_child_final_path",
+            "fn validate_same_volume",
+            "fn validate_stable_observations",
+            "fn inspect_hardened_authentication_key_wrapper",
+        ] {
+            assert!(
+                core.contains(required),
+                "missing production core: {required}"
+            );
+            assert!(
+                !tests.contains(&format!("\n    {required}")),
+                "duplicate test-only hardening implementation: {required}"
+            );
+        }
+        for forbidden in [
+            "GENERIC_WRITE",
+            "CREATE_NEW",
+            "MoveFileExW(",
+            "ReplaceFileW(",
+            "FlushFileBuffers(",
+            "remove_file",
+            "remove_dir",
+            "rename(",
+            "hard_link(",
+            "DeviceIoControl",
+            "GetDriveTypeW(",
+        ] {
+            assert!(
+                !core.contains(forbidden),
+                "forbidden production core: {forbidden}"
+            );
+        }
         assert!(!production.contains("fn prove_normal_tree_hardening"));
         let hardening = tests
             .split_once("// HARDENING PROOF START")
@@ -7577,7 +7628,7 @@ mod tests {
         ]);
         assert_eq!(
             encode_utf16_path(Path::new(&with_nul)),
-            Err(TemporaryPublicationError::PathEncodingFailed)
+            Err(HardeningError::PathUnavailable)
         );
     }
 
