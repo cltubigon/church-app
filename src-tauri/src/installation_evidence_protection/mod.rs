@@ -18,6 +18,7 @@ use crate::{
         ParsedUntrustedAuthenticatedEnvelopeV1, verify_authenticated_envelope_v1,
     },
     installation_evidence_authentication_key::EvidenceAuthenticationKey,
+    installation_evidence_contract::ParsedUntrustedInstallationEvidenceContract,
 };
 #[cfg(windows)]
 use crate::{
@@ -50,6 +51,7 @@ pub(crate) enum ProtectionStageError {
     UnsupportedProtectedKeyVersion,
     GenerationMismatch,
     AuthenticationFailed,
+    PlaintextParseFailed,
 }
 
 impl fmt::Debug for ProtectionStageError {
@@ -64,6 +66,7 @@ impl fmt::Debug for ProtectionStageError {
             Self::UnsupportedProtectedKeyVersion => "UnsupportedProtectedKeyVersion",
             Self::GenerationMismatch => "GenerationMismatch",
             Self::AuthenticationFailed => "AuthenticationFailed",
+            Self::PlaintextParseFailed => "PlaintextParseFailed",
         })
     }
 }
@@ -324,6 +327,14 @@ fn match_authenticated_installation_evidence_generation(
     authenticated_envelope
         .match_generation(&recovered_generation_identifier)
         .map_err(|_| ProtectionStageError::GenerationMismatch)
+}
+
+fn parse_generation_matched_installation_evidence_plaintext(
+    matched_envelope: GenerationMatchedAuthenticatedEnvelopeV1,
+) -> Result<ParsedUntrustedInstallationEvidenceContract, ProtectionStageError> {
+    matched_envelope
+        .parse_inner_plaintext()
+        .map_err(|_| ProtectionStageError::PlaintextParseFailed)
 }
 
 #[cfg(windows)]
@@ -587,6 +598,29 @@ mod tests {
         hmac.update(&bytes[..194]);
         bytes[194..226].copy_from_slice(&hmac.finalize().into_bytes());
         bytes.to_vec()
+    }
+
+    fn matched_envelope_with_inner_plaintext(
+        inner_plaintext: [u8; 164],
+    ) -> GenerationMatchedAuthenticatedEnvelopeV1 {
+        let key_wrapper = dummy_wrapper(ProtectedObjectKind::AuthenticationKey);
+        let evidence_wrapper = dummy_wrapper(ProtectedObjectKind::AuthenticatedEvidence);
+        let mut envelope_bytes = *encoded_envelope(KEY, IDENTIFIER).as_bytes();
+        envelope_bytes[30..194].copy_from_slice(&inner_plaintext);
+        let mut hmac = Hmac::<Sha256>::new_from_slice(&KEY).unwrap();
+        hmac.update(&envelope_bytes[..194]);
+        envelope_bytes[194..226].copy_from_slice(&hmac.finalize().into_bytes());
+        let fake = FakeProtector::with_unprotected([
+            key_payload(KEY, IDENTIFIER),
+            envelope_bytes.to_vec(),
+        ]);
+
+        recover_and_authenticate_in_memory_with(
+            &fake,
+            key_wrapper.as_bytes(),
+            evidence_wrapper.as_bytes(),
+        )
+        .expect("retagged test-owned plaintext must authenticate and generation-match")
     }
 
     #[test]
@@ -1888,6 +1922,188 @@ mod tests {
     }
 
     #[test]
+    fn generation_matched_plaintext_parse_boundary_returns_exact_existing_parsed_type() {
+        let canonical_plaintext = *plaintext().as_bytes();
+        let expected = ParsedUntrustedInstallationEvidenceContract::parse_v1(&canonical_plaintext)
+            .expect("canonical synthetic plaintext must parse");
+        let parsed = parse_generation_matched_installation_evidence_plaintext(
+            matched_envelope_with_inner_plaintext(canonical_plaintext),
+        )
+        .expect("canonical generation-matched plaintext must parse");
+
+        fn require_exact_result_type(_: ParsedUntrustedInstallationEvidenceContract) {}
+        require_exact_result_type(parsed);
+        assert_eq!(parsed, expected);
+
+        let parsed_debug = format!("{parsed:?}");
+        assert!(parsed_debug.contains("ParsedUntrustedInstallationEvidenceContract"));
+        assert!(parsed_debug.contains("[REDACTED]"));
+        for sensitive in [
+            "io.github.cltubigon.churchapp",
+            "101112131415161718191a1b1c1d1e1f",
+            "3131313131313131",
+            "4242424242424242",
+            "5353535353535353",
+        ] {
+            assert!(!parsed_debug.contains(sensitive));
+        }
+    }
+
+    #[test]
+    fn generation_matched_plaintext_parse_boundary_maps_malformed_framing_to_one_coarse_error() {
+        let canonical_plaintext = *plaintext().as_bytes();
+        let cases: [(&str, [u8; 164]); 3] = [
+            ("wrong magic", {
+                let mut malformed = canonical_plaintext;
+                malformed[0] ^= 1;
+                malformed
+            }),
+            ("unsupported version", {
+                let mut malformed = canonical_plaintext;
+                malformed[8..10].copy_from_slice(&2_u16.to_be_bytes());
+                malformed
+            }),
+            ("wrong declared payload length", {
+                let mut malformed = canonical_plaintext;
+                malformed[10..12].copy_from_slice(&151_u16.to_be_bytes());
+                malformed
+            }),
+        ];
+
+        for (case, malformed_plaintext) in cases {
+            let error = parse_generation_matched_installation_evidence_plaintext(
+                matched_envelope_with_inner_plaintext(malformed_plaintext),
+            )
+            .expect_err(case);
+            assert_eq!(error, ProtectionStageError::PlaintextParseFailed);
+            assert_eq!(format!("{error:?}"), "PlaintextParseFailed");
+        }
+    }
+
+    #[test]
+    fn generation_matched_plaintext_parse_boundary_accepts_parseable_structural_failure() {
+        let mut structurally_invalid_plaintext = *plaintext().as_bytes();
+        structurally_invalid_plaintext[12] ^= 1;
+
+        let parsed = parse_generation_matched_installation_evidence_plaintext(
+            matched_envelope_with_inner_plaintext(structurally_invalid_plaintext),
+        )
+        .expect("inner framing remains parseable before structural validation");
+
+        assert_eq!(
+            parsed.validate_structure(),
+            Err(ContractValidationError::WrongEvidenceFormatIdentity)
+        );
+    }
+
+    #[test]
+    fn generation_matched_plaintext_parse_boundary_source_proves_private_narrow_transition() {
+        const SOURCE: &str = include_str!("mod.rs");
+        const CONTRACT_SOURCE: &str = include_str!("../installation_evidence_contract.rs");
+        const ENVELOPE_SOURCE: &str =
+            include_str!("../installation_evidence_authenticated_envelope.rs");
+        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let definition_marker = "fn parse_generation_matched_installation_evidence_plaintext(";
+
+        assert_eq!(production_source.matches(definition_marker).count(), 1);
+        assert_eq!(
+            production_source
+                .matches("parse_generation_matched_installation_evidence_plaintext(")
+                .count(),
+            1
+        );
+        let before_definition = production_source.split_once(definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(!declaration_attributes.contains("cfg"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let boundary = production_source
+            .split_once(definition_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(boundary.contains("matched_envelope: GenerationMatchedAuthenticatedEnvelopeV1"));
+        assert!(
+            boundary.contains(
+                "Result<ParsedUntrustedInstallationEvidenceContract, ProtectionStageError>"
+            )
+        );
+        assert_eq!(boundary.matches(".parse_inner_plaintext()").count(), 1);
+        assert_eq!(
+            boundary
+                .matches(".map_err(|_| ProtectionStageError::PlaintextParseFailed)")
+                .count(),
+            1
+        );
+
+        for excluded in [
+            "validate_structure",
+            "UnvalidatedInstallationEvidenceContract::new",
+            "as_bytes",
+            "into_bytes",
+            "copy_from_slice",
+            "get(",
+            "Ok((",
+            "load_active_installation_evidence_wrapper_pair",
+            "WindowsCurrentUserDpapi",
+            "ValidatedProtectedWrapper::parse",
+            "verify_authenticated_envelope_v1",
+            "match_generation",
+            "rusqlite",
+            "database",
+            "setup",
+            "startup",
+            "tauri",
+            "unsafe",
+            "retry",
+            "fallback",
+            "repair",
+            "recover",
+            "replace",
+        ] {
+            assert!(
+                !boundary.contains(excluded),
+                "unexpected parse-boundary term: {excluded}"
+            );
+        }
+        assert!(!boundary.contains(&["std", "::fs"].concat()));
+        assert!(!boundary.contains(&["installation", "_state"].concat()));
+        for parsed_field in [
+            "evidence_format_identity",
+            "evidence_format_version",
+            "application_identifier",
+            "application_database_format_identity",
+            "parish_identifier",
+            "installation_identifier",
+            "installation_generation",
+            "recovery_or_replacement_generation",
+            "database_key_generation_identifier",
+            "setup_publication_identifier",
+            "creation_timestamp",
+        ] {
+            assert!(!boundary.contains(parsed_field));
+        }
+
+        assert!(ENVELOPE_SOURCE.contains(
+            "formatter.write_str(\"GenerationMatchedAuthenticatedEnvelopeV1([REDACTED])\")"
+        ));
+        assert!(
+            CONTRACT_SOURCE
+                .contains(".debug_struct(\"ParsedUntrustedInstallationEvidenceContract\")")
+        );
+        assert!(CONTRACT_SOURCE.contains(".field(\"installation_identifier\", &\"[REDACTED]\")"));
+        assert!(
+            CONTRACT_SOURCE
+                .contains(".field(\"database_key_generation_identifier\", &\"[REDACTED]\")")
+        );
+        assert!(
+            CONTRACT_SOURCE.contains(".field(\"setup_publication_identifier\", &\"[REDACTED]\")")
+        );
+    }
+
+    #[test]
     fn authenticated_malformed_plaintext_reaches_only_later_logical_failures() {
         let key_wrapper = dummy_wrapper(ProtectedObjectKind::AuthenticationKey);
         let evidence_wrapper = dummy_wrapper(ProtectedObjectKind::AuthenticatedEvidence);
@@ -1938,6 +2154,7 @@ mod tests {
             ProtectionStageError::UnsupportedProtectedKeyVersion,
             ProtectionStageError::GenerationMismatch,
             ProtectionStageError::AuthenticationFailed,
+            ProtectionStageError::PlaintextParseFailed,
         ] {
             let debug = format!("{error:?}");
             assert!(!debug.contains("CHDPAPI"));
