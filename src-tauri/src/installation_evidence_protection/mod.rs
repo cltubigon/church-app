@@ -312,6 +312,15 @@ fn authenticate_unprotected_installation_evidence(
     Ok((authenticated_envelope, recovered_generation_identifier))
 }
 
+fn match_authenticated_installation_evidence_generation(
+    authenticated_envelope: CryptographicallyAuthenticatedEnvelopeV1,
+    recovered_generation_identifier: EvidenceAuthenticationKeyGenerationIdentifier,
+) -> Result<GenerationMatchedAuthenticatedEnvelopeV1, ProtectionStageError> {
+    authenticated_envelope
+        .match_generation(&recovered_generation_identifier)
+        .map_err(|_| ProtectionStageError::GenerationMismatch)
+}
+
 #[cfg(windows)]
 pub(crate) fn recover_and_authenticate_in_memory(
     protected_key_wrapper: &[u8],
@@ -951,6 +960,113 @@ mod tests {
             .unwrap()
             .0;
         assert!(secure_raw_drop.contains("self.bytes.zeroize();"));
+    }
+
+    #[test]
+    fn generation_matched_evidence_boundary_returns_exact_existing_type_for_matching_identifiers() {
+        let (authenticated_envelope, recovered_generation_identifier) =
+            authenticate_unprotected_installation_evidence(
+                DecodedProtectedKeyMaterial::parse(&key_payload(KEY, IDENTIFIER)).unwrap(),
+                UnprotectedBytes::new(encoded_envelope(KEY, IDENTIFIER).as_bytes().to_vec()),
+            )
+            .expect("canonical synthetic evidence must authenticate");
+
+        let matched = match_authenticated_installation_evidence_generation(
+            authenticated_envelope,
+            recovered_generation_identifier,
+        )
+        .expect("matching generation identifiers must succeed");
+
+        fn require_exact_result_type(_: &GenerationMatchedAuthenticatedEnvelopeV1) {}
+        require_exact_result_type(&matched);
+        assert_eq!(
+            format!("{matched:?}"),
+            "GenerationMatchedAuthenticatedEnvelopeV1([REDACTED])"
+        );
+    }
+
+    #[test]
+    fn generation_matched_evidence_boundary_returns_only_coarse_mismatch_error() {
+        const DIFFERENT_IDENTIFIER: [u8; 16] = [0x77; 16];
+        let (authenticated_envelope, recovered_generation_identifier) =
+            authenticate_unprotected_installation_evidence(
+                DecodedProtectedKeyMaterial::parse(&key_payload(KEY, DIFFERENT_IDENTIFIER))
+                    .unwrap(),
+                UnprotectedBytes::new(encoded_envelope(KEY, IDENTIFIER).as_bytes().to_vec()),
+            )
+            .expect("generation matching must remain separate from HMAC authentication");
+
+        let error = match_authenticated_installation_evidence_generation(
+            authenticated_envelope,
+            recovered_generation_identifier,
+        )
+        .expect_err("different valid nonzero identifiers must return no matched evidence");
+
+        assert_eq!(error, ProtectionStageError::GenerationMismatch);
+        assert_eq!(format!("{error:?}"), "GenerationMismatch");
+    }
+
+    #[test]
+    fn generation_matched_evidence_boundary_source_proves_private_narrow_transition() {
+        const SOURCE: &str = include_str!("mod.rs");
+        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let definition_marker = "fn match_authenticated_installation_evidence_generation(";
+        assert_eq!(production_source.matches(definition_marker).count(), 1);
+        assert_eq!(
+            production_source
+                .matches("match_authenticated_installation_evidence_generation(")
+                .count(),
+            1
+        );
+
+        let before_definition = production_source.split_once(definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(!declaration_attributes.contains("cfg"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let boundary = production_source
+            .split_once(definition_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(
+            boundary.contains("authenticated_envelope: CryptographicallyAuthenticatedEnvelopeV1")
+        );
+        assert!(boundary.contains(
+            "recovered_generation_identifier: EvidenceAuthenticationKeyGenerationIdentifier"
+        ));
+        assert!(
+            boundary
+                .contains("Result<GenerationMatchedAuthenticatedEnvelopeV1, ProtectionStageError>")
+        );
+        assert_eq!(boundary.matches(".match_generation(").count(), 1);
+        assert!(boundary.contains(".match_generation(&recovered_generation_identifier)"));
+        assert!(boundary.contains(".map_err(|_| ProtectionStageError::GenerationMismatch)"));
+
+        for excluded in [
+            "Ok((",
+            "matches(",
+            "from_bytes",
+            "write_bytes_into",
+            "as_bytes",
+            "parse",
+            "verify_authenticated_envelope_v1",
+            "DecodedProtectedKeyMaterial",
+            "UnprotectedBytes",
+            "ProtectedWrapper",
+            "Dpapi",
+            "rusqlite",
+            "setup",
+            "startup",
+            "tauri",
+            "unsafe",
+        ] {
+            assert!(!boundary.contains(excluded));
+        }
+        assert!(!boundary.contains(&["std", "::fs"].concat()));
+        assert!(!boundary.contains(&["installation", "_state"].concat()));
     }
 
     #[test]
