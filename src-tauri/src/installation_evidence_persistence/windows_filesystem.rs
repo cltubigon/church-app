@@ -40,7 +40,13 @@ use windows_sys::{
     core::{BOOL, PCWSTR, PWSTR},
 };
 
-use crate::installation_evidence_protection::EncodedProtectedWrapper;
+use crate::{
+    installation_evidence_protection::EncodedProtectedWrapper,
+    storage_foundation::{
+        ACTIVE_AUTHENTICATION_KEY_FILENAME, INSTALLATION_EVIDENCE_DIRECTORY_NAME,
+        InstallationEvidencePersistencePaths, PRODUCTION_DATABASE_FILENAME,
+    },
+};
 
 use super::{
     BoundedReadError, MAXIMUM_PROTECTED_WRAPPER_LENGTH, MINIMUM_PROTECTED_WRAPPER_LENGTH,
@@ -576,7 +582,7 @@ fn inspect_hardened_authentication_key_wrapper(
     path: &Path,
     expected_name: &str,
     retained: &[RetainedDirectory],
-) -> Result<Vec<u8>, HardeningError> {
+) -> Result<ProtectedWrapperBytes, HardeningError> {
     inspect_hardened_authentication_key_wrapper_with(
         path,
         expected_name,
@@ -592,7 +598,7 @@ fn inspect_hardened_authentication_key_wrapper_with<M, R>(
     retained: &[RetainedDirectory],
     mutation: M,
     reader: R,
-) -> Result<Vec<u8>, HardeningError>
+) -> Result<ProtectedWrapperBytes, HardeningError>
 where
     M: FnOnce(),
     R: FnOnce(&mut File, u64) -> Result<ProtectedWrapperBytes, BoundedReadError>,
@@ -642,7 +648,7 @@ where
     {
         return Err(HardeningError::IdentityChanged);
     }
-    Ok(loaded.as_bytes().to_vec())
+    Ok(loaded)
 }
 
 fn validate_approved_wrapper_name(path: &Path, expected_name: &str) -> Result<(), HardeningError> {
@@ -650,6 +656,47 @@ fn validate_approved_wrapper_name(path: &Path, expected_name: &str) -> Result<()
         return Err(HardeningError::FinalPathMismatch);
     }
     Ok(())
+}
+
+fn load_active_authentication_key_wrapper(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<ProtectedWrapperBytes, HardeningError> {
+    let active_database = paths.active_database.as_path();
+    let root = active_database
+        .parent()
+        .ok_or(HardeningError::PathUnavailable)?;
+    let evidence_directory = paths.evidence_directory.as_path();
+    let active_authentication_key = paths.active_authentication_key.as_path();
+
+    if active_database != root.join(PRODUCTION_DATABASE_FILENAME)
+        || evidence_directory != root.join(INSTALLATION_EVIDENCE_DIRECTORY_NAME)
+        || active_authentication_key != evidence_directory.join(ACTIVE_AUTHENTICATION_KEY_FILENAME)
+    {
+        return Err(HardeningError::FinalPathMismatch);
+    }
+
+    let parent_path = root.parent().ok_or(HardeningError::PathUnavailable)?;
+    let root_component = root
+        .file_name()
+        .ok_or(HardeningError::PathUnavailable)?
+        .encode_wide()
+        .collect::<Vec<_>>();
+    let parent = open_hardened_directory(parent_path, None)?;
+    let root = open_hardened_directory(root, Some((&parent.initial, root_component.as_slice())))?;
+    let evidence = open_hardened_directory(
+        evidence_directory,
+        Some((
+            &root.initial,
+            &ascii_units(INSTALLATION_EVIDENCE_DIRECTORY_NAME),
+        )),
+    )?;
+    let retained = [parent, root, evidence];
+
+    inspect_hardened_authentication_key_wrapper(
+        active_authentication_key,
+        ACTIVE_AUTHENTICATION_KEY_FILENAME,
+        &retained,
+    )
 }
 // PRODUCTION READ-HARDENING CORE END.
 
@@ -1835,6 +1882,61 @@ mod tests {
     }
 
     impl Drop for HardeningTestRoot {
+        fn drop(&mut self) {
+            if !self.cleaned {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
+
+    struct ActiveWrapperLoaderTestRoot {
+        root: PathBuf,
+        sentinel: PathBuf,
+        paths: InstallationEvidencePersistencePaths,
+        cleaned: bool,
+    }
+
+    impl ActiveWrapperLoaderTestRoot {
+        fn create(active: &[u8]) -> Self {
+            let counter = TEST_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock must follow epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "church-app-active-wrapper-loader-{}-{nanos}-{counter}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("unique active-wrapper loader root must be new");
+            let paths = installation_evidence_persistence_paths(&root);
+            fs::create_dir(paths.evidence_directory.as_path())
+                .expect("exact evidence directory must be created");
+            fs::write(paths.active_authentication_key.as_path(), active)
+                .expect("synthetic active authentication-key wrapper must be written");
+            let sentinel = root.join(SENTINEL_NAME);
+            fs::write(&sentinel, SENTINEL_CONTENT).expect("synthetic sentinel must be written");
+            Self {
+                root,
+                sentinel,
+                paths,
+                cleaned: false,
+            }
+        }
+
+        fn assert_sentinel(&self) {
+            assert_eq!(fs::read(&self.sentinel).unwrap(), SENTINEL_CONTENT);
+        }
+
+        fn cleanup(mut self) -> PathBuf {
+            let removed = self.root.clone();
+            fs::remove_dir_all(&removed).expect("only the exact loader test root is removed");
+            self.cleaned = true;
+            assert!(!removed.exists());
+            removed
+        }
+    }
+
+    impl Drop for ActiveWrapperLoaderTestRoot {
         fn drop(&mut self) {
             if !self.cleaned {
                 let _ = fs::remove_dir_all(&self.root);
@@ -6923,6 +7025,282 @@ mod tests {
         }
     }
     // CONTROLLED STORAGE HOST MATRIX END.
+
+    #[test]
+    fn active_authentication_key_wrapper_loader_loads_exact_owned_redacted_bytes_only() {
+        let expected = authentication_key_wrapper(64, 0xa1);
+        let fixture = ActiveWrapperLoaderTestRoot::create(&expected);
+        let non_active_marker = [0x5a; 15];
+        fs::write(
+            fixture.paths.staged_authentication_key.as_path(),
+            non_active_marker,
+        )
+        .unwrap();
+        fs::write(
+            fixture.paths.active_authenticated_evidence.as_path(),
+            non_active_marker,
+        )
+        .unwrap();
+        fs::write(
+            fixture.paths.staged_authenticated_evidence.as_path(),
+            non_active_marker,
+        )
+        .unwrap();
+
+        let loaded = load_active_authentication_key_wrapper(&fixture.paths).unwrap();
+        assert_eq!(loaded.as_bytes(), expected);
+        assert_eq!(format!("{loaded:?}"), "ProtectedWrapperBytes([REDACTED])");
+        assert_eq!(
+            fixture
+                .paths
+                .active_authentication_key
+                .as_path()
+                .file_name(),
+            Some(OsStr::new(ACTIVE_AUTHENTICATION_KEY_FILENAME))
+        );
+        assert_eq!(
+            ACTIVE_AUTHENTICATION_KEY_FILENAME,
+            "authentication-key.dpapi"
+        );
+        assert_eq!(
+            fs::read(fixture.paths.staged_authentication_key.as_path()).unwrap(),
+            non_active_marker
+        );
+        assert_eq!(
+            fs::read(fixture.paths.active_authenticated_evidence.as_path()).unwrap(),
+            non_active_marker
+        );
+        assert_eq!(
+            fs::read(fixture.paths.staged_authenticated_evidence.as_path()).unwrap(),
+            non_active_marker
+        );
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authentication_key_wrapper_loader_rejects_aggregate_relationship_mismatches() {
+        let expected = authentication_key_wrapper(16, 0xa2);
+        let fixture = ActiveWrapperLoaderTestRoot::create(&expected);
+        let alternate =
+            installation_evidence_persistence_paths(&fixture.root.join("alternate-root"));
+
+        let mut wrong_root = fixture.paths.clone();
+        wrong_root.active_database = alternate.active_database.clone();
+        assert_eq!(
+            load_active_authentication_key_wrapper(&wrong_root),
+            Err(HardeningError::FinalPathMismatch)
+        );
+
+        let mut wrong_evidence_directory = fixture.paths.clone();
+        wrong_evidence_directory.evidence_directory = alternate.evidence_directory.clone();
+        assert_eq!(
+            load_active_authentication_key_wrapper(&wrong_evidence_directory),
+            Err(HardeningError::FinalPathMismatch)
+        );
+
+        let nested =
+            installation_evidence_persistence_paths(&fixture.root.join("nested-direct-root"));
+        let mut wrong_active_parent = fixture.paths.clone();
+        wrong_active_parent.active_authentication_key = nested.active_authentication_key.clone();
+        assert_eq!(
+            load_active_authentication_key_wrapper(&wrong_active_parent),
+            Err(HardeningError::FinalPathMismatch)
+        );
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authentication_key_wrapper_loader_rejects_wrong_active_filename() {
+        let expected = authentication_key_wrapper(16, 0xa3);
+        let fixture = ActiveWrapperLoaderTestRoot::create(&expected);
+        let wrong_name = fixture
+            .paths
+            .evidence_directory
+            .as_path()
+            .join("authentication-key-wrong.dpapi");
+        fs::rename(
+            fixture.paths.active_authentication_key.as_path(),
+            &wrong_name,
+        )
+        .unwrap();
+        assert_eq!(
+            load_active_authentication_key_wrapper(&fixture.paths),
+            Err(HardeningError::InspectionUnavailable)
+        );
+        assert_eq!(fs::read(&wrong_name).unwrap(), expected);
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authentication_key_wrapper_loader_rejects_malformed_and_wrong_kind_wrappers() {
+        let malformed_fixture = ActiveWrapperLoaderTestRoot::create(&[0x31; 15]);
+        assert_eq!(
+            load_active_authentication_key_wrapper(&malformed_fixture.paths),
+            Err(HardeningError::WrapperInvalid)
+        );
+        malformed_fixture.assert_sentinel();
+        malformed_fixture.cleanup();
+
+        let mut wrong_kind = authentication_key_wrapper(16, 0xa4);
+        wrong_kind[9] = 2;
+        let wrong_kind_fixture = ActiveWrapperLoaderTestRoot::create(&wrong_kind);
+        assert_eq!(
+            load_active_authentication_key_wrapper(&wrong_kind_fixture.paths),
+            Err(HardeningError::WrapperInvalid)
+        );
+        wrong_kind_fixture.assert_sentinel();
+        wrong_kind_fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authentication_key_wrapper_loader_rejects_hard_linked_active_before_release() {
+        let expected = authentication_key_wrapper(16, 0xa5);
+        let fixture = ActiveWrapperLoaderTestRoot::create(&expected);
+        let alias = fixture
+            .paths
+            .evidence_directory
+            .as_path()
+            .join("active-loader-hard-link-alias.synthetic");
+        fs::hard_link(fixture.paths.active_authentication_key.as_path(), &alias).unwrap();
+        assert_eq!(
+            load_active_authentication_key_wrapper(&fixture.paths),
+            Err(HardeningError::HardLinkRejected)
+        );
+        assert_eq!(fs::read(&alias).unwrap(), expected);
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authentication_key_wrapper_loader_reuses_reparse_and_stability_policy() {
+        for (attributes, tag) in [
+            (FILE_ATTRIBUTE_REPARSE_POINT, 0),
+            (FILE_ATTRIBUTE_NORMAL, 0xa000_0003),
+        ] {
+            assert_eq!(
+                validate_reparse_facts(attributes, tag),
+                Err(HardeningError::ComponentReparse)
+            );
+        }
+
+        let before = synthetic_observation(
+            31,
+            1,
+            1,
+            r"\\?\Volume{abcdef12-3456-7890-abcd-ef1234567890}\root\leaf",
+        );
+        let mutations = [
+            {
+                let mut value = before.clone();
+                value.identity.file_id[15] ^= 1;
+                (value, HardeningError::IdentityChanged)
+            },
+            {
+                let mut value = before.clone();
+                value.link_count = 2;
+                (value, HardeningError::HardLinkRejected)
+            },
+            {
+                let mut value = before.clone();
+                value.final_path =
+                    ascii_units(r"\\?\Volume{abcdef12-3456-7890-abcd-ef1234567890}\root\other");
+                (value, HardeningError::FinalPathMismatch)
+            },
+            {
+                let mut value = before.clone();
+                value.identity.volume_serial += 1;
+                (value, HardeningError::SameVolumeMismatch)
+            },
+            {
+                let mut value = before.clone();
+                value.size += 1;
+                (value, HardeningError::FactsChanged)
+            },
+            {
+                let mut value = before.clone();
+                value.attributes = FILE_ATTRIBUTE_REPARSE_POINT;
+                (value, HardeningError::FactsChanged)
+            },
+            {
+                let mut value = before.clone();
+                value.reparse_tag = 0xa000_000c;
+                (value, HardeningError::FactsChanged)
+            },
+        ];
+        for (after, expected) in mutations {
+            assert_eq!(
+                validate_stable_observations(Some(&before), Some(&after)),
+                Err(expected)
+            );
+        }
+        assert_eq!(
+            validate_stable_observations(Some(&before), None),
+            Err(HardeningError::InspectionUnavailable)
+        );
+    }
+
+    #[test]
+    fn active_authentication_key_wrapper_loader_is_private_narrow_and_non_authoritative() {
+        let source = include_str!("windows_filesystem.rs");
+        let (production, tests) = source.split_once("#[cfg(test)]").unwrap();
+        assert_eq!(
+            production
+                .matches("fn load_active_authentication_key_wrapper(")
+                .count(),
+            1
+        );
+        assert!(tests.contains("active_authentication_key_wrapper_loader_"));
+        let loader = production
+            .split_once("fn load_active_authentication_key_wrapper(")
+            .unwrap()
+            .1
+            .split_once("// PRODUCTION READ-HARDENING CORE END")
+            .unwrap()
+            .0;
+        for required in [
+            "InstallationEvidencePersistencePaths",
+            "PRODUCTION_DATABASE_FILENAME",
+            "INSTALLATION_EVIDENCE_DIRECTORY_NAME",
+            "ACTIVE_AUTHENTICATION_KEY_FILENAME",
+            "open_hardened_directory",
+            "inspect_hardened_authentication_key_wrapper",
+            "ProtectedWrapperBytes",
+        ] {
+            assert!(
+                loader.contains(required),
+                "missing loader boundary: {required}"
+            );
+        }
+        for forbidden in [
+            "resolve_installation_evidence_persistence_paths",
+            "resolve_production_database_path",
+            "ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME",
+            "STAGED_AUTHENTICATION_KEY_FILENAME",
+            "STAGED_AUTHENTICATED_EVIDENCE_FILENAME",
+            "CryptProtectData",
+            "CryptUnprotectData",
+            "recover_and_authenticate",
+            "Hmac",
+            "rusqlite",
+            "installation_state",
+            "tauri::command",
+            "CreateFileW(",
+            "MoveFileExW(",
+            "ReplaceFileW(",
+            "FlushFileBuffers(",
+            "create_dir",
+            "write(",
+            "remove_",
+        ] {
+            assert!(
+                !loader.contains(forbidden),
+                "forbidden loader authority: {forbidden}"
+            );
+        }
+    }
 
     #[test]
     fn normal_tree_handle_path_hardening_success_retains_components_and_revalidates_facts() {
