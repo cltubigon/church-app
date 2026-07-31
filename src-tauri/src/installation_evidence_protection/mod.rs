@@ -13,9 +13,9 @@ use zeroize::Zeroize;
 use crate::installation_evidence_persistence::ProtectedWrapperBytes;
 use crate::{
     installation_evidence_authenticated_envelope::{
-        EncodedAuthenticatedEnvelopeV1, EvidenceAuthenticationKeyGenerationIdentifier,
-        GenerationMatchedAuthenticatedEnvelopeV1, ParsedUntrustedAuthenticatedEnvelopeV1,
-        verify_authenticated_envelope_v1,
+        CryptographicallyAuthenticatedEnvelopeV1, EncodedAuthenticatedEnvelopeV1,
+        EvidenceAuthenticationKeyGenerationIdentifier, GenerationMatchedAuthenticatedEnvelopeV1,
+        ParsedUntrustedAuthenticatedEnvelopeV1, verify_authenticated_envelope_v1,
     },
     installation_evidence_authentication_key::EvidenceAuthenticationKey,
 };
@@ -286,6 +286,30 @@ fn decode_unprotected_installation_evidence_key_material(
         decoded_authentication_key,
         unprotected_authenticated_evidence,
     ))
+}
+
+/// Returns authenticated evidence first and the recovered key-generation
+/// identifier second. Success establishes only exact envelope length, valid
+/// envelope framing, and HMAC authentication with the decoded key.
+fn authenticate_unprotected_installation_evidence(
+    decoded_key_material: DecodedProtectedKeyMaterial,
+    unprotected_authenticated_evidence: UnprotectedBytes,
+) -> Result<
+    (
+        CryptographicallyAuthenticatedEnvelopeV1,
+        EvidenceAuthenticationKeyGenerationIdentifier,
+    ),
+    ProtectionStageError,
+> {
+    let raw_envelope =
+        RawUntrustedAuthenticatedEnvelopeV1::from_unprotected(&unprotected_authenticated_evidence)?;
+    let parsed_envelope = raw_envelope.parse()?;
+    let (authentication_key, recovered_generation_identifier) = decoded_key_material.into_parts();
+    let authenticated_envelope =
+        verify_authenticated_envelope_v1(parsed_envelope, &authentication_key)
+            .map_err(|_| ProtectionStageError::AuthenticationFailed)?;
+
+    Ok((authenticated_envelope, recovered_generation_identifier))
 }
 
 #[cfg(windows)]
@@ -790,6 +814,143 @@ mod tests {
             .unwrap()
             .0;
         assert!(secure_drop.contains("self.0.zeroize();"));
+    }
+
+    #[test]
+    fn authenticated_evidence_hmac_boundary_returns_authenticated_envelope_then_identifier() {
+        let decoded_key_material =
+            DecodedProtectedKeyMaterial::parse(&key_payload(KEY, IDENTIFIER)).unwrap();
+        let unprotected_authenticated_evidence =
+            UnprotectedBytes::new(encoded_envelope(KEY, IDENTIFIER).as_bytes().to_vec());
+
+        let (authenticated_envelope, recovered_generation_identifier) =
+            authenticate_unprotected_installation_evidence(
+                decoded_key_material,
+                unprotected_authenticated_evidence,
+            )
+            .expect("canonical evidence authenticated by the decoded key must succeed");
+
+        fn require_authenticated_envelope(_: &CryptographicallyAuthenticatedEnvelopeV1) {}
+        fn require_generation_identifier(_: &EvidenceAuthenticationKeyGenerationIdentifier) {}
+        require_authenticated_envelope(&authenticated_envelope);
+        require_generation_identifier(&recovered_generation_identifier);
+        assert!(recovered_generation_identifier.matches(&identifier(IDENTIFIER)));
+        assert_eq!(
+            format!("{authenticated_envelope:?}"),
+            "CryptographicallyAuthenticatedEnvelopeV1([REDACTED])"
+        );
+        assert_eq!(
+            format!("{recovered_generation_identifier:?}"),
+            "EvidenceAuthenticationKeyGenerationIdentifier([REDACTED])"
+        );
+    }
+
+    #[test]
+    fn authenticated_evidence_hmac_boundary_rejects_wrong_lengths_and_malformed_framing() {
+        for evidence in [vec![0x31; 225], vec![0x42; 227]] {
+            let result = authenticate_unprotected_installation_evidence(
+                DecodedProtectedKeyMaterial::parse(&key_payload(KEY, IDENTIFIER)).unwrap(),
+                UnprotectedBytes::new(evidence),
+            );
+            assert_eq!(
+                result.expect_err("wrong evidence length must return no output tuple"),
+                ProtectionStageError::WrapperParseFailed
+            );
+        }
+
+        let mut malformed = *encoded_envelope(KEY, IDENTIFIER).as_bytes();
+        malformed[0] ^= 1;
+        let result = authenticate_unprotected_installation_evidence(
+            DecodedProtectedKeyMaterial::parse(&key_payload(KEY, IDENTIFIER)).unwrap(),
+            UnprotectedBytes::new(malformed.to_vec()),
+        );
+        assert_eq!(
+            result.expect_err("malformed framing must return no output tuple"),
+            ProtectionStageError::AuthenticationFailed
+        );
+    }
+
+    #[test]
+    fn authenticated_evidence_hmac_boundary_rejects_wrong_key_and_corrupted_authenticated_bytes() {
+        let envelope = encoded_envelope(KEY, IDENTIFIER);
+        let wrong_key_result = authenticate_unprotected_installation_evidence(
+            DecodedProtectedKeyMaterial::parse(&key_payload([0x44; 32], IDENTIFIER)).unwrap(),
+            UnprotectedBytes::new(envelope.as_bytes().to_vec()),
+        );
+        assert_eq!(
+            wrong_key_result.expect_err("wrong HMAC key must return no output tuple"),
+            ProtectionStageError::AuthenticationFailed
+        );
+
+        let mut corrupted = *envelope.as_bytes();
+        corrupted[30] ^= 1;
+        let corrupted_result = authenticate_unprotected_installation_evidence(
+            DecodedProtectedKeyMaterial::parse(&key_payload(KEY, IDENTIFIER)).unwrap(),
+            UnprotectedBytes::new(corrupted.to_vec()),
+        );
+        assert_eq!(
+            corrupted_result
+                .expect_err("corrupted authenticated bytes must return no output tuple"),
+            ProtectionStageError::AuthenticationFailed
+        );
+    }
+
+    #[test]
+    fn authenticated_evidence_hmac_boundary_defers_generation_match_and_plaintext_parse() {
+        const DIFFERENT_IDENTIFIER: [u8; 16] = [0x77; 16];
+        let result = authenticate_unprotected_installation_evidence(
+            DecodedProtectedKeyMaterial::parse(&key_payload(KEY, DIFFERENT_IDENTIFIER)).unwrap(),
+            UnprotectedBytes::new(encoded_envelope(KEY, IDENTIFIER).as_bytes().to_vec()),
+        )
+        .expect("a valid HMAC must succeed before separately scoped generation matching");
+        assert!(result.1.matches(&identifier(DIFFERENT_IDENTIFIER)));
+
+        const SOURCE: &str = include_str!("mod.rs");
+        let definition_marker = "fn authenticate_unprotected_installation_evidence(";
+        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(production_source.matches(definition_marker).count(), 1);
+        let before_definition = production_source.split_once(definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(!declaration_attributes.contains("#[cfg(test)]"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let boundary = production_source
+            .split_once(definition_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(boundary.contains("decoded_key_material: DecodedProtectedKeyMaterial"));
+        assert!(boundary.contains("unprotected_authenticated_evidence: UnprotectedBytes"));
+        assert!(boundary.contains("RawUntrustedAuthenticatedEnvelopeV1::from_unprotected"));
+        assert!(boundary.contains("raw_envelope.parse()"));
+        assert!(boundary.contains("decoded_key_material.into_parts()"));
+        assert!(boundary.contains("verify_authenticated_envelope_v1"));
+        assert!(boundary.contains("CryptographicallyAuthenticatedEnvelopeV1"));
+        assert!(boundary.contains("EvidenceAuthenticationKeyGenerationIdentifier"));
+        assert!(!boundary.contains("match_generation"));
+        assert!(!boundary.contains("parse_inner_plaintext"));
+        assert!(!boundary.contains("as_bytes()"));
+        assert!(!boundary.contains("Vec<u8>"));
+        assert_eq!(production_source.matches(definition_marker).count(), 1);
+
+        let secure_unprotected_drop = SOURCE
+            .split_once("impl Drop for UnprotectedBytes")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(secure_unprotected_drop.contains("self.0.zeroize();"));
+        let secure_raw_drop = SOURCE
+            .split_once("impl Drop for RawUntrustedAuthenticatedEnvelopeV1")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(secure_raw_drop.contains("self.bytes.zeroize();"));
     }
 
     #[test]
