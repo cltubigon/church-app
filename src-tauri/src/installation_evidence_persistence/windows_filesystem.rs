@@ -50,8 +50,8 @@ use crate::{
 };
 
 use super::{
-    BoundedReadError, MAXIMUM_PROTECTED_WRAPPER_LENGTH, MINIMUM_PROTECTED_WRAPPER_LENGTH,
-    ProtectedWrapperBytes, read_bounded_protected_wrapper,
+    ActiveInstallationEvidenceWrapperLoadError, BoundedReadError, MAXIMUM_PROTECTED_WRAPPER_LENGTH,
+    MINIMUM_PROTECTED_WRAPPER_LENGTH, ProtectedWrapperBytes, read_bounded_protected_wrapper,
 };
 
 type CreateFileWBinding = unsafe extern "system" fn(
@@ -843,6 +843,16 @@ fn load_active_installation_evidence_wrappers(
         &retained,
     )?;
     Ok((authentication_key, authenticated_evidence))
+}
+
+pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<
+    (ProtectedWrapperBytes, ProtectedWrapperBytes),
+    ActiveInstallationEvidenceWrapperLoadError,
+> {
+    load_active_installation_evidence_wrappers(paths)
+        .map_err(|_| ActiveInstallationEvidenceWrapperLoadError)
 }
 // PRODUCTION READ-HARDENING CORE END.
 
@@ -7551,6 +7561,182 @@ mod tests {
         assert_eq!(paired_loader_counters(), (3, 1, 1));
         fixture.assert_sentinel();
         fixture.cleanup();
+    }
+
+    #[test]
+    fn active_wrapper_load_facade_returns_exact_owned_pair_in_canonical_order_once() {
+        let expected_key = authentication_key_wrapper(64, 0xe1);
+        let expected_evidence = authenticated_evidence_wrapper(96, 0xe2);
+        let fixture = PairedActiveWrapperLoaderTestRoot::create(&expected_key, &expected_evidence);
+        reset_paired_loader_counters();
+
+        let (authentication_key, authenticated_evidence) =
+            super::super::load_active_installation_evidence_wrapper_pair(&fixture.paths).unwrap();
+
+        assert_eq!(authentication_key.as_bytes(), expected_key);
+        assert_eq!(authenticated_evidence.as_bytes(), expected_evidence);
+        assert_eq!(paired_loader_counters(), (3, 1, 1));
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_wrapper_load_facade_maps_second_leaf_failure_to_one_redacted_error() {
+        let key = authentication_key_wrapper(16, 0xe3);
+        let evidence = authenticated_evidence_wrapper(16, 0xe4);
+        let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+        fs::remove_file(fixture.paths.active_authenticated_evidence.as_path()).unwrap();
+        reset_paired_loader_counters();
+
+        let error = super::super::load_active_installation_evidence_wrapper_pair(&fixture.paths)
+            .unwrap_err();
+
+        assert_eq!(error, ActiveInstallationEvidenceWrapperLoadError);
+        assert_eq!(
+            format!("{error:?}"),
+            "ActiveInstallationEvidenceWrapperLoadFailed"
+        );
+        assert_eq!(paired_loader_counters(), (3, 1, 1));
+        let debug = format!("{error:?}");
+        let root_debug = fixture.root.to_string_lossy().into_owned();
+        for forbidden in [
+            root_debug.as_str(),
+            ACTIVE_AUTHENTICATION_KEY_FILENAME,
+            ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+            "InspectionUnavailable",
+            "PathUnavailable",
+            "HardLinkRejected",
+            "WrapperInvalid",
+            "0xe3",
+            "0xe4",
+            "native",
+        ] {
+            assert!(!debug.contains(forbidden));
+        }
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_wrapper_load_facade_source_is_crate_private_windows_only_and_non_authoritative() {
+        let parent_source = include_str!("../installation_evidence_persistence.rs");
+        let parent_production = parent_source.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            parent_production
+                .matches("pub(crate) struct ActiveInstallationEvidenceWrapperLoadError;")
+                .count(),
+            1
+        );
+        assert_eq!(
+            parent_production
+                .matches("pub(crate) fn load_active_installation_evidence_wrapper_pair(")
+                .count(),
+            1
+        );
+        assert!(
+            parent_production
+                .contains("formatter.write_str(\"ActiveInstallationEvidenceWrapperLoadFailed\")")
+        );
+
+        let child_source = include_str!("windows_filesystem.rs");
+        let (child_production, _) = child_source.split_once("mod tests {").unwrap();
+        assert_eq!(
+            child_production
+                .matches("pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            child_production
+                .matches("fn load_active_installation_evidence_wrappers(")
+                .count(),
+            1
+        );
+        assert!(child_production.contains("\nenum HardeningError {"));
+        assert!(!child_production.contains("pub(crate) enum HardeningError"));
+        assert!(!child_production.contains("pub(super) enum HardeningError"));
+
+        let facade = parent_production
+            .split_once("pub(crate) fn load_active_installation_evidence_wrapper_pair(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) const MINIMUM_PROTECTED_WRAPPER_LENGTH")
+            .unwrap()
+            .0;
+        for required in [
+            "paths: &crate::storage_foundation::InstallationEvidencePersistencePaths",
+            "(ProtectedWrapperBytes, ProtectedWrapperBytes)",
+            "ActiveInstallationEvidenceWrapperLoadError",
+            "windows_filesystem::load_active_installation_evidence_wrapper_pair_coarse(paths)",
+        ] {
+            assert!(
+                facade.contains(required),
+                "missing facade boundary: {required}"
+            );
+        }
+
+        let coarse_bridge = child_production
+            .split_once("pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(")
+            .unwrap()
+            .1
+            .split_once("// PRODUCTION READ-HARDENING CORE END")
+            .unwrap()
+            .0;
+        assert_eq!(
+            coarse_bridge
+                .matches("load_active_installation_evidence_wrappers(paths)")
+                .count(),
+            1
+        );
+        for required in [
+            "paths: &InstallationEvidencePersistencePaths",
+            "(ProtectedWrapperBytes, ProtectedWrapperBytes)",
+            "ActiveInstallationEvidenceWrapperLoadError",
+            ".map_err(|_| ActiveInstallationEvidenceWrapperLoadError)",
+        ] {
+            assert!(
+                coarse_bridge.contains(required),
+                "missing coarse bridge boundary: {required}"
+            );
+        }
+        for forbidden in [
+            "load_active_authentication_key_wrapper(",
+            "load_active_authenticated_evidence_wrapper(",
+            "validate_active_wrapper_paths(",
+            "inspect_hardened_",
+            "open_active_wrapper_retained_chain(",
+            "Path::",
+            ".join(",
+            "CreateFileW(",
+            "GetFileInformationByHandle",
+            "GetFinalPathNameByHandleW",
+            "read_bounded_protected_wrapper",
+            "STAGED_",
+            "stage",
+            "CryptProtectData",
+            "CryptUnprotectData",
+            "recover_and_authenticate",
+            "Hmac",
+            "generation",
+            "plaintext",
+            "rusqlite",
+            "installation_state",
+            "setup",
+            "startup",
+            "tauri::command",
+            "create_dir",
+            "write(",
+            "remove_",
+            "retry",
+            "repair",
+            "recover",
+            "replace",
+        ] {
+            assert!(
+                !facade.contains(forbidden) && !coarse_bridge.contains(forbidden),
+                "forbidden facade authority: {forbidden}"
+            );
+        }
     }
 
     #[test]

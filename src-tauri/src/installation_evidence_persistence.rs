@@ -1,7 +1,11 @@
-//! Pure modeling for future installation-evidence persistence.
+//! Primarily pure modeling for future installation-evidence persistence and
+//! bounded in-memory reading.
 //!
-//! This module performs no filesystem inspection or writing. Callers must supply
-//! already-observed, path-free facts and an in-memory `Read` implementation.
+//! On Windows, this module also exposes a crate-private read-only facade that
+//! delegates canonical active-wrapper loading to the hardened child filesystem
+//! boundary. The facade performs no filesystem writing and grants no setup,
+//! startup, database, installation-state, publication, replacement, cleanup,
+//! repair, or recovery authority.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
@@ -9,6 +13,27 @@ use std::{fmt, io::Read};
 
 #[cfg(windows)]
 mod windows_filesystem;
+
+#[cfg(windows)]
+#[derive(Eq, PartialEq)]
+pub(crate) struct ActiveInstallationEvidenceWrapperLoadError;
+
+#[cfg(windows)]
+impl fmt::Debug for ActiveInstallationEvidenceWrapperLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ActiveInstallationEvidenceWrapperLoadFailed")
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn load_active_installation_evidence_wrapper_pair(
+    paths: &crate::storage_foundation::InstallationEvidencePersistencePaths,
+) -> Result<
+    (ProtectedWrapperBytes, ProtectedWrapperBytes),
+    ActiveInstallationEvidenceWrapperLoadError,
+> {
+    windows_filesystem::load_active_installation_evidence_wrapper_pair_coarse(paths)
+}
 
 pub(crate) const MINIMUM_PROTECTED_WRAPPER_LENGTH: u64 = 15;
 pub(crate) const MAXIMUM_PROTECTED_WRAPPER_LENGTH: u64 = 65_550;
