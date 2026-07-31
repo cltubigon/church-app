@@ -18,7 +18,9 @@ use crate::{
         ParsedUntrustedAuthenticatedEnvelopeV1, verify_authenticated_envelope_v1,
     },
     installation_evidence_authentication_key::EvidenceAuthenticationKey,
-    installation_evidence_contract::ParsedUntrustedInstallationEvidenceContract,
+    installation_evidence_contract::{
+        ParsedUntrustedInstallationEvidenceContract, StructurallyValidatedInstallationEvidence,
+    },
 };
 #[cfg(windows)]
 use crate::{
@@ -52,6 +54,7 @@ pub(crate) enum ProtectionStageError {
     GenerationMismatch,
     AuthenticationFailed,
     PlaintextParseFailed,
+    StructuralValidationFailed,
 }
 
 impl fmt::Debug for ProtectionStageError {
@@ -67,6 +70,7 @@ impl fmt::Debug for ProtectionStageError {
             Self::GenerationMismatch => "GenerationMismatch",
             Self::AuthenticationFailed => "AuthenticationFailed",
             Self::PlaintextParseFailed => "PlaintextParseFailed",
+            Self::StructuralValidationFailed => "StructuralValidationFailed",
         })
     }
 }
@@ -335,6 +339,14 @@ fn parse_generation_matched_installation_evidence_plaintext(
     matched_envelope
         .parse_inner_plaintext()
         .map_err(|_| ProtectionStageError::PlaintextParseFailed)
+}
+
+fn validate_parsed_installation_evidence_structure(
+    parsed: ParsedUntrustedInstallationEvidenceContract,
+) -> Result<StructurallyValidatedInstallationEvidence, ProtectionStageError> {
+    parsed
+        .validate_structure()
+        .map_err(|_| ProtectionStageError::StructuralValidationFailed)
 }
 
 #[cfg(windows)]
@@ -2104,6 +2116,163 @@ mod tests {
     }
 
     #[test]
+    fn parsed_evidence_structural_validation_boundary_returns_exact_existing_validated_type() {
+        let canonical_plaintext = *plaintext().as_bytes();
+        let parsed = ParsedUntrustedInstallationEvidenceContract::parse_v1(&canonical_plaintext)
+            .expect("canonical synthetic plaintext must parse before structural validation");
+        let expected = parsed
+            .validate_structure()
+            .expect("canonical parsed evidence must validate structurally");
+
+        let validated = validate_parsed_installation_evidence_structure(parsed)
+            .expect("canonical parsed evidence must cross the structural boundary");
+
+        fn require_exact_result_type(_: StructurallyValidatedInstallationEvidence) {}
+        require_exact_result_type(validated);
+        assert_eq!(validated, expected);
+        assert_eq!(validated.encode_v1().as_bytes(), &canonical_plaintext);
+
+        let debug = format!("{validated:?}");
+        assert!(debug.contains("StructurallyValidatedInstallationEvidence"));
+        assert!(debug.contains("[REDACTED]"));
+        for sensitive in [
+            "101112131415161718191a1b1c1d1e1f",
+            "3131313131313131",
+            "4242424242424242",
+            "5353535353535353",
+        ] {
+            assert!(!debug.contains(sensitive));
+        }
+    }
+
+    #[test]
+    fn parsed_evidence_structural_validation_boundary_maps_all_defects_to_one_coarse_error() {
+        let canonical_plaintext = *plaintext().as_bytes();
+        let cases: [(&str, usize, usize, u8); 5] = [
+            ("wrong evidence-format identity", 12, 28, 0),
+            ("wrong evidence-format version", 28, 30, 0),
+            ("wrong permanent application identifier", 31, 60, b'x'),
+            ("wrong database-format identity", 60, 76, 0),
+            ("invalid installation identifier", 92, 108, 0),
+        ];
+
+        for (case, start, end, replacement) in cases {
+            let mut structurally_invalid_plaintext = canonical_plaintext;
+            structurally_invalid_plaintext[start..end].fill(replacement);
+            let parsed = ParsedUntrustedInstallationEvidenceContract::parse_v1(
+                &structurally_invalid_plaintext,
+            )
+            .expect("structurally invalid fixture must remain parseable");
+
+            let error = validate_parsed_installation_evidence_structure(parsed).expect_err(case);
+
+            assert_eq!(error, ProtectionStageError::StructuralValidationFailed);
+            assert_eq!(format!("{error:?}"), "StructuralValidationFailed");
+        }
+    }
+
+    #[test]
+    fn parsed_evidence_structural_validation_boundary_source_proves_private_narrow_transition() {
+        const SOURCE: &str = include_str!("mod.rs");
+        const CONTRACT_SOURCE: &str = include_str!("../installation_evidence_contract.rs");
+        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let definition_marker = "fn validate_parsed_installation_evidence_structure(";
+
+        assert_eq!(production_source.matches(definition_marker).count(), 1);
+        assert_eq!(
+            production_source
+                .matches("validate_parsed_installation_evidence_structure(")
+                .count(),
+            1
+        );
+        let before_definition = production_source.split_once(definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(!declaration_attributes.contains("cfg"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let boundary = production_source
+            .split_once(definition_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(boundary.contains("parsed: ParsedUntrustedInstallationEvidenceContract"));
+        assert!(
+            boundary.contains(
+                "Result<StructurallyValidatedInstallationEvidence, ProtectionStageError>"
+            )
+        );
+        assert_eq!(boundary.matches(".validate_structure()").count(), 1);
+        assert_eq!(
+            boundary
+                .matches(".map_err(|_| ProtectionStageError::StructuralValidationFailed)")
+                .count(),
+            1
+        );
+
+        for excluded in [
+            "parse_inner_plaintext",
+            "parse_v1",
+            "UnvalidatedInstallationEvidenceContract::new",
+            "as_bytes",
+            "encode_v1",
+            "Ok((",
+            "load_active_installation_evidence_wrapper_pair",
+            "WindowsCurrentUserDpapi",
+            "ValidatedProtectedWrapper::parse",
+            "verify_authenticated_envelope_v1",
+            "match_generation",
+            "rusqlite",
+            "database",
+            "freshness",
+            "rollback",
+            "setup",
+            "startup",
+            "tauri",
+            "unsafe",
+            "retry",
+            "fallback",
+            "repair",
+            "recover",
+            "replace",
+        ] {
+            assert!(
+                !boundary.contains(excluded),
+                "unexpected structural-boundary term: {excluded}"
+            );
+        }
+        assert!(!boundary.contains(&["std", "::fs"].concat()));
+        assert!(!boundary.contains(&["installation", "_state"].concat()));
+        for parsed_field in [
+            "evidence_format_identity",
+            "evidence_format_version",
+            "application_identifier",
+            "application_database_format_identity",
+            "parish_identifier",
+            "installation_identifier",
+            "installation_generation",
+            "recovery_or_replacement_generation",
+            "database_key_generation_identifier",
+            "setup_publication_identifier",
+            "creation_timestamp",
+        ] {
+            assert!(!boundary.contains(parsed_field));
+        }
+
+        assert!(
+            CONTRACT_SOURCE
+                .contains(".debug_struct(\"ParsedUntrustedInstallationEvidenceContract\")")
+        );
+        assert!(
+            CONTRACT_SOURCE
+                .contains(".debug_struct(\"StructurallyValidatedInstallationEvidence\")")
+        );
+        assert!(CONTRACT_SOURCE.contains(".field(\"parish_identifier\", &\"[REDACTED]\")"));
+        assert!(CONTRACT_SOURCE.contains(".field(\"installation_identifier\", &\"[REDACTED]\")"));
+    }
+
+    #[test]
     fn authenticated_malformed_plaintext_reaches_only_later_logical_failures() {
         let key_wrapper = dummy_wrapper(ProtectedObjectKind::AuthenticationKey);
         let evidence_wrapper = dummy_wrapper(ProtectedObjectKind::AuthenticatedEvidence);
@@ -2155,6 +2324,7 @@ mod tests {
             ProtectionStageError::GenerationMismatch,
             ProtectionStageError::AuthenticationFailed,
             ProtectionStageError::PlaintextParseFailed,
+            ProtectionStageError::StructuralValidationFailed,
         ] {
             let debug = format!("{error:?}");
             assert!(!debug.contains("CHDPAPI"));
