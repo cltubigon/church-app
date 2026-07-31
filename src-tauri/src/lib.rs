@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+mod database_freshness_classification;
 mod database_key;
 mod database_metadata_contract;
 mod database_metadata_correspondence;
