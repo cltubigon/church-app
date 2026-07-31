@@ -272,6 +272,22 @@ fn unprotect_active_installation_evidence_wrappers_with(
     ))
 }
 
+/// Returns decoded authentication-key material first and the original opaque,
+/// untrusted authenticated-evidence payload second. Success establishes only
+/// canonical supported authentication-key payload framing.
+fn decode_unprotected_installation_evidence_key_material(
+    unprotected_authentication_key: UnprotectedBytes,
+    unprotected_authenticated_evidence: UnprotectedBytes,
+) -> Result<(DecodedProtectedKeyMaterial, UnprotectedBytes), ProtectionStageError> {
+    let decoded_authentication_key =
+        DecodedProtectedKeyMaterial::parse(unprotected_authentication_key.as_bytes())?;
+
+    Ok((
+        decoded_authentication_key,
+        unprotected_authenticated_evidence,
+    ))
+}
+
 #[cfg(windows)]
 pub(crate) fn recover_and_authenticate_in_memory(
     protected_key_wrapper: &[u8],
@@ -646,6 +662,125 @@ mod tests {
         assert!(evidence_validation < evidence_unprotection);
         assert!(paired_body.contains("Result<(UnprotectedBytes, UnprotectedBytes)"));
         assert!(!paired_body.contains("Vec<u8>"));
+
+        let secure_drop = SOURCE
+            .split_once("impl Drop for UnprotectedBytes")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(secure_drop.contains("self.0.zeroize();"));
+    }
+
+    #[test]
+    fn unprotected_key_payload_decode_returns_decoded_first_and_exact_opaque_evidence_second() {
+        let key_payload = UnprotectedBytes::new(key_payload(KEY, IDENTIFIER));
+        let expected_evidence = vec![0x00, 0xff, 0x43, 0x48, 0x45, 0x56, 0x41, 0x55, 0x54, 0x48];
+        let evidence_payload = UnprotectedBytes::new(expected_evidence.clone());
+
+        let result =
+            decode_unprotected_installation_evidence_key_material(key_payload, evidence_payload)
+                .expect("canonical synthetic key payload must decode");
+
+        assert_eq!(
+            format!("{:?}", result.0),
+            "DecodedProtectedKeyMaterial([REDACTED])"
+        );
+        assert_eq!(result.1.as_bytes(), expected_evidence);
+        assert_eq!(format!("{:?}", result.1), "UnprotectedBytes([REDACTED])");
+    }
+
+    #[test]
+    fn unprotected_key_payload_decode_preserves_arbitrary_evidence_without_interpretation() {
+        for expected_evidence in [
+            Vec::new(),
+            vec![0],
+            vec![0xff; 225],
+            vec![0x42; 226],
+            vec![0x53; 227],
+            (0..=255).collect(),
+        ] {
+            let result = decode_unprotected_installation_evidence_key_material(
+                UnprotectedBytes::new(key_payload(KEY, IDENTIFIER)),
+                UnprotectedBytes::new(expected_evidence.clone()),
+            )
+            .expect("evidence content and length cannot affect canonical key decoding");
+
+            assert_eq!(result.1.as_bytes(), expected_evidence);
+        }
+    }
+
+    #[test]
+    fn unprotected_key_payload_decode_returns_only_canonical_key_parser_errors() {
+        let mut unsupported_version = key_payload(KEY, IDENTIFIER);
+        unsupported_version[0] = 2;
+        let mut zero_generation = key_payload(KEY, IDENTIFIER);
+        zero_generation[1..17].fill(0);
+
+        for (candidate, expected) in [
+            (
+                vec![0x31; 48],
+                ProtectionStageError::MalformedProtectedKeyPayload,
+            ),
+            (
+                vec![0x42; 50],
+                ProtectionStageError::MalformedProtectedKeyPayload,
+            ),
+            (
+                unsupported_version,
+                ProtectionStageError::UnsupportedProtectedKeyVersion,
+            ),
+            (
+                zero_generation,
+                ProtectionStageError::MalformedProtectedKeyPayload,
+            ),
+        ] {
+            let error = decode_unprotected_installation_evidence_key_material(
+                UnprotectedBytes::new(candidate),
+                UnprotectedBytes::new(vec![0xde, 0xad, 0xbe, 0xef]),
+            )
+            .expect_err("malformed key payload must return no output tuple");
+
+            assert_eq!(error, expected);
+        }
+    }
+
+    #[test]
+    fn unprotected_key_payload_decode_source_proves_private_non_authoritative_secure_boundary() {
+        const SOURCE: &str = include_str!("mod.rs");
+        let definition_marker = [
+            "fn decode_unprotected_installation_evidence_",
+            "key_material(",
+        ]
+        .concat();
+        assert_eq!(SOURCE.matches(&definition_marker).count(), 1);
+        let before_definition = SOURCE.split_once(&definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(!declaration_attributes.contains("#[cfg(test)]"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let boundary = SOURCE
+            .split_once(&definition_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(boundary.contains("unprotected_authentication_key: UnprotectedBytes"));
+        assert!(boundary.contains("unprotected_authenticated_evidence: UnprotectedBytes"));
+        assert!(boundary.contains("Result<(DecodedProtectedKeyMaterial, UnprotectedBytes)"));
+        assert!(boundary.contains("DecodedProtectedKeyMaterial::parse"));
+        assert!(boundary.contains("unprotected_authentication_key.as_bytes()"));
+        assert!(!boundary.contains("unprotected_authenticated_evidence.as_bytes()"));
+        assert!(!boundary.contains("Vec<u8>"));
+        assert!(!boundary.contains("into_parts"));
+        assert!(!boundary.contains("ParsedUntrustedAuthenticatedEnvelopeV1"));
+        assert!(!boundary.contains("AUTHENTICATED_ENVELOPE_LENGTH"));
+
+        let parse_position = boundary.find("DecodedProtectedKeyMaterial::parse").unwrap();
+        let return_position = boundary.find("Ok((").unwrap();
+        assert!(parse_position < return_position);
 
         let secure_drop = SOURCE
             .split_once("impl Drop for UnprotectedBytes")
