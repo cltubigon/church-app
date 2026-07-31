@@ -97,12 +97,29 @@ impl EncodedProtectedWrapper {
         ValidatedProtectedWrapper::parse(input, ProtectedObjectKind::AuthenticationKey).map(|_| ())
     }
 
+    pub(crate) fn validate_authenticated_evidence_bytes(
+        input: &[u8],
+    ) -> Result<(), ProtectionStageError> {
+        ValidatedProtectedWrapper::parse(input, ProtectedObjectKind::AuthenticatedEvidence)
+            .map(|_| ())
+    }
+
     #[cfg(test)]
     pub(crate) fn synthetic_authentication_key_for_publication_test(
         blob: Vec<u8>,
     ) -> Result<Self, ProtectionStageError> {
         Self::encode(
             ProtectedObjectKind::AuthenticationKey,
+            OpaqueProtectedBytes::new(blob),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_authenticated_evidence_for_loader_test(
+        blob: Vec<u8>,
+    ) -> Result<Self, ProtectionStageError> {
+        Self::encode(
+            ProtectedObjectKind::AuthenticatedEvidence,
             OpaqueProtectedBytes::new(blob),
         )
     }

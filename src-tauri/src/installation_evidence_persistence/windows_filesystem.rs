@@ -43,8 +43,9 @@ use windows_sys::{
 use crate::{
     installation_evidence_protection::EncodedProtectedWrapper,
     storage_foundation::{
-        ACTIVE_AUTHENTICATION_KEY_FILENAME, INSTALLATION_EVIDENCE_DIRECTORY_NAME,
-        InstallationEvidencePersistencePaths, PRODUCTION_DATABASE_FILENAME,
+        ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME, ACTIVE_AUTHENTICATION_KEY_FILENAME,
+        INSTALLATION_EVIDENCE_DIRECTORY_NAME, InstallationEvidencePersistencePaths,
+        PRODUCTION_DATABASE_FILENAME,
     },
 };
 
@@ -603,6 +604,43 @@ where
     M: FnOnce(),
     R: FnOnce(&mut File, u64) -> Result<ProtectedWrapperBytes, BoundedReadError>,
 {
+    inspect_hardened_wrapper_with(path, expected_name, retained, mutation, reader, |bytes| {
+        EncodedProtectedWrapper::validate_authentication_key_bytes(bytes)
+            .map_err(|_| HardeningError::WrapperInvalid)
+    })
+}
+
+fn inspect_hardened_authenticated_evidence_wrapper(
+    path: &Path,
+    expected_name: &str,
+    retained: &[RetainedDirectory],
+) -> Result<ProtectedWrapperBytes, HardeningError> {
+    inspect_hardened_wrapper_with(
+        path,
+        expected_name,
+        retained,
+        || {},
+        read_bounded_protected_wrapper,
+        |bytes| {
+            EncodedProtectedWrapper::validate_authenticated_evidence_bytes(bytes)
+                .map_err(|_| HardeningError::WrapperInvalid)
+        },
+    )
+}
+
+fn inspect_hardened_wrapper_with<M, R, V>(
+    path: &Path,
+    expected_name: &str,
+    retained: &[RetainedDirectory],
+    mutation: M,
+    reader: R,
+    validator: V,
+) -> Result<ProtectedWrapperBytes, HardeningError>
+where
+    M: FnOnce(),
+    R: FnOnce(&mut File, u64) -> Result<ProtectedWrapperBytes, BoundedReadError>,
+    V: FnOnce(&[u8]) -> Result<(), HardeningError>,
+{
     let parent = retained
         .last()
         .ok_or(HardeningError::InspectionUnavailable)?;
@@ -632,8 +670,7 @@ where
 
     mutation();
     let loaded = reader(&mut file, before.size).map_err(|_| HardeningError::ReadUnavailable)?;
-    EncodedProtectedWrapper::validate_authentication_key_bytes(loaded.as_bytes())
-        .map_err(|_| HardeningError::WrapperInvalid)?;
+    validator(loaded.as_bytes())?;
     let after = query_hardening_observation(&file)?;
     validate_stable_observations(Some(&before), Some(&after))?;
     let directory_identities_after = retained
@@ -695,6 +732,48 @@ fn load_active_authentication_key_wrapper(
     inspect_hardened_authentication_key_wrapper(
         active_authentication_key,
         ACTIVE_AUTHENTICATION_KEY_FILENAME,
+        &retained,
+    )
+}
+
+fn load_active_authenticated_evidence_wrapper(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<ProtectedWrapperBytes, HardeningError> {
+    let active_database = paths.active_database.as_path();
+    let root = active_database
+        .parent()
+        .ok_or(HardeningError::PathUnavailable)?;
+    let evidence_directory = paths.evidence_directory.as_path();
+    let active_authenticated_evidence = paths.active_authenticated_evidence.as_path();
+
+    if active_database != root.join(PRODUCTION_DATABASE_FILENAME)
+        || evidence_directory != root.join(INSTALLATION_EVIDENCE_DIRECTORY_NAME)
+        || active_authenticated_evidence
+            != evidence_directory.join(ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME)
+    {
+        return Err(HardeningError::FinalPathMismatch);
+    }
+
+    let parent_path = root.parent().ok_or(HardeningError::PathUnavailable)?;
+    let root_component = root
+        .file_name()
+        .ok_or(HardeningError::PathUnavailable)?
+        .encode_wide()
+        .collect::<Vec<_>>();
+    let parent = open_hardened_directory(parent_path, None)?;
+    let root = open_hardened_directory(root, Some((&parent.initial, root_component.as_slice())))?;
+    let evidence = open_hardened_directory(
+        evidence_directory,
+        Some((
+            &root.initial,
+            &ascii_units(INSTALLATION_EVIDENCE_DIRECTORY_NAME),
+        )),
+    )?;
+    let retained = [parent, root, evidence];
+
+    inspect_hardened_authenticated_evidence_wrapper(
+        active_authenticated_evidence,
+        ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
         &retained,
     )
 }
@@ -1696,6 +1775,17 @@ mod tests {
         .to_vec()
     }
 
+    fn authenticated_evidence_wrapper(blob_length: usize, pattern: u8) -> Vec<u8> {
+        assert!((1..=65_536).contains(&blob_length));
+        EncodedProtectedWrapper::synthetic_authenticated_evidence_for_loader_test(vec![
+            pattern;
+            blob_length
+        ])
+        .unwrap()
+        .as_bytes()
+        .to_vec()
+    }
+
     fn assert_successful_flow(blob_length: usize, pattern: u8) {
         let fixture = TestRoot::create();
         let intended = authentication_key_wrapper(blob_length, pattern);
@@ -1937,6 +2027,63 @@ mod tests {
     }
 
     impl Drop for ActiveWrapperLoaderTestRoot {
+        fn drop(&mut self) {
+            if !self.cleaned {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
+
+    struct ActiveAuthenticatedEvidenceLoaderTestRoot {
+        root: PathBuf,
+        sentinel: PathBuf,
+        paths: InstallationEvidencePersistencePaths,
+        cleaned: bool,
+    }
+
+    impl ActiveAuthenticatedEvidenceLoaderTestRoot {
+        fn create(active: &[u8]) -> Self {
+            let counter = TEST_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock must follow epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "church-app-active-authenticated-evidence-loader-{}-{nanos}-{counter}",
+                std::process::id()
+            ));
+            fs::create_dir(&root)
+                .expect("unique active authenticated-evidence loader root must be new");
+            let paths = installation_evidence_persistence_paths(&root);
+            fs::create_dir(paths.evidence_directory.as_path())
+                .expect("exact evidence directory must be created");
+            fs::write(paths.active_authenticated_evidence.as_path(), active)
+                .expect("synthetic active authenticated-evidence wrapper must be written");
+            let sentinel = root.join(SENTINEL_NAME);
+            fs::write(&sentinel, SENTINEL_CONTENT).expect("synthetic sentinel must be written");
+            Self {
+                root,
+                sentinel,
+                paths,
+                cleaned: false,
+            }
+        }
+
+        fn assert_sentinel(&self) {
+            assert_eq!(fs::read(&self.sentinel).unwrap(), SENTINEL_CONTENT);
+        }
+
+        fn cleanup(mut self) -> PathBuf {
+            let removed = self.root.clone();
+            fs::remove_dir_all(&removed)
+                .expect("only the exact active authenticated-evidence loader root is removed");
+            self.cleaned = true;
+            assert!(!removed.exists());
+            removed
+        }
+    }
+
+    impl Drop for ActiveAuthenticatedEvidenceLoaderTestRoot {
         fn drop(&mut self) {
             if !self.cleaned {
                 let _ = fs::remove_dir_all(&self.root);
@@ -7257,7 +7404,7 @@ mod tests {
             .split_once("fn load_active_authentication_key_wrapper(")
             .unwrap()
             .1
-            .split_once("// PRODUCTION READ-HARDENING CORE END")
+            .split_once("fn load_active_authenticated_evidence_wrapper(")
             .unwrap()
             .0;
         for required in [
@@ -7300,6 +7447,254 @@ mod tests {
                 "forbidden loader authority: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn active_authenticated_evidence_wrapper_loader_loads_exact_owned_redacted_bytes_only() {
+        let expected = authenticated_evidence_wrapper(64, 0xc1);
+        let fixture = ActiveAuthenticatedEvidenceLoaderTestRoot::create(&expected);
+        fs::create_dir(fixture.paths.active_authentication_key.as_path()).unwrap();
+        fs::create_dir(fixture.paths.staged_authentication_key.as_path()).unwrap();
+        fs::create_dir(fixture.paths.staged_authenticated_evidence.as_path()).unwrap();
+
+        let loaded = load_active_authenticated_evidence_wrapper(&fixture.paths).unwrap();
+        assert_eq!(loaded.as_bytes(), expected);
+        assert_eq!(format!("{loaded:?}"), "ProtectedWrapperBytes([REDACTED])");
+        assert_eq!(
+            fixture
+                .paths
+                .active_authenticated_evidence
+                .as_path()
+                .file_name(),
+            Some(OsStr::new(ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME))
+        );
+        assert_eq!(
+            ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+            "authenticated-evidence.dpapi"
+        );
+        assert!(fixture.paths.active_authentication_key.as_path().is_dir());
+        assert!(fixture.paths.staged_authentication_key.as_path().is_dir());
+        assert!(
+            fixture
+                .paths
+                .staged_authenticated_evidence
+                .as_path()
+                .is_dir()
+        );
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authenticated_evidence_wrapper_loader_rejects_aggregate_relationship_mismatches() {
+        let expected = authenticated_evidence_wrapper(16, 0xc2);
+        let fixture = ActiveAuthenticatedEvidenceLoaderTestRoot::create(&expected);
+        let alternate =
+            installation_evidence_persistence_paths(&fixture.root.join("alternate-root"));
+
+        let mut wrong_root = fixture.paths.clone();
+        wrong_root.active_database = alternate.active_database.clone();
+        assert_eq!(
+            load_active_authenticated_evidence_wrapper(&wrong_root),
+            Err(HardeningError::FinalPathMismatch)
+        );
+
+        let mut wrong_evidence_directory = fixture.paths.clone();
+        wrong_evidence_directory.evidence_directory = alternate.evidence_directory.clone();
+        assert_eq!(
+            load_active_authenticated_evidence_wrapper(&wrong_evidence_directory),
+            Err(HardeningError::FinalPathMismatch)
+        );
+
+        let nested =
+            installation_evidence_persistence_paths(&fixture.root.join("nested-direct-root"));
+        let mut wrong_active_parent = fixture.paths.clone();
+        wrong_active_parent.active_authenticated_evidence =
+            nested.active_authenticated_evidence.clone();
+        assert_eq!(
+            load_active_authenticated_evidence_wrapper(&wrong_active_parent),
+            Err(HardeningError::FinalPathMismatch)
+        );
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authenticated_evidence_wrapper_loader_rejects_wrong_name_and_nested_leaf() {
+        let expected = authenticated_evidence_wrapper(16, 0xc3);
+        let fixture = ActiveAuthenticatedEvidenceLoaderTestRoot::create(&expected);
+        let wrong_name = fixture
+            .paths
+            .evidence_directory
+            .as_path()
+            .join("authenticated-evidence-wrong.dpapi");
+        fs::rename(
+            fixture.paths.active_authenticated_evidence.as_path(),
+            &wrong_name,
+        )
+        .unwrap();
+        assert_eq!(
+            load_active_authenticated_evidence_wrapper(&fixture.paths),
+            Err(HardeningError::InspectionUnavailable)
+        );
+
+        let nested_directory = fixture.paths.evidence_directory.as_path().join("nested");
+        fs::create_dir(&nested_directory).unwrap();
+        let nested_paths = installation_evidence_persistence_paths(&nested_directory);
+        let mut wrong_parent = fixture.paths.clone();
+        wrong_parent.active_authenticated_evidence =
+            nested_paths.active_authenticated_evidence.clone();
+        assert_eq!(
+            load_active_authenticated_evidence_wrapper(&wrong_parent),
+            Err(HardeningError::FinalPathMismatch)
+        );
+        assert_eq!(fs::read(&wrong_name).unwrap(), expected);
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authenticated_evidence_wrapper_loader_rejects_malformed_and_wrong_kind_wrappers() {
+        let malformed_fixture = ActiveAuthenticatedEvidenceLoaderTestRoot::create(&[0x31; 15]);
+        assert_eq!(
+            load_active_authenticated_evidence_wrapper(&malformed_fixture.paths),
+            Err(HardeningError::WrapperInvalid)
+        );
+        malformed_fixture.assert_sentinel();
+        malformed_fixture.cleanup();
+
+        let wrong_kind = authentication_key_wrapper(16, 0xc4);
+        let wrong_kind_fixture = ActiveAuthenticatedEvidenceLoaderTestRoot::create(&wrong_kind);
+        assert_eq!(
+            load_active_authenticated_evidence_wrapper(&wrong_kind_fixture.paths),
+            Err(HardeningError::WrapperInvalid)
+        );
+        wrong_kind_fixture.assert_sentinel();
+        wrong_kind_fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authenticated_evidence_wrapper_loader_rejects_hard_linked_active_before_release() {
+        let expected = authenticated_evidence_wrapper(16, 0xc5);
+        let fixture = ActiveAuthenticatedEvidenceLoaderTestRoot::create(&expected);
+        let alias = fixture
+            .paths
+            .evidence_directory
+            .as_path()
+            .join("active-evidence-loader-hard-link-alias.synthetic");
+        fs::hard_link(
+            fixture.paths.active_authenticated_evidence.as_path(),
+            &alias,
+        )
+        .unwrap();
+        assert_eq!(
+            load_active_authenticated_evidence_wrapper(&fixture.paths),
+            Err(HardeningError::HardLinkRejected)
+        );
+        assert_eq!(fs::read(&alias).unwrap(), expected);
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn active_authenticated_evidence_wrapper_loader_reuses_policy_and_is_non_authoritative() {
+        for (attributes, tag) in [
+            (FILE_ATTRIBUTE_REPARSE_POINT, 0),
+            (FILE_ATTRIBUTE_NORMAL, 0xa000_0003),
+        ] {
+            assert_eq!(
+                validate_reparse_facts(attributes, tag),
+                Err(HardeningError::ComponentReparse)
+            );
+        }
+
+        let before = synthetic_observation(
+            41,
+            1,
+            1,
+            r"\\?\Volume{abcdef12-3456-7890-abcd-ef1234567890}\root\leaf",
+        );
+        let mut changed = before.clone();
+        changed.identity.file_id[15] ^= 1;
+        assert_eq!(
+            validate_stable_observations(Some(&before), Some(&changed)),
+            Err(HardeningError::IdentityChanged)
+        );
+        assert_eq!(
+            validate_stable_observations(Some(&before), None),
+            Err(HardeningError::InspectionUnavailable)
+        );
+
+        let source = include_str!("windows_filesystem.rs");
+        let (production, tests) = source.split_once("#[cfg(test)]").unwrap();
+        assert_eq!(
+            production
+                .matches("fn load_active_authenticated_evidence_wrapper(")
+                .count(),
+            1
+        );
+        assert!(tests.contains("active_authenticated_evidence_wrapper_loader_"));
+        let loader = production
+            .split_once("fn load_active_authenticated_evidence_wrapper(")
+            .unwrap()
+            .1
+            .split_once("// PRODUCTION READ-HARDENING CORE END")
+            .unwrap()
+            .0;
+        for required in [
+            "InstallationEvidencePersistencePaths",
+            "PRODUCTION_DATABASE_FILENAME",
+            "INSTALLATION_EVIDENCE_DIRECTORY_NAME",
+            "ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME",
+            "open_hardened_directory",
+            "inspect_hardened_authenticated_evidence_wrapper",
+            "ProtectedWrapperBytes",
+        ] {
+            assert!(
+                loader.contains(required),
+                "missing loader boundary: {required}"
+            );
+        }
+        for forbidden in [
+            "resolve_installation_evidence_persistence_paths",
+            "resolve_production_database_path",
+            "ACTIVE_AUTHENTICATION_KEY_FILENAME",
+            "STAGED_AUTHENTICATION_KEY_FILENAME",
+            "STAGED_AUTHENTICATED_EVIDENCE_FILENAME",
+            "CryptProtectData",
+            "CryptUnprotectData",
+            "recover_and_authenticate",
+            "Hmac",
+            "generation",
+            "plaintext",
+            "rusqlite",
+            "installation_state",
+            "setup",
+            "startup",
+            "tauri::command",
+            "CreateFileW(",
+            "MoveFileExW(",
+            "ReplaceFileW(",
+            "FlushFileBuffers(",
+            "create_dir",
+            "write(",
+            "remove_",
+        ] {
+            assert!(
+                !loader.contains(forbidden),
+                "forbidden loader authority: {forbidden}"
+            );
+        }
+        assert_eq!(
+            production
+                .matches("fn inspect_hardened_wrapper_with<")
+                .count(),
+            1
+        );
+        assert!(
+            production.contains("EncodedProtectedWrapper::validate_authenticated_evidence_bytes")
+        );
+        assert!(production.contains("EncodedProtectedWrapper::validate_authentication_key_bytes"));
     }
 
     #[test]
