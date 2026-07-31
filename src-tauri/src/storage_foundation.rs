@@ -160,6 +160,16 @@ pub fn resolve_production_database_path(
     Ok(production_database_path(app_local_data_directory))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn resolve_installation_evidence_persistence_paths(
+    app: &tauri::AppHandle,
+) -> Result<InstallationEvidencePersistencePaths, tauri::Error> {
+    let app_local_data_directory = app.path().app_local_data_dir()?;
+    Ok(installation_evidence_persistence_paths(
+        &app_local_data_directory,
+    ))
+}
+
 pub fn resolve_development_database_path(base: &Path) -> DevelopmentDatabasePath {
     DevelopmentDatabasePath(
         base.join(DEVELOPMENT_STORAGE_IDENTITY)
@@ -386,6 +396,39 @@ mod tests {
             resolve_production_database_path;
 
         let _ = resolver;
+    }
+
+    #[test]
+    fn installation_evidence_resolver_is_a_pure_canonical_tauri_path_boundary() {
+        let resolver: fn(
+            &tauri::AppHandle,
+        ) -> Result<InstallationEvidencePersistencePaths, tauri::Error> =
+            resolve_installation_evidence_persistence_paths;
+        let _ = resolver;
+
+        const SOURCE: &str = include_str!("storage_foundation.rs");
+        let resolver_source = SOURCE
+            .split("pub(crate) fn resolve_installation_evidence_persistence_paths")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub fn resolve_development_database_path")
+                    .next()
+            })
+            .expect("installation-evidence resolver should remain a distinct function");
+
+        assert_eq!(resolver_source.matches("app_local_data_dir()").count(), 1);
+        assert!(resolver_source.contains("installation_evidence_persistence_paths("));
+        for excluded in [
+            "std::fs",
+            "File::",
+            "create_dir",
+            ".exists()",
+            ".open(",
+            ".read(",
+            ".write(",
+        ] {
+            assert!(!resolver_source.contains(excluded));
+        }
     }
 
     #[test]
