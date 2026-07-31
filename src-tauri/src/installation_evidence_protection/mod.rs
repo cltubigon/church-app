@@ -393,6 +393,27 @@ impl fmt::Debug for ActiveInstallationEvidenceRecoveryError {
 }
 
 #[cfg(windows)]
+#[allow(clippy::enum_variant_names)]
+enum ActiveStructurallyValidatedEvidenceRecoveryError {
+    LoadFailed,
+    ProtectionFailed,
+    PlaintextParseFailed,
+    StructuralValidationFailed,
+}
+
+#[cfg(windows)]
+impl fmt::Debug for ActiveStructurallyValidatedEvidenceRecoveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::LoadFailed => "ActiveEvidenceLoadFailed",
+            Self::ProtectionFailed => "ActiveEvidenceProtectionFailed",
+            Self::PlaintextParseFailed => "ActiveEvidencePlaintextParseFailed",
+            Self::StructuralValidationFailed => "ActiveEvidenceStructuralValidationFailed",
+        })
+    }
+}
+
+#[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
 fn load_and_recover_generation_matched_installation_evidence(
     paths: &InstallationEvidencePersistencePaths,
@@ -405,6 +426,41 @@ fn load_and_recover_generation_matched_installation_evidence(
         authenticated_evidence_wrapper,
     )
     .map_err(|_| ActiveInstallationEvidenceRecoveryError::ProtectionFailed)
+}
+
+#[cfg(windows)]
+fn load_and_validate_active_installation_evidence(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<
+    StructurallyValidatedInstallationEvidence,
+    ActiveStructurallyValidatedEvidenceRecoveryError,
+> {
+    let matched_envelope = load_and_recover_generation_matched_installation_evidence(paths)
+        .map_err(|error| match error {
+            ActiveInstallationEvidenceRecoveryError::LoadFailed => {
+                ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed
+            }
+            ActiveInstallationEvidenceRecoveryError::ProtectionFailed => {
+                ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
+            }
+        })?;
+    let parsed = parse_generation_matched_installation_evidence_plaintext(matched_envelope)
+        .map_err(|error| match error {
+            ProtectionStageError::PlaintextParseFailed => {
+                ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed
+            }
+            // This narrow boundary currently emits only PlaintextParseFailed. Any
+            // future broader protection-stage failure remains fail-closed.
+            _ => ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed,
+        })?;
+    validate_parsed_installation_evidence_structure(parsed).map_err(|error| match error {
+        ProtectionStageError::StructuralValidationFailed => {
+            ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed
+        }
+        // This narrow boundary currently emits only StructuralValidationFailed.
+        // Any future broader protection-stage failure remains fail-closed.
+        _ => ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed,
+    })
 }
 
 #[cfg(windows)]
@@ -1385,6 +1441,278 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn structurally_validated_active_evidence_composition_fixture(
+        key: [u8; 32],
+        key_identifier: [u8; 16],
+        envelope_identifier: [u8; 16],
+        inner_plaintext: [u8; 164],
+    ) -> ActiveEvidenceLoadTrustChainCompositionTestRoot {
+        let authentication_key_wrapper = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticationKey,
+            &key_payload(key, key_identifier),
+        );
+        let mut envelope_bytes = *encoded_envelope(KEY, envelope_identifier).as_bytes();
+        envelope_bytes[30..194].copy_from_slice(&inner_plaintext);
+        let mut hmac = Hmac::<Sha256>::new_from_slice(&KEY).unwrap();
+        hmac.update(&envelope_bytes[..194]);
+        envelope_bytes[194..226].copy_from_slice(&hmac.finalize().into_bytes());
+        let authenticated_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                &envelope_bytes,
+            );
+        ActiveEvidenceLoadTrustChainCompositionTestRoot::create(
+            authentication_key_wrapper.as_bytes(),
+            authenticated_evidence_wrapper.as_bytes(),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn structurally_validated_active_evidence_composition_returns_exact_existing_type() {
+        let canonical_plaintext = *plaintext().as_bytes();
+        let expected = ParsedUntrustedInstallationEvidenceContract::parse_v1(&canonical_plaintext)
+            .unwrap()
+            .validate_structure()
+            .unwrap();
+        let fixture = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            canonical_plaintext,
+        );
+
+        let validated = load_and_validate_active_installation_evidence(&fixture.paths)
+            .expect("canonical active evidence must reach structural validation");
+
+        fn require_exact_result_type(_: StructurallyValidatedInstallationEvidence) {}
+        require_exact_result_type(validated);
+        assert_eq!(validated, expected);
+        assert_eq!(validated.encode_v1().as_bytes(), &canonical_plaintext);
+        fixture.assert_stages_unchanged();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn structurally_validated_active_evidence_composition_preserves_load_and_protection_failures() {
+        let incomplete = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            *plaintext().as_bytes(),
+        );
+        fs::remove_file(incomplete.paths.active_authenticated_evidence.as_path()).unwrap();
+        let load_error = load_and_validate_active_installation_evidence(&incomplete.paths)
+            .expect_err("incomplete active wrappers must return no validated evidence");
+        assert!(matches!(
+            load_error,
+            ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed
+        ));
+        incomplete.assert_stages_unchanged();
+
+        let wrong_hmac = structurally_validated_active_evidence_composition_fixture(
+            [0x44; 32],
+            IDENTIFIER,
+            IDENTIFIER,
+            *plaintext().as_bytes(),
+        );
+        let hmac_error = load_and_validate_active_installation_evidence(&wrong_hmac.paths)
+            .expect_err("wrong HMAC must return no validated evidence");
+        assert!(matches!(
+            hmac_error,
+            ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
+        ));
+        wrong_hmac.assert_stages_unchanged();
+
+        let generation_mismatch = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            [0x77; 16],
+            IDENTIFIER,
+            *plaintext().as_bytes(),
+        );
+        let generation_error =
+            load_and_validate_active_installation_evidence(&generation_mismatch.paths)
+                .expect_err("generation mismatch must return no validated evidence");
+        assert!(matches!(
+            generation_error,
+            ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
+        ));
+        generation_mismatch.assert_stages_unchanged();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn structurally_validated_active_evidence_composition_preserves_plaintext_parse_failures() {
+        for (case, offset, replacement) in [
+            ("wrong inner magic", 0, 0),
+            ("unsupported inner version", 9, 2),
+        ] {
+            let mut malformed_plaintext = *plaintext().as_bytes();
+            malformed_plaintext[offset] = replacement;
+            let fixture = structurally_validated_active_evidence_composition_fixture(
+                KEY,
+                IDENTIFIER,
+                IDENTIFIER,
+                malformed_plaintext,
+            );
+
+            let error =
+                load_and_validate_active_installation_evidence(&fixture.paths).expect_err(case);
+
+            assert!(matches!(
+                error,
+                ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed
+            ));
+            fixture.assert_stages_unchanged();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn structurally_validated_active_evidence_composition_preserves_structural_failures() {
+        for (case, start, end, replacement) in [
+            ("wrong evidence-format identity", 12, 28, 0),
+            ("wrong permanent application identifier", 31, 60, b'x'),
+        ] {
+            let mut structurally_invalid_plaintext = *plaintext().as_bytes();
+            structurally_invalid_plaintext[start..end].fill(replacement);
+            ParsedUntrustedInstallationEvidenceContract::parse_v1(&structurally_invalid_plaintext)
+                .expect("structural fixture must remain parseable");
+            let fixture = structurally_validated_active_evidence_composition_fixture(
+                KEY,
+                IDENTIFIER,
+                IDENTIFIER,
+                structurally_invalid_plaintext,
+            );
+
+            let error =
+                load_and_validate_active_installation_evidence(&fixture.paths).expect_err(case);
+
+            assert!(matches!(
+                error,
+                ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed
+            ));
+            fixture.assert_stages_unchanged();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn structurally_validated_active_evidence_composition_error_debug_is_coarse_and_redacted() {
+        for (error, expected) in [
+            (
+                ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed,
+                "ActiveEvidenceLoadFailed",
+            ),
+            (
+                ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed,
+                "ActiveEvidenceProtectionFailed",
+            ),
+            (
+                ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed,
+                "ActiveEvidencePlaintextParseFailed",
+            ),
+            (
+                ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed,
+                "ActiveEvidenceStructuralValidationFailed",
+            ),
+        ] {
+            let debug = format!("{error:?}");
+            assert_eq!(debug, expected);
+            for forbidden in ["path", "CHDPAPI", "CHEVAUTH", "[0,", "native"] {
+                assert!(!debug.contains(forbidden));
+            }
+        }
+    }
+
+    #[test]
+    fn structurally_validated_active_evidence_composition_source_proves_private_narrow_boundary() {
+        const SOURCE: &str = include_str!("mod.rs");
+        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let error_marker = "enum ActiveStructurallyValidatedEvidenceRecoveryError {";
+        assert_eq!(production_source.matches(error_marker).count(), 1);
+        let error_body = production_source
+            .split_once(error_marker)
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(error_body.matches("Failed,").count(), 4);
+        for variant in [
+            "LoadFailed,",
+            "ProtectionFailed,",
+            "PlaintextParseFailed,",
+            "StructuralValidationFailed,",
+        ] {
+            assert!(error_body.contains(variant));
+        }
+        assert!(!error_body.contains('('));
+
+        let definition_marker = "fn load_and_validate_active_installation_evidence(";
+        assert_eq!(production_source.matches(definition_marker).count(), 1);
+        assert_eq!(
+            production_source
+                .matches("load_and_validate_active_installation_evidence(")
+                .count(),
+            1
+        );
+        let before_definition = production_source.split_once(definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(declaration_attributes.contains("#[cfg(windows)]"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let boundary = production_source
+            .split_once(definition_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(boundary.contains("paths: &InstallationEvidencePersistencePaths"));
+        assert!(boundary.contains("StructurallyValidatedInstallationEvidence"));
+        assert!(boundary.contains("ActiveStructurallyValidatedEvidenceRecoveryError"));
+        let stages = [
+            "load_and_recover_generation_matched_installation_evidence(",
+            "parse_generation_matched_installation_evidence_plaintext(",
+            "validate_parsed_installation_evidence_structure(",
+        ];
+        let positions = stages.map(|stage| {
+            assert_eq!(boundary.matches(stage).count(), 1);
+            boundary.find(stage).unwrap()
+        });
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+
+        for excluded in [
+            "load_active_installation_evidence_wrapper_pair",
+            "recover_generation_matched_installation_evidence_from_wrappers",
+            "WindowsCurrentUserDpapi",
+            "ValidatedProtectedWrapper::parse",
+            "verify_authenticated_envelope_v1",
+            "parse_inner_plaintext",
+            "parse_v1",
+            "validate_structure",
+            "rusqlite",
+            "database",
+            "freshness",
+            "rollback",
+            "setup",
+            "startup",
+            "tauri",
+            "unsafe",
+            "retry",
+            "fallback",
+            "repair",
+            "replace",
+            "cleanup",
+        ] {
+            assert!(!boundary.contains(excluded), "unexpected term: {excluded}");
+        }
+        assert!(!boundary.contains(&["std", "::fs"].concat()));
+        assert!(!boundary.contains(&["installation", "_state"].concat()));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn active_evidence_load_trust_chain_composition_returns_exact_matched_type_in_canonical_order()
     {
@@ -1482,7 +1810,7 @@ mod tests {
             production_source
                 .matches("load_and_recover_generation_matched_installation_evidence(")
                 .count(),
-            1
+            2
         );
         let before_definition = production_source.split_once(definition_marker).unwrap().0;
         let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
@@ -2022,7 +2350,7 @@ mod tests {
             production_source
                 .matches("parse_generation_matched_installation_evidence_plaintext(")
                 .count(),
-            1
+            2
         );
         let before_definition = production_source.split_once(definition_marker).unwrap().0;
         let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
@@ -2183,7 +2511,7 @@ mod tests {
             production_source
                 .matches("validate_parsed_installation_evidence_structure(")
                 .count(),
-            1
+            2
         );
         let before_definition = production_source.split_once(definition_marker).unwrap().0;
         let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
