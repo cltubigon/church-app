@@ -116,3 +116,60 @@ Both cases open and retain the hardened exact test-root handle, reuse the accept
 After the manually supplied USB case failed before its first drive-type query, the private controlled-host module gained a first-failed-stage diagnostic that mirrors the accepted directory helper without changing it. The diagnostic preserves the helper's actual native order: attribute/tag information is queried before standard-fact conversion, and identity, link, and normalized-path facts are queried before directory, reparse, and strict GUID policy checks. It adds no runtime native operation; the repeated disk and reparse confirmations remain.
 
 The accepted diagnostic rerun reached exact-directory open, the disk-handle fact, and the standard-information query, then stopped fail-closed when `FILE_ATTRIBUTE_TAG_INFO` was unavailable (`DirectoryAttributeInfoUnavailable`, disposition `Unavailable`). No drive-type or device-property query followed. This observation does not establish a filesystem type, hardware cause, or general USB incompatibility, and it does not justify relaxing the accepted attribute/tag, reparse, identity, or normalized-path boundary. The shared hardening checks remain unchanged.
+
+## Approved production database architecture (not implemented)
+
+Carlo approved this bounded architecture package as the canonical future production database foundation. The approval covers product, architecture, and security decisions; it does not claim current capability or authorize implementation. Existing installation-evidence contracts and protections remain unchanged. All database schema, key, freshness-anchor, adapter, correspondence, migration, backup/restore, and setup/startup/recovery behavior described here is absent.
+
+The future layers are deliberately separate: pure database-key ownership and metadata contracts; pure metadata decoding and validation; pure correspondence and freshness models; production dependency and encrypted database adapters; path and sidecar validation; key recovery; read-only inspection; integrity; correspondence; freshness; installation-state classification; startup authorization; operational opening; and separately authorized setup, migration, rekey, restore, recovery, replacement, and destructive cleanup. No earlier value or stage grants later authority.
+
+SQLCipher Community Edition is the selected engine for production parish databases, production backups, and production recovery databases; plain SQLite is prohibited for those artifacts. The production Rust integration will use one exact pinned `rusqlite` release with `bundled-sqlcipher-vendored-openssl`, without system SQLCipher/OpenSSL discovery or encrypted/unencrypted fallback. Pinned SQLCipher/OpenSSL identities and the lockfile become release evidence. The existing `sqlcipher_windows_feasibility` module and `rusqlite` development dependency remain test-only evidence, not production code or production dependency promotion.
+
+The supported production baseline is Windows 10 x64 and Windows 11 x64, local NTFS, a non-elevated standard user, and CurrentUser DPAPI. Windows ARM64, 32-bit Windows, ReFS, removable and network storage, Wine, Windows Server, and compatibility layers remain unsupported until separately approved.
+
+### Key separation
+
+The database key is an independent random 256-bit value generated from the Windows OS cryptographic RNG. It is never password-derived or derived from parish, installation, evidence, device, or user values, and it is never shared with the evidence HMAC key. Its owner is non-`Copy`, exposes no unrestricted `Clone`, redacts formatting, and best-effort zeroizes owned buffers. A dedicated CurrentUser-DPAPI wrapper protects the live database key. Portable recovery instead uses a separate random recovery key and authenticated recovery envelope. Recovery-key custody, duplication, rotation, loss, and destruction are explicit operator/security responsibilities.
+
+### Metadata version 1
+
+The singleton table is named `church_app_database_metadata` and contains exactly one canonical, non-null row. Missing, duplicate, partial, wrong-storage-class, wrong-length, unsupported, or malformed state fails closed.
+
+| Field | Approved SQLite representation and rule |
+| --- | --- |
+| `singleton_id` | `INTEGER`; canonical value 1 |
+| `metadata_contract_version` | positive `INTEGER`; initial value 1 |
+| `database_schema_version` | positive `INTEGER`; initial value 1 |
+| `permanent_application_identifier` | bounded canonical UTF-8 `TEXT`; exactly `io.github.cltubigon.churchapp` |
+| `database_format_identity` | existing typed `ApplicationDatabaseFormatIdentity`; `BLOB`; exactly 16 bytes; direct typed decoding; exact typed equality; never text |
+| `parish_identifier` | `BLOB`; exactly 16 bytes |
+| `installation_identifier` | `BLOB`; exactly 16 bytes |
+| `installation_generation` | `BLOB`; exactly 8-byte big-endian encoding |
+| `recovery_replacement_generation` | `BLOB`; exactly 8-byte big-endian encoding |
+| `database_key_generation_identifier` | `BLOB`; exactly 16 bytes |
+| `setup_publication_identifier` | `BLOB`; exactly 16 bytes |
+| `database_created_at` | non-negative UTC Unix milliseconds in `INTEGER`; diagnostic only |
+
+The database-format identity is never UTF-8, hex, UUID text, Base64, a numeric reinterpretation, alternate spelling, hash, prefix, or fingerprint. SQLite `application_id` is `0x43484150`. SQLite `user_version` mirrors `database_schema_version`, while metadata remains authoritative; disagreement fails as malformed or unsupported state and is never auto-repaired.
+
+### Correspondence, freshness, and authority
+
+Exact typed equality is required across database and evidence for the permanent application identifier, `ApplicationDatabaseFormatIdentity`, parish identifier, installation identifier, database-key generation identifier, and setup-publication identifier. Lineage comparison applies to installation generation and recovery/replacement generation. Evidence format identity and evidence format version remain evidence-only. Timestamps are diagnostic and never authorize freshness.
+
+A future separate CurrentUser-DPAPI-protected freshness anchor records installation identifier, installation generation, recovery/replacement generation, database-key generation identifier, and setup-publication identifier. Normal startup eventually requires database, evidence, and anchor agreement: equal lineage succeeds; lower evidence is stale evidence; higher evidence is a stale database; opposing lineage movement is rollback suspicion; ambiguity fails closed. A coordinated rollback of every local artifact and applicable profile state to one mutually consistent snapshot is not detectable by this design, so it provides no cryptographic monotonic rollback guarantee.
+
+Setup is the only creation authority. Ordinary startup never creates a database, key wrapper, evidence, anchor, metadata, or sidecar. Recovery, restore, migration, rekey, anchor replacement, database replacement, and destructive cleanup require separate explicit authorization. There is no generic repair authority.
+
+### Opening, integrity, storage, and migrations
+
+Ordinary inspection is read-only, no-create, bounded, one attempt, and one consistent read snapshot. It has no application retry loop, migration, repair, journal recovery, key regeneration, or writable fallback. Approved principles are `SQLITE_OPEN_READONLY`, `SQLITE_OPEN_URI`, private cache, full-mutex/serialized behavior, no shared cache, `SQLITE_OPEN_NOFOLLOW` where supported, internally generated URI parameters only, no `immutable=1` on ordinary startup, a maximum five-second busy timeout, disabled extension loading, `trusted_schema` off, defensive/query-only policy, and explicit close handling. Concrete API composition remains deferred.
+
+Every future open runs SQLCipher cipher-integrity checking and SQLite `quick_check` limited to one reported error. Full integrity checking is required at controlled backup acceptance, staged restore, migration, rekey/key replacement, journal recovery, database replacement, explicit diagnostics, and abnormal-interruption recovery. An incomplete or cancelled check never succeeds.
+
+The exact application-owned production directory and filename `parish-data.db` are required on local NTFS. Reparse points, symlinks, junctions, mount traversal, cloud placeholders, hard links, network paths, removable storage, unstable final path/file identity, and unexpected sidecars fail closed. Database-aware race protection and a dedicated database hardening adapter are required; the evidence-wrapper loader cannot simply be reused. WAL and SHM are initially prohibited. Startup never deletes or repairs sidecars.
+
+Transactions use rollback-journal `DELETE`, `synchronous=FULL`, explicit transactions, `secure_delete=ON`, and `auto_vacuum=NONE`. There is no automatic journal-mode switch, VACUUM, or WAL checkpoint policy. Rust owns forward-only migrations. Ordinary startup may detect but never execute a migration. Migration requires explicit maintenance authorization, a verified recoverable backup, and successful full integrity checking; interruption fails closed and a newer unsupported schema is never automatically downgraded.
+
+Future coarse redacted errors include database path invalid/absent/open failed, database key unavailable, key application failed, wrong key or unreadable encrypted database, corrupt or unsupported database, unsupported metadata version, missing/duplicate/malformed metadata, evidence/database mismatch, stale evidence, stale database, rollback suspected, integrity-check failed, sidecar inconsistency, and unavailable inspection. They expose no path, SQL or PRAGMA text, key, identifier, generation, metadata value, DPAPI data, native status, raw error chain, username, or profile directory.
+
+Exact Rust symbols, wrapper layouts, Windows API composition, VFS technique, compile-time flags, recovery-envelope framing, progress reporting, fixtures, and release automation remain deferred. Each dependency, schema, migration, key/recovery wrapper, anchor, path/VFS, opening, backup/restore, authority-integration, replacement, and destructive-operation change requires a separately scoped approval.
