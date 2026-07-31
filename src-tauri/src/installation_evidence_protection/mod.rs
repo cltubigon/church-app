@@ -19,6 +19,11 @@ use crate::{
     },
     installation_evidence_authentication_key::EvidenceAuthenticationKey,
 };
+#[cfg(windows)]
+use crate::{
+    installation_evidence_persistence::load_active_installation_evidence_wrapper_pair,
+    storage_foundation::InstallationEvidencePersistencePaths,
+};
 
 mod protected_blob_wrapper;
 mod protected_key_payload;
@@ -349,6 +354,37 @@ fn recover_generation_matched_installation_evidence_from_wrappers(
 }
 
 #[cfg(windows)]
+enum ActiveInstallationEvidenceRecoveryError {
+    LoadFailed,
+    ProtectionFailed,
+}
+
+#[cfg(windows)]
+impl fmt::Debug for ActiveInstallationEvidenceRecoveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::LoadFailed => "ActiveEvidenceLoadFailed",
+            Self::ProtectionFailed => "ActiveEvidenceProtectionFailed",
+        })
+    }
+}
+
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+fn load_and_recover_generation_matched_installation_evidence(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<GenerationMatchedAuthenticatedEnvelopeV1, ActiveInstallationEvidenceRecoveryError> {
+    let (authentication_key_wrapper, authenticated_evidence_wrapper) =
+        load_active_installation_evidence_wrapper_pair(paths)
+            .map_err(|_| ActiveInstallationEvidenceRecoveryError::LoadFailed)?;
+    recover_generation_matched_installation_evidence_from_wrappers(
+        authentication_key_wrapper,
+        authenticated_evidence_wrapper,
+    )
+    .map_err(|_| ActiveInstallationEvidenceRecoveryError::ProtectionFailed)
+}
+
+#[cfg(windows)]
 pub(crate) fn recover_and_authenticate_in_memory(
     protected_key_wrapper: &[u8],
     protected_evidence_wrapper: &[u8],
@@ -380,11 +416,22 @@ fn recover_and_authenticate_in_memory_with(
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, collections::VecDeque, io::Cursor};
+    #[cfg(windows)]
+    use std::{
+        env, fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
     use super::*;
+    #[cfg(windows)]
+    use crate::storage_foundation::{
+        InstallationEvidencePersistencePaths, installation_evidence_persistence_paths,
+    };
     use crate::{
         installation_evidence_authenticated_envelope::construct_authenticated_envelope_v1,
         installation_evidence_contract::{
@@ -1108,7 +1155,7 @@ mod tests {
             production_source
                 .matches("recover_generation_matched_installation_evidence_from_wrappers(")
                 .count(),
-            1
+            2
         );
 
         let before_definition = production_source.split_once(definition_marker).unwrap().0;
@@ -1189,6 +1236,295 @@ mod tests {
         let wrapper = EncodedProtectedWrapper::encode(kind, protected)
             .expect("synthetic DPAPI output must fit the canonical wrapper");
         owned_wrapper_bytes(wrapper.as_bytes())
+    }
+
+    #[cfg(windows)]
+    struct ActiveEvidenceLoadTrustChainCompositionTestRoot {
+        root: PathBuf,
+        paths: InstallationEvidencePersistencePaths,
+        staged_authentication_key: Vec<u8>,
+        staged_authenticated_evidence: Vec<u8>,
+    }
+
+    #[cfg(windows)]
+    impl ActiveEvidenceLoadTrustChainCompositionTestRoot {
+        fn create(
+            authentication_key_wrapper: &[u8],
+            authenticated_evidence_wrapper: &[u8],
+        ) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock must follow epoch")
+                .as_nanos();
+            let root = env::temp_dir().join(format!(
+                "church-app-active-load-trust-chain-{}-{nanos}-{counter}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("unique composition root must be new");
+            let paths = installation_evidence_persistence_paths(&root);
+            fs::create_dir(paths.evidence_directory.as_path())
+                .expect("exact synthetic evidence directory must be created");
+            fs::write(
+                paths.active_authentication_key.as_path(),
+                authentication_key_wrapper,
+            )
+            .expect("synthetic active authentication-key wrapper must be written");
+            fs::write(
+                paths.active_authenticated_evidence.as_path(),
+                authenticated_evidence_wrapper,
+            )
+            .expect("synthetic active authenticated-evidence wrapper must be written");
+            let staged_authentication_key = b"composition-stage-key-must-not-be-read".to_vec();
+            let staged_authenticated_evidence =
+                b"composition-stage-evidence-must-not-be-read".to_vec();
+            fs::write(
+                paths.staged_authentication_key.as_path(),
+                &staged_authentication_key,
+            )
+            .expect("synthetic staged authentication-key sentinel must be written");
+            fs::write(
+                paths.staged_authenticated_evidence.as_path(),
+                &staged_authenticated_evidence,
+            )
+            .expect("synthetic staged authenticated-evidence sentinel must be written");
+            Self {
+                root,
+                paths,
+                staged_authentication_key,
+                staged_authenticated_evidence,
+            }
+        }
+
+        fn assert_stages_unchanged(&self) {
+            assert_eq!(
+                fs::read(self.paths.staged_authentication_key.as_path()).unwrap(),
+                self.staged_authentication_key
+            );
+            assert_eq!(
+                fs::read(self.paths.staged_authenticated_evidence.as_path()).unwrap(),
+                self.staged_authenticated_evidence
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ActiveEvidenceLoadTrustChainCompositionTestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(windows)]
+    fn active_evidence_load_trust_chain_composition_fixture(
+        key: [u8; 32],
+        key_identifier: [u8; 16],
+        envelope_identifier: [u8; 16],
+    ) -> ActiveEvidenceLoadTrustChainCompositionTestRoot {
+        let authentication_key_wrapper = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticationKey,
+            &key_payload(key, key_identifier),
+        );
+        let envelope = encoded_envelope(KEY, envelope_identifier);
+        let authenticated_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                envelope.as_bytes(),
+            );
+        ActiveEvidenceLoadTrustChainCompositionTestRoot::create(
+            authentication_key_wrapper.as_bytes(),
+            authenticated_evidence_wrapper.as_bytes(),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_evidence_load_trust_chain_composition_returns_exact_matched_type_in_canonical_order()
+    {
+        let fixture =
+            active_evidence_load_trust_chain_composition_fixture(KEY, IDENTIFIER, IDENTIFIER);
+
+        let matched = load_and_recover_generation_matched_installation_evidence(&fixture.paths)
+            .expect("canonical active wrappers must load and reach generation matching");
+
+        fn require_exact_result_type(_: &GenerationMatchedAuthenticatedEnvelopeV1) {}
+        require_exact_result_type(&matched);
+        assert_eq!(
+            format!("{matched:?}"),
+            "GenerationMatchedAuthenticatedEnvelopeV1([REDACTED])"
+        );
+        fixture.assert_stages_unchanged();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_evidence_load_trust_chain_composition_maps_load_failure_without_partial_result() {
+        let fixture =
+            active_evidence_load_trust_chain_composition_fixture(KEY, IDENTIFIER, IDENTIFIER);
+        fs::remove_file(fixture.paths.active_authenticated_evidence.as_path())
+            .expect("synthetic second active wrapper must be removable");
+
+        let error = load_and_recover_generation_matched_installation_evidence(&fixture.paths)
+            .expect_err("an incomplete active pair must return no matched evidence");
+
+        assert!(matches!(
+            error,
+            ActiveInstallationEvidenceRecoveryError::LoadFailed
+        ));
+        assert_eq!(format!("{error:?}"), "ActiveEvidenceLoadFailed");
+        fixture.assert_stages_unchanged();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_evidence_load_trust_chain_composition_maps_wrong_hmac_to_protection_failure() {
+        let fixture = active_evidence_load_trust_chain_composition_fixture(
+            [0x44; 32], IDENTIFIER, IDENTIFIER,
+        );
+
+        let error = load_and_recover_generation_matched_installation_evidence(&fixture.paths)
+            .expect_err("wrong HMAC key must return no matched evidence");
+
+        assert!(matches!(
+            error,
+            ActiveInstallationEvidenceRecoveryError::ProtectionFailed
+        ));
+        assert_eq!(format!("{error:?}"), "ActiveEvidenceProtectionFailed");
+        fixture.assert_stages_unchanged();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_evidence_load_trust_chain_composition_maps_generation_mismatch_to_protection_failure()
+    {
+        let fixture =
+            active_evidence_load_trust_chain_composition_fixture(KEY, [0x77; 16], IDENTIFIER);
+
+        let error = load_and_recover_generation_matched_installation_evidence(&fixture.paths)
+            .expect_err("generation mismatch must return no matched evidence");
+
+        assert!(matches!(
+            error,
+            ActiveInstallationEvidenceRecoveryError::ProtectionFailed
+        ));
+        assert_eq!(format!("{error:?}"), "ActiveEvidenceProtectionFailed");
+        fixture.assert_stages_unchanged();
+    }
+
+    #[test]
+    fn active_evidence_load_trust_chain_composition_source_proves_exact_private_boundary() {
+        const SOURCE: &str = include_str!("mod.rs");
+        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let error_marker = "enum ActiveInstallationEvidenceRecoveryError {";
+        assert_eq!(production_source.matches(error_marker).count(), 1);
+        let error_body = production_source
+            .split_once(error_marker)
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(error_body.matches("Failed,").count(), 2);
+        assert!(error_body.contains("LoadFailed,"));
+        assert!(error_body.contains("ProtectionFailed,"));
+        assert!(!error_body.contains('('));
+
+        let definition_marker = "fn load_and_recover_generation_matched_installation_evidence(";
+        assert_eq!(production_source.matches(definition_marker).count(), 1);
+        assert_eq!(
+            production_source
+                .matches("load_and_recover_generation_matched_installation_evidence(")
+                .count(),
+            1
+        );
+        let before_definition = production_source.split_once(definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(declaration_attributes.contains("#[cfg(windows)]"));
+        assert!(declaration_attributes.contains("#[cfg_attr(test, allow(dead_code))]"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let boundary = production_source
+            .split_once(definition_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(boundary.contains("paths: &InstallationEvidencePersistencePaths"));
+        assert!(boundary.contains("GenerationMatchedAuthenticatedEnvelopeV1"));
+        assert!(boundary.contains("ActiveInstallationEvidenceRecoveryError"));
+        assert_eq!(
+            boundary
+                .matches("load_active_installation_evidence_wrapper_pair(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            boundary
+                .matches("recover_generation_matched_installation_evidence_from_wrappers(")
+                .count(),
+            1
+        );
+        assert!(
+            boundary
+                .find("load_active_installation_evidence_wrapper_pair(")
+                .unwrap()
+                < boundary
+                    .find("recover_generation_matched_installation_evidence_from_wrappers(")
+                    .unwrap()
+        );
+        assert!(
+            boundary.contains("let (authentication_key_wrapper, authenticated_evidence_wrapper) =")
+        );
+        assert!(boundary.contains("ActiveInstallationEvidenceRecoveryError::LoadFailed"));
+        assert!(boundary.contains("ActiveInstallationEvidenceRecoveryError::ProtectionFailed"));
+
+        for excluded in [
+            "windows_filesystem",
+            "single_wrapper",
+            "ValidatedProtectedWrapper::parse",
+            "WindowsCurrentUserDpapi",
+            "DecodedProtectedKeyMaterial::parse",
+            "RawUntrustedAuthenticatedEnvelopeV1::from_unprotected",
+            "verify_authenticated_envelope_v1",
+            ".match_generation",
+            "recover_and_authenticate_in_memory",
+            "recover_and_authenticate_in_memory_with",
+            "parse_inner_plaintext",
+            "database",
+            "stage",
+            "setup",
+            "startup",
+            "tauri",
+            "unsafe",
+            "retry",
+            "fallback",
+            "repair",
+            "replace",
+            "cleanup",
+        ] {
+            assert!(
+                !boundary.contains(excluded),
+                "unexpected boundary term: {excluded}"
+            );
+        }
+        assert!(!boundary.contains(&["std", "::fs"].concat()));
+        assert!(!boundary.contains(&["rusqlite", "::"].concat()));
+        assert!(!boundary.contains(&["installation", "_state"].concat()));
+
+        let error_debug = production_source
+            .split_once("impl fmt::Debug for ActiveInstallationEvidenceRecoveryError")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(error_debug.contains("\"ActiveEvidenceLoadFailed\""));
+        assert!(error_debug.contains("\"ActiveEvidenceProtectionFailed\""));
+        for forbidden in ["path", "CHDPAPI", "CHEVAUTH", "[0,", "native"] {
+            assert!(!error_debug.contains(forbidden));
+        }
     }
 
     #[cfg(windows)]
