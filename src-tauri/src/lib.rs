@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 mod database_key;
+mod database_metadata_contract;
 mod installation_evidence_authenticated_envelope;
 mod installation_evidence_authentication_key;
 mod installation_evidence_authentication_key_generation;
