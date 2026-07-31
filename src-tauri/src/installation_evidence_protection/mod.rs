@@ -322,6 +322,33 @@ fn match_authenticated_installation_evidence_generation(
 }
 
 #[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+fn recover_generation_matched_installation_evidence_from_wrappers(
+    authentication_key_wrapper: ProtectedWrapperBytes,
+    authenticated_evidence_wrapper: ProtectedWrapperBytes,
+) -> Result<GenerationMatchedAuthenticatedEnvelopeV1, ProtectionStageError> {
+    let (unprotected_authentication_key, unprotected_authenticated_evidence) =
+        unprotect_active_installation_evidence_wrappers(
+            authentication_key_wrapper,
+            authenticated_evidence_wrapper,
+        )?;
+    let (decoded_authentication_key, unprotected_authenticated_evidence) =
+        decode_unprotected_installation_evidence_key_material(
+            unprotected_authentication_key,
+            unprotected_authenticated_evidence,
+        )?;
+    let (authenticated_envelope, recovered_generation_identifier) =
+        authenticate_unprotected_installation_evidence(
+            decoded_authentication_key,
+            unprotected_authenticated_evidence,
+        )?;
+    match_authenticated_installation_evidence_generation(
+        authenticated_envelope,
+        recovered_generation_identifier,
+    )
+}
+
+#[cfg(windows)]
 pub(crate) fn recover_and_authenticate_in_memory(
     protected_key_wrapper: &[u8],
     protected_evidence_wrapper: &[u8],
@@ -1016,7 +1043,7 @@ mod tests {
             production_source
                 .matches("match_authenticated_installation_evidence_generation(")
                 .count(),
-            1
+            2
         );
 
         let before_definition = production_source.split_once(definition_marker).unwrap().0;
@@ -1067,6 +1094,250 @@ mod tests {
         }
         assert!(!boundary.contains(&["std", "::fs"].concat()));
         assert!(!boundary.contains(&["installation", "_state"].concat()));
+    }
+
+    #[test]
+    fn protected_wrapper_trust_chain_orchestration_source_proves_exact_private_windows_composition()
+    {
+        const SOURCE: &str = include_str!("mod.rs");
+        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let definition_marker =
+            "fn recover_generation_matched_installation_evidence_from_wrappers(";
+        assert_eq!(production_source.matches(definition_marker).count(), 1);
+        assert_eq!(
+            production_source
+                .matches("recover_generation_matched_installation_evidence_from_wrappers(")
+                .count(),
+            1
+        );
+
+        let before_definition = production_source.split_once(definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(declaration_attributes.contains("#[cfg(windows)]"));
+        assert!(declaration_attributes.contains("#[cfg_attr(test, allow(dead_code))]"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let boundary = production_source
+            .split_once(definition_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(boundary.contains("authentication_key_wrapper: ProtectedWrapperBytes"));
+        assert!(boundary.contains("authenticated_evidence_wrapper: ProtectedWrapperBytes"));
+        assert!(
+            boundary
+                .contains("Result<GenerationMatchedAuthenticatedEnvelopeV1, ProtectionStageError>")
+        );
+
+        let stages = [
+            "unprotect_active_installation_evidence_wrappers(",
+            "decode_unprotected_installation_evidence_key_material(",
+            "authenticate_unprotected_installation_evidence(",
+            "match_authenticated_installation_evidence_generation(",
+        ];
+        let positions = stages.map(|stage| {
+            assert_eq!(boundary.matches(stage).count(), 1);
+            boundary.find(stage).unwrap()
+        });
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+
+        for excluded in [
+            "ValidatedProtectedWrapper::parse",
+            "WindowsCurrentUserDpapi",
+            "DecodedProtectedKeyMaterial::parse",
+            "RawUntrustedAuthenticatedEnvelopeV1::from_unprotected",
+            "verify_authenticated_envelope_v1",
+            ".match_generation",
+            "recover_and_authenticate_in_memory",
+            "recover_and_authenticate_in_memory_with",
+            "parse_inner_plaintext",
+            "setup",
+            "startup",
+            "unsafe",
+        ] {
+            assert!(!boundary.contains(excluded));
+        }
+        assert!(!boundary.contains(&["std", "::fs"].concat()));
+        assert!(!boundary.contains(&["rusqlite", "::"].concat()));
+        assert!(!boundary.contains(&["installation", "_state"].concat()));
+        assert!(!boundary.contains(&["tauri", "::command"].concat()));
+
+        let secure_unprotected_drop = SOURCE
+            .split_once("impl Drop for UnprotectedBytes")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(secure_unprotected_drop.contains("self.0.zeroize();"));
+        assert_eq!(
+            format!("{:?}", ProtectionStageError::AuthenticationFailed),
+            "AuthenticationFailed"
+        );
+    }
+
+    #[cfg(windows)]
+    fn protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+        kind: ProtectedObjectKind,
+        plaintext: &[u8],
+    ) -> ProtectedWrapperBytes {
+        let protected = WindowsCurrentUserDpapi
+            .protect(plaintext)
+            .expect("synthetic test plaintext must be protectable for the current user");
+        let wrapper = EncodedProtectedWrapper::encode(kind, protected)
+            .expect("synthetic DPAPI output must fit the canonical wrapper");
+        owned_wrapper_bytes(wrapper.as_bytes())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_wrapper_trust_chain_orchestration_returns_exact_matched_type_without_plaintext_parse()
+     {
+        let authentication_key_wrapper = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticationKey,
+            &key_payload(KEY, IDENTIFIER),
+        );
+        let envelope = encoded_envelope(KEY, IDENTIFIER);
+        let authenticated_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                envelope.as_bytes(),
+            );
+
+        let matched = recover_generation_matched_installation_evidence_from_wrappers(
+            authentication_key_wrapper,
+            authenticated_evidence_wrapper,
+        )
+        .expect("canonical matching wrappers must traverse all four typed stages");
+
+        fn require_exact_result_type(_: &GenerationMatchedAuthenticatedEnvelopeV1) {}
+        require_exact_result_type(&matched);
+        assert_eq!(
+            format!("{matched:?}"),
+            "GenerationMatchedAuthenticatedEnvelopeV1([REDACTED])"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_wrapper_trust_chain_orchestration_fails_closed_before_later_stages() {
+        let envelope = encoded_envelope(KEY, IDENTIFIER);
+        let malformed_key_wrapper = owned_wrapper_bytes(&[0; 15]);
+        let authenticated_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                envelope.as_bytes(),
+            );
+        assert_eq!(
+            recover_generation_matched_installation_evidence_from_wrappers(
+                malformed_key_wrapper,
+                authenticated_evidence_wrapper,
+            )
+            .expect_err("malformed key wrapper must return no matched evidence"),
+            ProtectionStageError::WrapperParseFailed
+        );
+
+        let protected_key = protect_authentication_material(
+            &EvidenceAuthenticationKey::from_bytes(KEY),
+            identifier(IDENTIFIER),
+        )
+        .expect("synthetic key material must be protectable for the current user");
+        let mut corrupted_key_wrapper = protected_key.as_bytes().to_vec();
+        corrupted_key_wrapper[protected_blob_wrapper::HEADER_LENGTH] ^= 1;
+        let authenticated_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                envelope.as_bytes(),
+            );
+        assert_eq!(
+            recover_generation_matched_installation_evidence_from_wrappers(
+                owned_wrapper_bytes(&corrupted_key_wrapper),
+                authenticated_evidence_wrapper,
+            )
+            .expect_err("key DPAPI failure must return no matched evidence"),
+            ProtectionStageError::UnprotectionUnavailable
+        );
+
+        let malformed_key_payload_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticationKey,
+                &[0x31; 48],
+            );
+        let authenticated_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                envelope.as_bytes(),
+            );
+        assert_eq!(
+            recover_generation_matched_installation_evidence_from_wrappers(
+                malformed_key_payload_wrapper,
+                authenticated_evidence_wrapper,
+            )
+            .expect_err("malformed key payload must return no matched evidence"),
+            ProtectionStageError::MalformedProtectedKeyPayload
+        );
+
+        let authentication_key_wrapper = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticationKey,
+            &key_payload(KEY, IDENTIFIER),
+        );
+        let wrong_length_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                &[0x42; 225],
+            );
+        assert_eq!(
+            recover_generation_matched_installation_evidence_from_wrappers(
+                authentication_key_wrapper,
+                wrong_length_evidence_wrapper,
+            )
+            .expect_err("wrong evidence length must return no matched evidence"),
+            ProtectionStageError::WrapperParseFailed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_wrapper_trust_chain_orchestration_authentication_precedes_generation_matching() {
+        let envelope = encoded_envelope(KEY, IDENTIFIER);
+        let wrong_key_wrapper = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticationKey,
+            &key_payload([0x44; 32], IDENTIFIER),
+        );
+        let authenticated_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                envelope.as_bytes(),
+            );
+        assert_eq!(
+            recover_generation_matched_installation_evidence_from_wrappers(
+                wrong_key_wrapper,
+                authenticated_evidence_wrapper,
+            )
+            .expect_err("wrong HMAC key must return no matched evidence"),
+            ProtectionStageError::AuthenticationFailed
+        );
+
+        let different_generation_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticationKey,
+                &key_payload(KEY, [0x77; 16]),
+            );
+        let authenticated_evidence_wrapper =
+            protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+                ProtectedObjectKind::AuthenticatedEvidence,
+                envelope.as_bytes(),
+            );
+        assert_eq!(
+            recover_generation_matched_installation_evidence_from_wrappers(
+                different_generation_wrapper,
+                authenticated_evidence_wrapper,
+            )
+            .expect_err("generation mismatch must return no matched evidence"),
+            ProtectionStageError::GenerationMismatch
+        );
     }
 
     #[test]
