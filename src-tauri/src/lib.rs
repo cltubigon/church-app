@@ -1,5 +1,11 @@
 use serde::Serialize;
 
+mod installation_evidence_authenticated_envelope;
+mod installation_evidence_authentication_key;
+mod installation_evidence_authentication_key_generation;
+pub mod installation_evidence_contract;
+mod installation_evidence_persistence;
+mod installation_evidence_protection;
 pub mod installation_state;
 pub mod storage_foundation;
 
