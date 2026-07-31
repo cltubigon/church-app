@@ -9,6 +9,8 @@ use std::fmt;
 
 use zeroize::Zeroize;
 
+#[cfg(any(windows, test))]
+use crate::installation_evidence_persistence::ProtectedWrapperBytes;
 use crate::{
     installation_evidence_authenticated_envelope::{
         EncodedAuthenticatedEnvelopeV1, EvidenceAuthenticationKeyGenerationIdentifier,
@@ -225,6 +227,51 @@ fn unprotect_authenticated_evidence_with(
     RawUntrustedAuthenticatedEnvelopeV1::from_unprotected(&plaintext)
 }
 
+/// Returns the unprotected authentication-key payload first and the
+/// unprotected authenticated-evidence payload second. Success establishes only
+/// canonical outer framing, exact outer object kinds, and two successful
+/// current-user DPAPI unprotections.
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+fn unprotect_active_installation_evidence_wrappers(
+    authentication_key_wrapper: ProtectedWrapperBytes,
+    authenticated_evidence_wrapper: ProtectedWrapperBytes,
+) -> Result<(UnprotectedBytes, UnprotectedBytes), ProtectionStageError> {
+    unprotect_active_installation_evidence_wrappers_with(
+        &WindowsCurrentUserDpapi,
+        authentication_key_wrapper,
+        authenticated_evidence_wrapper,
+    )
+}
+
+#[cfg(any(windows, test))]
+fn unprotect_active_installation_evidence_wrappers_with(
+    protector: &impl InMemoryProtector,
+    authentication_key_wrapper: ProtectedWrapperBytes,
+    authenticated_evidence_wrapper: ProtectedWrapperBytes,
+) -> Result<(UnprotectedBytes, UnprotectedBytes), ProtectionStageError> {
+    let authentication_key = ValidatedProtectedWrapper::parse(
+        authentication_key_wrapper.as_bytes(),
+        ProtectedObjectKind::AuthenticationKey,
+    )?;
+    let unprotected_authentication_key = protector
+        .unprotect(authentication_key.blob())
+        .map_err(|_| ProtectionStageError::UnprotectionUnavailable)?;
+
+    let authenticated_evidence = ValidatedProtectedWrapper::parse(
+        authenticated_evidence_wrapper.as_bytes(),
+        ProtectedObjectKind::AuthenticatedEvidence,
+    )?;
+    let unprotected_authenticated_evidence = protector
+        .unprotect(authenticated_evidence.blob())
+        .map_err(|_| ProtectionStageError::UnprotectionUnavailable)?;
+
+    Ok((
+        unprotected_authentication_key,
+        unprotected_authenticated_evidence,
+    ))
+}
+
 #[cfg(windows)]
 pub(crate) fn recover_and_authenticate_in_memory(
     protected_key_wrapper: &[u8],
@@ -256,7 +303,7 @@ fn recover_and_authenticate_in_memory_with(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::VecDeque};
+    use std::{cell::RefCell, collections::VecDeque, io::Cursor};
 
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -271,6 +318,7 @@ mod tests {
             RecoveryOrReplacementGeneration, SUPPORTED_EVIDENCE_FORMAT_VERSION,
             UnvalidatedInstallationEvidenceContract,
         },
+        installation_evidence_persistence::read_bounded_protected_wrapper,
         storage_foundation::APPLICATION_DATABASE_FORMAT_IDENTITY,
     };
 
@@ -296,6 +344,15 @@ mod tests {
         fn with_unprotected(results: impl IntoIterator<Item = Vec<u8>>) -> Self {
             Self {
                 unprotected_results: RefCell::new(results.into_iter().map(Ok).collect()),
+                ..Self::default()
+            }
+        }
+
+        fn with_unprotected_results(
+            results: impl IntoIterator<Item = Result<Vec<u8>, ProtectorOperationError>>,
+        ) -> Self {
+            Self {
+                unprotected_results: RefCell::new(results.into_iter().collect()),
                 ..Self::default()
             }
         }
@@ -366,6 +423,17 @@ mod tests {
         EncodedProtectedWrapper::encode(kind, OpaqueProtectedBytes::new(vec![1])).unwrap()
     }
 
+    fn owned_wrapper(kind: ProtectedObjectKind, blob: Vec<u8>) -> ProtectedWrapperBytes {
+        let wrapper = EncodedProtectedWrapper::encode(kind, OpaqueProtectedBytes::new(blob))
+            .expect("synthetic protected wrapper must encode");
+        owned_wrapper_bytes(wrapper.as_bytes())
+    }
+
+    fn owned_wrapper_bytes(bytes: &[u8]) -> ProtectedWrapperBytes {
+        read_bounded_protected_wrapper(&mut Cursor::new(bytes), bytes.len() as u64)
+            .expect("synthetic owned protected-wrapper bytes must satisfy the bounded reader")
+    }
+
     fn key_payload(key: [u8; 32], generation: [u8; 16]) -> Vec<u8> {
         EncodedProtectedKeyPayload::encode(
             &EvidenceAuthenticationKey::from_bytes(key),
@@ -412,6 +480,181 @@ mod tests {
         assert_eq!(calls[1].len(), 226);
         assert_eq!(key_wrapper.as_bytes()[9], 1);
         assert_eq!(evidence_wrapper.as_bytes()[9], 2);
+    }
+
+    #[test]
+    fn paired_wrapper_unprotection_returns_exact_owned_values_in_key_then_evidence_order() {
+        let fake = FakeProtector::with_unprotected([vec![0x31, 0x32], vec![0x41, 0x42, 0x43]]);
+        let result = unprotect_active_installation_evidence_wrappers_with(
+            &fake,
+            owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
+            owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
+        )
+        .expect("both synthetic unprotections must succeed");
+
+        assert_eq!(result.0.as_bytes(), [0x31, 0x32]);
+        assert_eq!(result.1.as_bytes(), [0x41, 0x42, 0x43]);
+        assert_eq!(format!("{:?}", result.0), "UnprotectedBytes([REDACTED])");
+        assert_eq!(format!("{:?}", result.1), "UnprotectedBytes([REDACTED])");
+        assert_eq!(
+            fake.unprotected_inputs.borrow().as_slice(),
+            &[vec![0xa1], vec![0xb2]]
+        );
+    }
+
+    #[test]
+    fn paired_wrapper_unprotection_malformed_key_makes_zero_dpapi_calls() {
+        let fake = FakeProtector::with_unprotected([vec![0x31], vec![0x41]]);
+        let malformed_key = owned_wrapper_bytes(&[0; 15]);
+
+        assert_eq!(
+            unprotect_active_installation_evidence_wrappers_with(
+                &fake,
+                malformed_key,
+                owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
+            )
+            .unwrap_err(),
+            ProtectionStageError::WrapperParseFailed
+        );
+        assert!(fake.unprotected_inputs.borrow().is_empty());
+    }
+
+    #[test]
+    fn paired_wrapper_unprotection_wrong_key_kind_makes_zero_dpapi_calls() {
+        let fake = FakeProtector::with_unprotected([vec![0x31], vec![0x41]]);
+
+        assert_eq!(
+            unprotect_active_installation_evidence_wrappers_with(
+                &fake,
+                owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xa1]),
+                owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
+            )
+            .unwrap_err(),
+            ProtectionStageError::WrongProtectedObjectKind
+        );
+        assert!(fake.unprotected_inputs.borrow().is_empty());
+    }
+
+    #[test]
+    fn paired_wrapper_unprotection_key_dpapi_failure_is_fail_fast() {
+        let fake =
+            FakeProtector::with_unprotected_results([Err(ProtectorOperationError), Ok(vec![0x41])]);
+
+        assert_eq!(
+            unprotect_active_installation_evidence_wrappers_with(
+                &fake,
+                owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
+                owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
+            )
+            .unwrap_err(),
+            ProtectionStageError::UnprotectionUnavailable
+        );
+        assert_eq!(fake.unprotected_inputs.borrow().as_slice(), &[vec![0xa1]]);
+    }
+
+    #[test]
+    fn paired_wrapper_unprotection_malformed_evidence_returns_no_pair_after_key_success() {
+        let fake = FakeProtector::with_unprotected([vec![0x31], vec![0x41]]);
+        let malformed_evidence = owned_wrapper_bytes(&[0; 15]);
+
+        assert_eq!(
+            unprotect_active_installation_evidence_wrappers_with(
+                &fake,
+                owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
+                malformed_evidence,
+            )
+            .unwrap_err(),
+            ProtectionStageError::WrapperParseFailed
+        );
+        assert_eq!(fake.unprotected_inputs.borrow().as_slice(), &[vec![0xa1]]);
+    }
+
+    #[test]
+    fn paired_wrapper_unprotection_wrong_evidence_kind_returns_no_pair_after_key_success() {
+        let fake = FakeProtector::with_unprotected([vec![0x31], vec![0x41]]);
+
+        assert_eq!(
+            unprotect_active_installation_evidence_wrappers_with(
+                &fake,
+                owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
+                owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xb2]),
+            )
+            .unwrap_err(),
+            ProtectionStageError::WrongProtectedObjectKind
+        );
+        assert_eq!(fake.unprotected_inputs.borrow().as_slice(), &[vec![0xa1]]);
+    }
+
+    #[test]
+    fn paired_wrapper_unprotection_evidence_dpapi_failure_returns_no_pair_in_exact_call_order() {
+        let fake =
+            FakeProtector::with_unprotected_results([Ok(vec![0x31]), Err(ProtectorOperationError)]);
+
+        assert_eq!(
+            unprotect_active_installation_evidence_wrappers_with(
+                &fake,
+                owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
+                owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
+            )
+            .unwrap_err(),
+            ProtectionStageError::UnprotectionUnavailable
+        );
+        assert_eq!(
+            fake.unprotected_inputs.borrow().as_slice(),
+            &[vec![0xa1], vec![0xb2]]
+        );
+    }
+
+    #[test]
+    fn paired_wrapper_unprotection_source_proves_private_windows_boundary_and_secure_drop_path() {
+        const SOURCE: &str = include_str!("mod.rs");
+        let definition_marker =
+            ["fn unprotect_active_installation_evidence_", "wrappers("].concat();
+        assert_eq!(SOURCE.matches(&definition_marker).count(), 1);
+        let before_definition = SOURCE.split_once(&definition_marker).unwrap().0;
+        let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
+        assert!(declaration_attributes.contains("#[cfg(windows)]"));
+        assert!(declaration_attributes.contains("#[cfg_attr(test, allow(dead_code))]"));
+        assert!(!declaration_attributes.contains("pub"));
+
+        let injected_marker = [
+            "fn unprotect_active_installation_evidence_",
+            "wrappers_with(",
+        ]
+        .concat();
+        let paired_body = SOURCE
+            .split_once(&injected_marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        let key_validation = paired_body
+            .find("ProtectedObjectKind::AuthenticationKey")
+            .unwrap();
+        let key_unprotection = paired_body
+            .find("let unprotected_authentication_key")
+            .unwrap();
+        let evidence_validation = paired_body
+            .find("ProtectedObjectKind::AuthenticatedEvidence")
+            .unwrap();
+        let evidence_unprotection = paired_body
+            .find("let unprotected_authenticated_evidence")
+            .unwrap();
+        assert!(key_validation < key_unprotection);
+        assert!(key_unprotection < evidence_validation);
+        assert!(evidence_validation < evidence_unprotection);
+        assert!(paired_body.contains("Result<(UnprotectedBytes, UnprotectedBytes)"));
+        assert!(!paired_body.contains("Vec<u8>"));
+
+        let secure_drop = SOURCE
+            .split_once("impl Drop for UnprotectedBytes")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(secure_drop.contains("self.0.zeroize();"));
     }
 
     #[test]
