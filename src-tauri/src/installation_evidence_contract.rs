@@ -101,6 +101,13 @@ macro_rules! opaque_identifier {
                 }
                 Ok(Self(value))
             }
+
+            // This boundary is intentionally unused until the separately scoped
+            // freshness-anchor encoder is implemented.
+            #[allow(dead_code)]
+            pub(crate) fn write_bytes_into(&self, destination: &mut [u8; 16]) {
+                destination.copy_from_slice(&self.0);
+            }
         }
 
         impl fmt::Debug for $name {
@@ -1394,6 +1401,118 @@ mod tests {
     }
 
     #[test]
+    fn approved_opaque_identifiers_write_exact_distinguishable_canonical_bytes() {
+        const INSTALLATION_BYTES: [u8; 16] = [0x12; 16];
+        const DATABASE_KEY_GENERATION_BYTES: [u8; 16] = [0x34; 16];
+        const SETUP_PUBLICATION_BYTES: [u8; 16] = [0x56; 16];
+
+        let installation = InstallationIdentifier::from_bytes(INSTALLATION_BYTES).unwrap();
+        let database_key_generation =
+            DatabaseKeyGenerationIdentifier::from_bytes(DATABASE_KEY_GENERATION_BYTES).unwrap();
+        let setup_publication =
+            SetupPublicationIdentifier::from_bytes(SETUP_PUBLICATION_BYTES).unwrap();
+        let installation_writer: fn(&InstallationIdentifier, &mut [u8; 16]) =
+            InstallationIdentifier::write_bytes_into;
+        let database_key_generation_writer: fn(&DatabaseKeyGenerationIdentifier, &mut [u8; 16]) =
+            DatabaseKeyGenerationIdentifier::write_bytes_into;
+        let setup_publication_writer: fn(&SetupPublicationIdentifier, &mut [u8; 16]) =
+            SetupPublicationIdentifier::write_bytes_into;
+        let mut installation_destination = [0_u8; 16];
+        let mut database_key_generation_destination = [0_u8; 16];
+        let mut setup_publication_destination = [0_u8; 16];
+
+        installation_writer(&installation, &mut installation_destination);
+        database_key_generation_writer(
+            &database_key_generation,
+            &mut database_key_generation_destination,
+        );
+        setup_publication_writer(&setup_publication, &mut setup_publication_destination);
+
+        assert_eq!(installation_destination, INSTALLATION_BYTES);
+        assert_eq!(
+            database_key_generation_destination,
+            DATABASE_KEY_GENERATION_BYTES
+        );
+        assert_eq!(setup_publication_destination, SETUP_PUBLICATION_BYTES);
+        assert_ne!(
+            installation_destination,
+            database_key_generation_destination
+        );
+        assert_ne!(installation_destination, setup_publication_destination);
+        assert_ne!(
+            database_key_generation_destination,
+            setup_publication_destination
+        );
+    }
+
+    #[test]
+    fn opaque_identifier_byte_writer_has_only_the_approved_narrow_api_surface() {
+        const SOURCE: &str = include_str!("installation_evidence_contract.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let identifier_boundary = production
+            .split_once("macro_rules! opaque_identifier")
+            .unwrap()
+            .1
+            .split_once("macro_rules! generation_type")
+            .unwrap()
+            .0;
+
+        assert_eq!(
+            identifier_boundary.matches("opaque_identifier!(").count(),
+            3
+        );
+        for approved_type in [
+            "InstallationIdentifier",
+            "DatabaseKeyGenerationIdentifier",
+            "SetupPublicationIdentifier",
+        ] {
+            let invocation_line = format!("\n    {approved_type},\n");
+            assert_eq!(identifier_boundary.matches(&invocation_line).count(), 1);
+        }
+        assert_eq!(
+            identifier_boundary
+                .matches("pub(crate) fn write_bytes_into(&self, destination: &mut [u8; 16])")
+                .count(),
+            1
+        );
+        assert!(identifier_boundary.contains("destination.copy_from_slice(&self.0);"));
+
+        for forbidden in [
+            "pub fn write_bytes_into",
+            "as_bytes",
+            "into_bytes",
+            "AsRef",
+            "Deref",
+            "Index",
+            "std::ops",
+            "Serialize",
+            "serde",
+            "from_str",
+            "to_string",
+            "Uuid",
+            "UUID",
+            "hex",
+            "Base64",
+            "base64",
+            "String",
+            "Vec<",
+            "Box<",
+            "unsafe",
+            "std::fs",
+            "std::time",
+            "rand",
+            "tauri",
+            "windows",
+            "dpapi",
+        ] {
+            assert!(
+                !identifier_boundary.contains(forbidden),
+                "unexpected opaque-identifier capability: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn zero_opaque_identifiers_are_rejected() {
         let mut installation = candidate();
         installation.installation_identifier = [0; 16];
@@ -1479,6 +1598,14 @@ mod tests {
         assert_eq!(
             format!("{:?}", evidence.installation_identifier()),
             "InstallationIdentifier([REDACTED])"
+        );
+        assert_eq!(
+            format!("{:?}", evidence.database_key_generation_identifier()),
+            "DatabaseKeyGenerationIdentifier([REDACTED])"
+        );
+        assert_eq!(
+            format!("{:?}", evidence.setup_publication_identifier()),
+            "SetupPublicationIdentifier([REDACTED])"
         );
     }
 
