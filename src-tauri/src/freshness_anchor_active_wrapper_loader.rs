@@ -42,6 +42,19 @@ impl LoadedActiveFreshnessAnchorWrapperPair {
     pub(crate) fn authenticated_anchor_wrapper_bytes(&self) -> &[u8] {
         self.authenticated_anchor_wrapper.as_bytes()
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_synthetic_wrapper_bytes(
+        key_wrapper: Vec<u8>,
+        authenticated_anchor_wrapper: Vec<u8>,
+    ) -> Self {
+        Self {
+            key_wrapper: FreshnessAnchorProtectedWrapperBytes(key_wrapper),
+            authenticated_anchor_wrapper: FreshnessAnchorProtectedWrapperBytes(
+                authenticated_anchor_wrapper,
+            ),
+        }
+    }
 }
 
 impl fmt::Debug for LoadedActiveFreshnessAnchorWrapperPair {
