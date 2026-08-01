@@ -11,7 +11,7 @@ use std::{
     ffi::OsStr,
     ffi::c_void,
     fmt,
-    fs::File,
+    fs::{self, File},
     os::windows::ffi::OsStrExt,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
     path::Path,
@@ -174,6 +174,7 @@ impl fmt::Debug for HandleIdentity {
 struct HardeningObservation {
     identity: HandleIdentity,
     size: u64,
+    delete_pending: bool,
     attributes: u32,
     reparse_tag: u32,
     link_count: u32,
@@ -216,6 +217,18 @@ impl fmt::Debug for HardeningError {
 struct RetainedDirectory {
     handle: File,
     initial: HardeningObservation,
+}
+
+struct LoadedActiveWrapper {
+    handle: File,
+    initial: HardeningObservation,
+    bytes: ProtectedWrapperBytes,
+}
+
+impl LoadedActiveWrapper {
+    fn into_bytes(self) -> ProtectedWrapperBytes {
+        self.bytes
+    }
 }
 
 struct ValidatedActiveWrapperPaths<'a> {
@@ -360,6 +373,7 @@ fn query_hardening_observation(file: &File) -> Result<HardeningObservation, Hard
     Ok(HardeningObservation {
         identity: query_handle_identity(file)?,
         size,
+        delete_pending: standard.DeletePending,
         attributes: attribute_tag.FileAttributes,
         reparse_tag: attribute_tag.ReparseTag,
         link_count: query_link_count(file)?,
@@ -585,6 +599,7 @@ fn validate_stable_observations(
         return Err(HardeningError::SameVolumeMismatch);
     }
     if before.size != after.size
+        || before.delete_pending != after.delete_pending
         || before.attributes != after.attributes
         || before.reparse_tag != after.reparse_tag
     {
@@ -621,10 +636,18 @@ where
     M: FnOnce(),
     R: FnOnce(&mut File, u64) -> Result<ProtectedWrapperBytes, BoundedReadError>,
 {
-    inspect_hardened_wrapper_with(path, expected_name, retained, mutation, reader, |bytes| {
-        EncodedProtectedWrapper::validate_authentication_key_bytes(bytes)
-            .map_err(|_| HardeningError::WrapperInvalid)
-    })
+    inspect_hardened_wrapper_retained_with(
+        path,
+        expected_name,
+        retained,
+        mutation,
+        reader,
+        |bytes| {
+            EncodedProtectedWrapper::validate_authentication_key_bytes(bytes)
+                .map_err(|_| HardeningError::WrapperInvalid)
+        },
+    )
+    .map(LoadedActiveWrapper::into_bytes)
 }
 
 fn inspect_hardened_authenticated_evidence_wrapper(
@@ -635,7 +658,7 @@ fn inspect_hardened_authenticated_evidence_wrapper(
     #[cfg(test)]
     ACTIVE_WRAPPER_LOADER_TEST_CALLS
         .with(|calls| calls.set((calls.get().0, calls.get().1, calls.get().2 + 1)));
-    inspect_hardened_wrapper_with(
+    inspect_hardened_wrapper_retained_with(
         path,
         expected_name,
         retained,
@@ -646,16 +669,17 @@ fn inspect_hardened_authenticated_evidence_wrapper(
                 .map_err(|_| HardeningError::WrapperInvalid)
         },
     )
+    .map(LoadedActiveWrapper::into_bytes)
 }
 
-fn inspect_hardened_wrapper_with<M, R, V>(
+fn inspect_hardened_wrapper_retained_with<M, R, V>(
     path: &Path,
     expected_name: &str,
     retained: &[RetainedDirectory],
     mutation: M,
     reader: R,
     validator: V,
-) -> Result<ProtectedWrapperBytes, HardeningError>
+) -> Result<LoadedActiveWrapper, HardeningError>
 where
     M: FnOnce(),
     R: FnOnce(&mut File, u64) -> Result<ProtectedWrapperBytes, BoundedReadError>,
@@ -671,7 +695,7 @@ where
     let encoded = encode_utf16_path(path)?;
     let mut file = open_for_read(&encoded)?;
     let before = query_hardening_observation(&file)?;
-    if before.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+    if before.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 || before.delete_pending {
         return Err(HardeningError::WrongEntryType);
     }
     validate_reparse_facts(before.attributes, before.reparse_tag)?;
@@ -705,7 +729,11 @@ where
     {
         return Err(HardeningError::IdentityChanged);
     }
-    Ok(loaded)
+    Ok(LoadedActiveWrapper {
+        handle: file,
+        initial: before,
+        bytes: loaded,
+    })
 }
 
 fn validate_approved_wrapper_name(path: &Path, expected_name: &str) -> Result<(), HardeningError> {
@@ -713,6 +741,139 @@ fn validate_approved_wrapper_name(path: &Path, expected_name: &str) -> Result<()
         return Err(HardeningError::FinalPathMismatch);
     }
     Ok(())
+}
+
+fn enumerate_exact_active_wrapper_pair(directory: &Path) -> Result<(), HardeningError> {
+    let mut authentication_key_count = 0_u8;
+    let mut authenticated_evidence_count = 0_u8;
+    for entry in fs::read_dir(directory).map_err(|_| HardeningError::InspectionUnavailable)? {
+        let name = entry
+            .map_err(|_| HardeningError::InspectionUnavailable)?
+            .file_name();
+        if name
+            .encode_wide()
+            .eq(ACTIVE_AUTHENTICATION_KEY_FILENAME.encode_utf16())
+        {
+            authentication_key_count = authentication_key_count.saturating_add(1);
+        } else if name
+            .encode_wide()
+            .eq(ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME.encode_utf16())
+        {
+            authenticated_evidence_count = authenticated_evidence_count.saturating_add(1);
+        } else {
+            return Err(HardeningError::WrongEntryType);
+        }
+    }
+    if authentication_key_count != 1 || authenticated_evidence_count != 1 {
+        return Err(HardeningError::WrongEntryType);
+    }
+    Ok(())
+}
+
+fn inspect_retained_active_wrapper<V>(
+    path: &Path,
+    expected_name: &str,
+    retained: &[RetainedDirectory],
+    validator: V,
+) -> Result<LoadedActiveWrapper, HardeningError>
+where
+    V: FnOnce(&[u8]) -> Result<(), HardeningError>,
+{
+    inspect_hardened_wrapper_retained_with(
+        path,
+        expected_name,
+        retained,
+        || {},
+        read_bounded_protected_wrapper,
+        validator,
+    )
+}
+
+fn inspect_retained_active_authentication_key_wrapper(
+    path: &Path,
+    retained: &[RetainedDirectory],
+) -> Result<LoadedActiveWrapper, HardeningError> {
+    #[cfg(test)]
+    ACTIVE_WRAPPER_LOADER_TEST_CALLS
+        .with(|calls| calls.set((calls.get().0, calls.get().1 + 1, calls.get().2)));
+    inspect_retained_active_wrapper(
+        path,
+        ACTIVE_AUTHENTICATION_KEY_FILENAME,
+        retained,
+        |bytes| {
+            EncodedProtectedWrapper::validate_authentication_key_bytes(bytes)
+                .map_err(|_| HardeningError::WrapperInvalid)
+        },
+    )
+}
+
+fn inspect_retained_active_authenticated_evidence_wrapper(
+    path: &Path,
+    retained: &[RetainedDirectory],
+) -> Result<LoadedActiveWrapper, HardeningError> {
+    #[cfg(test)]
+    ACTIVE_WRAPPER_LOADER_TEST_CALLS
+        .with(|calls| calls.set((calls.get().0, calls.get().1, calls.get().2 + 1)));
+    inspect_retained_active_wrapper(
+        path,
+        ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+        retained,
+        |bytes| {
+            EncodedProtectedWrapper::validate_authenticated_evidence_bytes(bytes)
+                .map_err(|_| HardeningError::WrapperInvalid)
+        },
+    )
+}
+
+fn confirm_retained_active_wrapper(
+    path: &Path,
+    expected_name: &str,
+    retained_directory: &RetainedDirectory,
+    loaded: &LoadedActiveWrapper,
+) -> Result<(), HardeningError> {
+    let retained_after = query_hardening_observation(&loaded.handle)?;
+    validate_stable_observations(Some(&loaded.initial), Some(&retained_after))?;
+
+    let encoded = encode_utf16_path(path)?;
+    let reopened = open_for_read(&encoded)?;
+    let reopened_observation = query_hardening_observation(&reopened)?;
+    if reopened_observation.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+        || reopened_observation.delete_pending
+    {
+        return Err(HardeningError::WrongEntryType);
+    }
+    validate_reparse_facts(
+        reopened_observation.attributes,
+        reopened_observation.reparse_tag,
+    )?;
+    validate_wrapper_link_count(reopened_observation.link_count)?;
+    validate_approved_wrapper_name(path, expected_name)?;
+    validate_same_volume(&retained_directory.initial, &reopened_observation)?;
+    exact_child_final_path(
+        &retained_directory.initial.final_path,
+        &reopened_observation.final_path,
+        &ascii_units(expected_name),
+    )?;
+    validate_stable_observations(Some(&loaded.initial), Some(&reopened_observation))
+}
+
+fn confirm_retained_directories(
+    validated: &ValidatedActiveWrapperPaths<'_>,
+    retained: &[RetainedDirectory; 3],
+) -> Result<(), HardeningError> {
+    for directory in retained {
+        let after = query_hardening_observation(&directory.handle)?;
+        validate_stable_observations(Some(&directory.initial), Some(&after))?;
+    }
+
+    let reopened_evidence = open_hardened_directory(
+        validated.evidence_directory,
+        Some((
+            &retained[1].initial,
+            &ascii_units(INSTALLATION_EVIDENCE_DIRECTORY_NAME),
+        )),
+    )?;
+    validate_stable_observations(Some(&retained[2].initial), Some(&reopened_evidence.initial))
 }
 
 fn validate_active_wrapper_paths(
@@ -822,27 +983,72 @@ fn load_active_authenticated_evidence_wrapper(
 }
 
 /// Loads, in tuple order, the active authentication-key wrapper followed by
-/// the active authenticated-evidence wrapper. Successful loading is not an
-/// authority transition.
-fn load_active_installation_evidence_wrappers(
+/// the active authenticated-evidence wrapper. Both leaf handles and the full
+/// authoritative directory chain remain live through pair-wide current-name
+/// confirmation. Successful loading is not an authority transition.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ActivePairLoadPhase {
+    AfterKeyRead,
+    AfterEvidenceRead,
+    BeforeFinalEnumeration,
+}
+
+fn load_active_installation_evidence_wrappers_with_hook<F>(
     paths: &InstallationEvidencePersistencePaths,
-) -> Result<(ProtectedWrapperBytes, ProtectedWrapperBytes), HardeningError> {
+    mut hook: F,
+) -> Result<(ProtectedWrapperBytes, ProtectedWrapperBytes), HardeningError>
+where
+    F: FnMut(ActivePairLoadPhase),
+{
     let validated = validate_active_wrapper_paths(paths)?;
     let active_authentication_key = validate_active_authentication_key_path(paths, &validated)?;
     let active_authenticated_evidence =
         validate_active_authenticated_evidence_path(paths, &validated)?;
     let retained = open_active_wrapper_retained_chain(&validated)?;
-    let authentication_key = inspect_hardened_authentication_key_wrapper(
+    enumerate_exact_active_wrapper_pair(validated.evidence_directory)?;
+
+    let authentication_key =
+        inspect_retained_active_authentication_key_wrapper(active_authentication_key, &retained)?;
+    hook(ActivePairLoadPhase::AfterKeyRead);
+    enumerate_exact_active_wrapper_pair(validated.evidence_directory)?;
+
+    let authenticated_evidence = inspect_retained_active_authenticated_evidence_wrapper(
+        active_authenticated_evidence,
+        &retained,
+    )?;
+    hook(ActivePairLoadPhase::AfterEvidenceRead);
+    enumerate_exact_active_wrapper_pair(validated.evidence_directory)?;
+
+    confirm_retained_active_wrapper(
         active_authentication_key,
         ACTIVE_AUTHENTICATION_KEY_FILENAME,
-        &retained,
+        &retained[2],
+        &authentication_key,
     )?;
-    let authenticated_evidence = inspect_hardened_authenticated_evidence_wrapper(
+    confirm_retained_active_wrapper(
         active_authenticated_evidence,
         ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
-        &retained,
+        &retained[2],
+        &authenticated_evidence,
     )?;
-    Ok((authentication_key, authenticated_evidence))
+    if authentication_key.initial.identity == authenticated_evidence.initial.identity {
+        return Err(HardeningError::IdentityChanged);
+    }
+
+    confirm_retained_directories(&validated, &retained)?;
+    hook(ActivePairLoadPhase::BeforeFinalEnumeration);
+    enumerate_exact_active_wrapper_pair(validated.evidence_directory)?;
+
+    Ok((
+        authentication_key.into_bytes(),
+        authenticated_evidence.into_bytes(),
+    ))
+}
+
+fn load_active_installation_evidence_wrappers(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<(ProtectedWrapperBytes, ProtectedWrapperBytes), HardeningError> {
+    load_active_installation_evidence_wrappers_with_hook(paths, |_| {})
 }
 
 pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(
@@ -2200,16 +2406,6 @@ mod tests {
                 authenticated_evidence,
             )
             .expect("synthetic active authenticated-evidence wrapper must be written");
-            fs::write(
-                paths.staged_authentication_key.as_path(),
-                b"synthetic-stage-key-must-not-be-read",
-            )
-            .expect("synthetic key stage marker must be written");
-            fs::write(
-                paths.staged_authenticated_evidence.as_path(),
-                b"synthetic-stage-evidence-must-not-be-read",
-            )
-            .expect("synthetic evidence stage marker must be written");
             let sentinel = root.join(SENTINEL_NAME);
             fs::write(&sentinel, SENTINEL_CONTENT).expect("synthetic sentinel must be written");
             Self {
@@ -2262,6 +2458,7 @@ mod tests {
                 file_id: [id_byte; 16],
             },
             size: MINIMUM_PROTECTED_WRAPPER_LENGTH,
+            delete_pending: false,
             attributes: FILE_ATTRIBUTE_NORMAL,
             reparse_tag: 0,
             link_count,
@@ -6330,6 +6527,7 @@ mod tests {
             let observation = HardeningObservation {
                 identity,
                 size,
+                delete_pending: standard.DeletePending,
                 attributes: attribute_tag.FileAttributes,
                 reparse_tag: attribute_tag.ReparseTag,
                 link_count,
@@ -7337,10 +7535,6 @@ mod tests {
         let expected_key = authentication_key_wrapper(64, 0xd1);
         let expected_evidence = authenticated_evidence_wrapper(96, 0xd2);
         let fixture = PairedActiveWrapperLoaderTestRoot::create(&expected_key, &expected_evidence);
-        let staged_key_before =
-            fs::read(fixture.paths.staged_authentication_key.as_path()).unwrap();
-        let staged_evidence_before =
-            fs::read(fixture.paths.staged_authenticated_evidence.as_path()).unwrap();
         reset_paired_loader_counters();
 
         let (authentication_key, authenticated_evidence) =
@@ -7356,15 +7550,284 @@ mod tests {
             format!("{authenticated_evidence:?}"),
             "ProtectedWrapperBytes([REDACTED])"
         );
-        assert_eq!(paired_loader_counters(), (3, 1, 1));
-        assert_eq!(
-            fs::read(fixture.paths.staged_authentication_key.as_path()).unwrap(),
-            staged_key_before
+        assert_eq!(paired_loader_counters(), (4, 1, 1));
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_accepts_exact_minimum_and_maximum_wrappers() {
+        for (blob_length, key_pattern, evidence_pattern) in [(1, 0x11, 0x22), (65_536, 0x33, 0x44)]
+        {
+            let key = authentication_key_wrapper(blob_length, key_pattern);
+            let evidence = authenticated_evidence_wrapper(blob_length, evidence_pattern);
+            let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+
+            let (loaded_key, loaded_evidence) =
+                load_active_installation_evidence_wrappers(&fixture.paths).unwrap();
+
+            assert_eq!(loaded_key.as_bytes(), key);
+            assert_eq!(loaded_evidence.as_bytes(), evidence);
+            fixture.assert_sentinel();
+            fixture.cleanup();
+        }
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_rejects_each_stage_and_both_stages() {
+        for stages in [(true, false), (false, true), (true, true)] {
+            let key = authentication_key_wrapper(16, 0x51);
+            let evidence = authenticated_evidence_wrapper(16, 0x52);
+            let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+            if stages.0 {
+                fs::write(
+                    fixture.paths.staged_authentication_key.as_path(),
+                    b"synthetic-stage-key",
+                )
+                .unwrap();
+            }
+            if stages.1 {
+                fs::write(
+                    fixture.paths.staged_authenticated_evidence.as_path(),
+                    b"synthetic-stage-evidence",
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                load_active_installation_evidence_wrappers(&fixture.paths),
+                Err(HardeningError::WrongEntryType)
+            );
+            fixture.assert_sentinel();
+            fixture.cleanup();
+        }
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_rejects_unexpected_file_and_directory_children() {
+        for directory in [false, true] {
+            let key = authentication_key_wrapper(16, 0x53);
+            let evidence = authenticated_evidence_wrapper(16, 0x54);
+            let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+            let unexpected = fixture
+                .paths
+                .evidence_directory
+                .as_path()
+                .join("unexpected.synthetic");
+            if directory {
+                fs::create_dir(&unexpected).unwrap();
+            } else {
+                fs::write(&unexpected, b"synthetic").unwrap();
+            }
+
+            assert_eq!(
+                load_active_installation_evidence_wrappers(&fixture.paths),
+                Err(HardeningError::WrongEntryType)
+            );
+            fixture.assert_sentinel();
+            fixture.cleanup();
+        }
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_rejects_alternate_case_active_names() {
+        for key_name in [true, false] {
+            let key = authentication_key_wrapper(16, 0x55);
+            let evidence = authenticated_evidence_wrapper(16, 0x56);
+            let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+            let (source, alternate_name) = if key_name {
+                (
+                    fixture.paths.active_authentication_key.as_path(),
+                    "Authentication-Key.dpapi",
+                )
+            } else {
+                (
+                    fixture.paths.active_authenticated_evidence.as_path(),
+                    "Authenticated-Evidence.dpapi",
+                )
+            };
+            fs::rename(
+                source,
+                fixture
+                    .paths
+                    .evidence_directory
+                    .as_path()
+                    .join(alternate_name),
+            )
+            .unwrap();
+
+            assert_eq!(
+                load_active_installation_evidence_wrappers(&fixture.paths),
+                Err(HardeningError::WrongEntryType)
+            );
+            fixture.assert_sentinel();
+            fixture.cleanup();
+        }
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_rejects_directory_at_either_approved_name() {
+        for key_name in [true, false] {
+            let key = authentication_key_wrapper(16, 0x57);
+            let evidence = authenticated_evidence_wrapper(16, 0x58);
+            let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+            let path = if key_name {
+                fixture.paths.active_authentication_key.as_path()
+            } else {
+                fixture.paths.active_authenticated_evidence.as_path()
+            };
+            fs::remove_file(path).unwrap();
+            fs::create_dir(path).unwrap();
+
+            assert!(load_active_installation_evidence_wrappers(&fixture.paths).is_err());
+            fixture.assert_sentinel();
+            fixture.cleanup();
+        }
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_rejects_reparse_active_wrapper_when_supported() {
+        let key = authentication_key_wrapper(16, 0x61);
+        let evidence = authenticated_evidence_wrapper(16, 0x62);
+        let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+        let target = fixture.root.join("reparse-target.synthetic");
+        fs::write(&target, &key).unwrap();
+        fs::remove_file(fixture.paths.active_authentication_key.as_path()).unwrap();
+
+        let created = std::os::windows::fs::symlink_file(
+            &target,
+            fixture.paths.active_authentication_key.as_path(),
         );
-        assert_eq!(
-            fs::read(fixture.paths.staged_authenticated_evidence.as_path()).unwrap(),
-            staged_evidence_before
-        );
+        if created.is_ok() {
+            assert!(load_active_installation_evidence_wrappers(&fixture.paths).is_err());
+        }
+
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_reenumerates_after_each_read_and_at_final_confirmation() {
+        for phase in [
+            ActivePairLoadPhase::AfterKeyRead,
+            ActivePairLoadPhase::AfterEvidenceRead,
+            ActivePairLoadPhase::BeforeFinalEnumeration,
+        ] {
+            let key = authentication_key_wrapper(16, 0x59);
+            let evidence = authenticated_evidence_wrapper(16, 0x5a);
+            let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+            let unexpected = fixture
+                .paths
+                .evidence_directory
+                .as_path()
+                .join("appeared-during-load.synthetic");
+
+            let result = load_active_installation_evidence_wrappers_with_hook(
+                &fixture.paths,
+                |observed_phase| {
+                    if observed_phase == phase {
+                        fs::write(&unexpected, b"synthetic").unwrap();
+                    }
+                },
+            );
+
+            assert_eq!(result, Err(HardeningError::WrongEntryType));
+            fixture.assert_sentinel();
+            fixture.cleanup();
+        }
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_retains_both_leaf_handles_through_final_confirmation() {
+        let key = authentication_key_wrapper(16, 0x5b);
+        let evidence = authenticated_evidence_wrapper(16, 0x5c);
+        let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+        let key_displaced = fixture.root.join("key-displaced.synthetic");
+        let evidence_displaced = fixture.root.join("evidence-displaced.synthetic");
+        let mut key_rename_blocked = false;
+        let mut evidence_rename_blocked = false;
+
+        let loaded = load_active_installation_evidence_wrappers_with_hook(
+            &fixture.paths,
+            |phase| match phase {
+                ActivePairLoadPhase::AfterKeyRead => {
+                    key_rename_blocked = fs::rename(
+                        fixture.paths.active_authentication_key.as_path(),
+                        &key_displaced,
+                    )
+                    .is_err();
+                }
+                ActivePairLoadPhase::AfterEvidenceRead => {
+                    evidence_rename_blocked = fs::rename(
+                        fixture.paths.active_authenticated_evidence.as_path(),
+                        &evidence_displaced,
+                    )
+                    .is_err();
+                }
+                ActivePairLoadPhase::BeforeFinalEnumeration => {}
+            },
+        )
+        .unwrap();
+
+        assert!(key_rename_blocked);
+        assert!(evidence_rename_blocked);
+        assert_eq!(loaded.0.as_bytes(), key);
+        assert_eq!(loaded.1.as_bytes(), evidence);
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_retains_directory_chain_through_final_confirmation() {
+        let key = authentication_key_wrapper(16, 0x5d);
+        let evidence = authenticated_evidence_wrapper(16, 0x5e);
+        let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+        let displaced = fixture.root.with_extension("displaced.synthetic");
+        let mut replacement_blocked = false;
+
+        let loaded =
+            load_active_installation_evidence_wrappers_with_hook(&fixture.paths, |phase| {
+                if phase == ActivePairLoadPhase::AfterEvidenceRead {
+                    replacement_blocked =
+                        fs::rename(fixture.paths.evidence_directory.as_path(), &displaced).is_err();
+                }
+            })
+            .unwrap();
+
+        assert!(replacement_blocked);
+        assert_eq!(loaded.0.as_bytes(), key);
+        assert_eq!(loaded.1.as_bytes(), evidence);
+        fixture.assert_sentinel();
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn paired_active_wrapper_loader_blocks_root_replacement_and_active_name_swaps() {
+        let key = authentication_key_wrapper(16, 0x63);
+        let evidence = authenticated_evidence_wrapper(16, 0x64);
+        let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
+        let displaced_root = fixture.root.with_extension("root-displaced.synthetic");
+        let displaced_key = fixture.root.join("key-for-swap.synthetic");
+        let mut root_rename_blocked = false;
+        let mut key_rename_blocked = false;
+
+        let loaded =
+            load_active_installation_evidence_wrappers_with_hook(&fixture.paths, |phase| {
+                if phase == ActivePairLoadPhase::BeforeFinalEnumeration {
+                    root_rename_blocked = fs::rename(&fixture.root, &displaced_root).is_err();
+                    key_rename_blocked = fs::rename(
+                        fixture.paths.active_authentication_key.as_path(),
+                        &displaced_key,
+                    )
+                    .is_err();
+                }
+            })
+            .unwrap();
+
+        assert!(root_rename_blocked);
+        assert!(key_rename_blocked);
+        assert_eq!(loaded.0.as_bytes(), key);
+        assert_eq!(loaded.1.as_bytes(), evidence);
         fixture.assert_sentinel();
         fixture.cleanup();
     }
@@ -7433,9 +7896,9 @@ mod tests {
         reset_paired_loader_counters();
         assert_eq!(
             load_active_installation_evidence_wrappers(&missing.paths).unwrap_err(),
-            HardeningError::InspectionUnavailable
+            HardeningError::WrongEntryType
         );
-        assert_eq!(paired_loader_counters(), (3, 1, 0));
+        assert_eq!(paired_loader_counters(), (3, 0, 0));
         missing.assert_sentinel();
         missing.cleanup();
 
@@ -7481,9 +7944,9 @@ mod tests {
         reset_paired_loader_counters();
         assert_eq!(
             load_active_installation_evidence_wrappers(&missing.paths).unwrap_err(),
-            HardeningError::InspectionUnavailable
+            HardeningError::WrongEntryType
         );
-        assert_eq!(paired_loader_counters(), (3, 1, 1));
+        assert_eq!(paired_loader_counters(), (3, 0, 0));
         missing.assert_sentinel();
         missing.cleanup();
 
@@ -7524,11 +7987,7 @@ mod tests {
         let key = authentication_key_wrapper(16, 0xdd);
         let evidence = authenticated_evidence_wrapper(16, 0xde);
         let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
-        let alias = fixture
-            .paths
-            .evidence_directory
-            .as_path()
-            .join("paired-key-hard-link-alias.synthetic");
+        let alias = fixture.root.join("paired-key-hard-link-alias.synthetic");
         fs::hard_link(fixture.paths.active_authentication_key.as_path(), alias).unwrap();
         reset_paired_loader_counters();
 
@@ -7547,9 +8006,7 @@ mod tests {
         let evidence = authenticated_evidence_wrapper(16, 0xe0);
         let fixture = PairedActiveWrapperLoaderTestRoot::create(&key, &evidence);
         let alias = fixture
-            .paths
-            .evidence_directory
-            .as_path()
+            .root
             .join("paired-evidence-hard-link-alias.synthetic");
         fs::hard_link(fixture.paths.active_authenticated_evidence.as_path(), alias).unwrap();
         reset_paired_loader_counters();
@@ -7575,7 +8032,7 @@ mod tests {
 
         assert_eq!(authentication_key.as_bytes(), expected_key);
         assert_eq!(authenticated_evidence.as_bytes(), expected_evidence);
-        assert_eq!(paired_loader_counters(), (3, 1, 1));
+        assert_eq!(paired_loader_counters(), (4, 1, 1));
         fixture.assert_sentinel();
         fixture.cleanup();
     }
@@ -7596,7 +8053,7 @@ mod tests {
             format!("{error:?}"),
             "ActiveInstallationEvidenceWrapperLoadFailed"
         );
-        assert_eq!(paired_loader_counters(), (3, 1, 1));
+        assert_eq!(paired_loader_counters(), (3, 0, 0));
         let debug = format!("{error:?}");
         let root_debug = fixture.root.to_string_lossy().into_owned();
         for forbidden in [
@@ -7761,11 +8218,17 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            production
+                .matches("fn load_active_installation_evidence_wrappers_with_hook<")
+                .count(),
+            1
+        );
         let paired = production
-            .split_once("fn load_active_installation_evidence_wrappers(")
+            .split_once("fn load_active_installation_evidence_wrappers_with_hook<")
             .unwrap()
             .1
-            .split_once("// PRODUCTION READ-HARDENING CORE END")
+            .split_once("fn load_active_installation_evidence_wrappers(")
             .unwrap()
             .0;
         let key_validation_position = paired
@@ -7776,10 +8239,10 @@ mod tests {
             .unwrap();
         let retained_chain_position = paired.find("open_active_wrapper_retained_chain(").unwrap();
         let key_position = paired
-            .find("inspect_hardened_authentication_key_wrapper(")
+            .find("inspect_retained_active_authentication_key_wrapper(")
             .unwrap();
         let evidence_position = paired
-            .find("inspect_hardened_authenticated_evidence_wrapper(")
+            .find("inspect_retained_active_authenticated_evidence_wrapper(")
             .unwrap();
         assert!(key_validation_position < retained_chain_position);
         assert!(evidence_validation_position < retained_chain_position);
@@ -7793,12 +8256,20 @@ mod tests {
             "validate_active_authentication_key_path(paths, &validated)?",
             "validate_active_authenticated_evidence_path(paths, &validated)?",
             "open_active_wrapper_retained_chain(&validated)?",
+            "confirm_retained_active_wrapper(",
+            "confirm_retained_directories(&validated, &retained)?",
         ] {
             assert!(
                 paired.contains(required),
                 "missing paired boundary: {required}"
             );
         }
+        assert_eq!(
+            paired
+                .matches("enumerate_exact_active_wrapper_pair(")
+                .count(),
+            4
+        );
         for forbidden in [
             "STAGED_AUTHENTICATION_KEY_FILENAME",
             "STAGED_AUTHENTICATED_EVIDENCE_FILENAME",
@@ -8377,7 +8848,7 @@ mod tests {
         }
         assert_eq!(
             production
-                .matches("fn inspect_hardened_wrapper_with<")
+                .matches("fn inspect_hardened_wrapper_retained_with<")
                 .count(),
             1
         );

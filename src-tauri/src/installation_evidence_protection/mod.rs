@@ -1345,8 +1345,6 @@ mod tests {
     struct ActiveEvidenceLoadTrustChainCompositionTestRoot {
         root: PathBuf,
         paths: InstallationEvidencePersistencePaths,
-        staged_authentication_key: Vec<u8>,
-        staged_authenticated_evidence: Vec<u8>,
     }
 
     #[cfg(windows)]
@@ -1379,36 +1377,37 @@ mod tests {
                 authenticated_evidence_wrapper,
             )
             .expect("synthetic active authenticated-evidence wrapper must be written");
-            let staged_authentication_key = b"composition-stage-key-must-not-be-read".to_vec();
-            let staged_authenticated_evidence =
-                b"composition-stage-evidence-must-not-be-read".to_vec();
-            fs::write(
-                paths.staged_authentication_key.as_path(),
-                &staged_authentication_key,
-            )
-            .expect("synthetic staged authentication-key sentinel must be written");
-            fs::write(
-                paths.staged_authenticated_evidence.as_path(),
-                &staged_authenticated_evidence,
-            )
-            .expect("synthetic staged authenticated-evidence sentinel must be written");
-            Self {
-                root,
-                paths,
-                staged_authentication_key,
-                staged_authenticated_evidence,
-            }
+            let fixture = Self { root, paths };
+            fixture.assert_canonical_active_state();
+            fixture
         }
 
-        fn assert_stages_unchanged(&self) {
-            assert_eq!(
-                fs::read(self.paths.staged_authentication_key.as_path()).unwrap(),
-                self.staged_authentication_key
-            );
-            assert_eq!(
-                fs::read(self.paths.staged_authenticated_evidence.as_path()).unwrap(),
-                self.staged_authenticated_evidence
-            );
+        fn assert_no_stage_artifacts(&self) {
+            assert!(!self.paths.staged_authentication_key.as_path().exists());
+            assert!(!self.paths.staged_authenticated_evidence.as_path().exists());
+        }
+
+        fn assert_canonical_active_state(&self) {
+            self.assert_no_stage_artifacts();
+
+            let mut actual_children = fs::read_dir(self.paths.evidence_directory.as_path())
+                .expect("canonical evidence directory must remain enumerable")
+                .map(|entry| {
+                    entry
+                        .expect("canonical child must remain inspectable")
+                        .path()
+                })
+                .collect::<Vec<_>>();
+            actual_children.sort();
+            let mut expected_children = vec![
+                self.paths.active_authentication_key.as_path().to_path_buf(),
+                self.paths
+                    .active_authenticated_evidence
+                    .as_path()
+                    .to_path_buf(),
+            ];
+            expected_children.sort();
+            assert_eq!(actual_children, expected_children);
         }
     }
 
@@ -1490,7 +1489,7 @@ mod tests {
         require_exact_result_type(validated);
         assert_eq!(validated, expected);
         assert_eq!(validated.encode_v1().as_bytes(), &canonical_plaintext);
-        fixture.assert_stages_unchanged();
+        fixture.assert_canonical_active_state();
     }
 
     #[cfg(windows)]
@@ -1509,7 +1508,7 @@ mod tests {
             load_error,
             ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed
         ));
-        incomplete.assert_stages_unchanged();
+        incomplete.assert_no_stage_artifacts();
 
         let wrong_hmac = structurally_validated_active_evidence_composition_fixture(
             [0x44; 32],
@@ -1523,7 +1522,7 @@ mod tests {
             hmac_error,
             ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
         ));
-        wrong_hmac.assert_stages_unchanged();
+        wrong_hmac.assert_canonical_active_state();
 
         let generation_mismatch = structurally_validated_active_evidence_composition_fixture(
             KEY,
@@ -1538,7 +1537,7 @@ mod tests {
             generation_error,
             ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
         ));
-        generation_mismatch.assert_stages_unchanged();
+        generation_mismatch.assert_canonical_active_state();
     }
 
     #[cfg(windows)]
@@ -1564,7 +1563,7 @@ mod tests {
                 error,
                 ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed
             ));
-            fixture.assert_stages_unchanged();
+            fixture.assert_canonical_active_state();
         }
     }
 
@@ -1593,7 +1592,7 @@ mod tests {
                 error,
                 ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed
             ));
-            fixture.assert_stages_unchanged();
+            fixture.assert_canonical_active_state();
         }
     }
 
@@ -1729,7 +1728,7 @@ mod tests {
             format!("{matched:?}"),
             "GenerationMatchedAuthenticatedEnvelopeV1([REDACTED])"
         );
-        fixture.assert_stages_unchanged();
+        fixture.assert_canonical_active_state();
     }
 
     #[cfg(windows)]
@@ -1748,7 +1747,7 @@ mod tests {
             ActiveInstallationEvidenceRecoveryError::LoadFailed
         ));
         assert_eq!(format!("{error:?}"), "ActiveEvidenceLoadFailed");
-        fixture.assert_stages_unchanged();
+        fixture.assert_no_stage_artifacts();
     }
 
     #[cfg(windows)]
@@ -1766,7 +1765,7 @@ mod tests {
             ActiveInstallationEvidenceRecoveryError::ProtectionFailed
         ));
         assert_eq!(format!("{error:?}"), "ActiveEvidenceProtectionFailed");
-        fixture.assert_stages_unchanged();
+        fixture.assert_canonical_active_state();
     }
 
     #[cfg(windows)]
@@ -1784,7 +1783,7 @@ mod tests {
             ActiveInstallationEvidenceRecoveryError::ProtectionFailed
         ));
         assert_eq!(format!("{error:?}"), "ActiveEvidenceProtectionFailed");
-        fixture.assert_stages_unchanged();
+        fixture.assert_canonical_active_state();
     }
 
     #[test]
