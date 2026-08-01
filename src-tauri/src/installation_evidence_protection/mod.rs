@@ -28,6 +28,7 @@ use crate::{
     storage_foundation::InstallationEvidencePersistencePaths,
 };
 
+mod freshness_anchor_current_user_dpapi;
 mod protected_blob_wrapper;
 mod protected_key_payload;
 #[cfg(windows)]
