@@ -10,6 +10,7 @@ mod freshness_anchor_authentication_key;
 mod freshness_anchor_authentication_key_generation;
 mod freshness_anchor_contract;
 mod freshness_anchor_plaintext;
+mod freshness_anchor_presence;
 mod freshness_anchor_protected_key_payload;
 mod installation_evidence_authenticated_envelope;
 mod installation_evidence_authentication_key;
