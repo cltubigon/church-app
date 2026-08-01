@@ -12,6 +12,10 @@ use zeroize::Zeroize;
 #[cfg(any(windows, test))]
 use crate::installation_evidence_persistence::ProtectedWrapperBytes;
 use crate::{
+    database_freshness_classification::{
+        AssuredFreshnessAnchor, AssuredFreshnessAnchorConstructionToken,
+    },
+    freshness_anchor_contract::FreshnessAnchorContractV1,
     installation_evidence_authenticated_envelope::{
         CryptographicallyAuthenticatedEnvelopeV1, EncodedAuthenticatedEnvelopeV1,
         EvidenceAuthenticationKeyGenerationIdentifier, GenerationMatchedAuthenticatedEnvelopeV1,
@@ -81,6 +85,56 @@ pub(crate) fn bind_authenticated_active_freshness_anchor_to_current_installation
     } else {
         Err(FreshnessAnchorInstallationBindingError::InstallationIdentifierMismatch)
     }
+}
+
+pub(crate) struct SealedAssuredFreshnessAnchorHandoff {
+    authenticated_anchor: AuthenticatedActiveFreshnessAnchor,
+}
+
+impl SealedAssuredFreshnessAnchorHandoff {
+    const fn from_authenticated_anchor(
+        authenticated_anchor: AuthenticatedActiveFreshnessAnchor,
+    ) -> Self {
+        Self {
+            authenticated_anchor,
+        }
+    }
+
+    pub(crate) fn complete_assured_construction(
+        self,
+        _token: AssuredFreshnessAnchorConstructionToken,
+        construct: fn(FreshnessAnchorContractV1) -> AssuredFreshnessAnchor,
+    ) -> AssuredFreshnessAnchor {
+        construct(self.authenticated_anchor.into_contract())
+    }
+}
+
+pub(crate) fn assure_installation_bound_authenticated_active_freshness_anchor(
+    bound_anchor: InstallationBoundAuthenticatedActiveFreshnessAnchor,
+) -> AssuredFreshnessAnchor {
+    let authenticated_anchor = bound_anchor.into_authenticated_anchor();
+    AssuredFreshnessAnchor::from_sealed_handoff(
+        SealedAssuredFreshnessAnchorHandoff::from_authenticated_anchor(authenticated_anchor),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn synthetic_installation_bound_authenticated_active_freshness_anchor(
+    contract: FreshnessAnchorContractV1,
+) -> InstallationBoundAuthenticatedActiveFreshnessAnchor {
+    let installation_identifier = contract.installation_identifier();
+    let authenticated_anchor =
+        AuthenticatedActiveFreshnessAnchor::from_authenticated_active_contract(contract);
+    let trusted_installation =
+        TrustedCurrentInstallationIdentity::from_validated_installation_identifier(
+            installation_identifier,
+        );
+
+    bind_authenticated_active_freshness_anchor_to_current_installation(
+        authenticated_anchor,
+        &trusted_installation,
+    )
+    .expect("synthetic matching installation identifiers must bind")
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -757,6 +811,134 @@ mod tests {
             assert!(
                 !boundary.contains(excluded),
                 "binding boundary unexpectedly contains out-of-scope surface: {excluded}"
+            );
+        }
+    }
+
+    #[test]
+    fn assured_contract_ownership_boundary_returns_only_the_assured_type() {
+        const SOURCE: &str = include_str!("mod.rs");
+        const ASSURANCE_SOURCE: &str = include_str!("../database_freshness_classification.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let assurance_production = ASSURANCE_SOURCE.split("#[cfg(test)]").next().unwrap();
+        let marker =
+            "pub(crate) fn assure_installation_bound_authenticated_active_freshness_anchor(";
+        let transition = production
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let handoff_body = production
+            .split_once("pub(crate) struct SealedAssuredFreshnessAnchorHandoff {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let completion = production
+            .split_once("    pub(crate) fn complete_assured_construction(")
+            .unwrap()
+            .1
+            .split_once("\n    }")
+            .unwrap()
+            .0;
+        let token_body = assurance_production
+            .split_once("pub(crate) struct AssuredFreshnessAnchorConstructionToken {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+
+        assert_eq!(production.matches(marker).count(), 1);
+        assert_eq!(
+            handoff_body,
+            "\n    authenticated_anchor: AuthenticatedActiveFreshnessAnchor,"
+        );
+        assert!(!handoff_body.contains("pub"));
+        assert_eq!(token_body, "\n    _private: (),");
+        assert!(!token_body.contains("pub"));
+        assert!(production.contains("    const fn from_authenticated_anchor("));
+        assert!(!production.contains("pub(crate) const fn from_authenticated_anchor("));
+        assert!(completion.contains("_token: AssuredFreshnessAnchorConstructionToken,"));
+        assert!(completion.contains(") -> AssuredFreshnessAnchor {"));
+        assert!(completion.contains("construct(self.authenticated_anchor.into_contract())"));
+        assert!(!completion.contains("clone"));
+        assert!(
+            transition
+                .contains("bound_anchor: InstallationBoundAuthenticatedActiveFreshnessAnchor,")
+        );
+        assert!(transition.contains(") -> AssuredFreshnessAnchor {"));
+        assert!(
+            transition
+                .contains("let authenticated_anchor = bound_anchor.into_authenticated_anchor();")
+        );
+        assert!(transition.contains("AssuredFreshnessAnchor::from_sealed_handoff("));
+        assert_eq!(transition.matches("into_authenticated_anchor()").count(), 1);
+        assert_eq!(transition.matches("into_contract()").count(), 0);
+        assert_eq!(completion.matches("into_contract()").count(), 1);
+        assert_eq!(
+            assurance_production
+                .matches("pub(crate) fn from_sealed_handoff(")
+                .count(),
+            1
+        );
+        assert!(
+            !production
+                .contains("pub(crate) const fn into_contract(self) -> FreshnessAnchorContractV1")
+        );
+        assert!(
+            !production.contains("pub(crate) fn into_contract(self) -> FreshnessAnchorContractV1")
+        );
+        assert!(!production.contains(
+            ") -> FreshnessAnchorContractV1 {\n    bound_anchor.into_authenticated_anchor()"
+        ));
+
+        for source in [production, assurance_production] {
+            let lines: Vec<_> = source.lines().collect();
+            for start in 0..lines.len() {
+                if lines[start].contains("pub(crate)") && lines[start].contains("fn ") {
+                    let signature = lines[start..]
+                        .iter()
+                        .take_while(|line| !line.contains('{'))
+                        .copied()
+                        .chain(
+                            lines[start..]
+                                .iter()
+                                .find(|line| line.contains('{'))
+                                .copied(),
+                        )
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(
+                        !signature.contains("-> FreshnessAnchorContractV1"),
+                        "crate-visible production function unexpectedly returns a plain contract"
+                    );
+                }
+            }
+        }
+
+        for excluded in [
+            "installation_identifier()",
+            "==",
+            "clone",
+            "filesystem",
+            "DPAPI",
+            "HMAC",
+            "parse",
+            "database",
+            "NormalizedFreshnessAnchorObservation",
+            "classify_database_freshness",
+            "publication",
+            "startup",
+            "recovery",
+            "replacement",
+        ] {
+            assert!(
+                !transition.contains(excluded),
+                "ownership transition unexpectedly contains out-of-scope behavior: {excluded}"
             );
         }
     }

@@ -25,13 +25,29 @@ use crate::{
     database_metadata_correspondence::DatabaseMetadataCorrespondence,
     freshness_anchor_contract::FreshnessAnchorContractV1,
     installation_evidence_contract::StructurallyValidatedInstallationEvidence,
+    installation_evidence_protection::SealedAssuredFreshnessAnchorHandoff,
 };
+
+pub(crate) struct AssuredFreshnessAnchorConstructionToken {
+    _private: (),
+}
 
 pub(crate) struct AssuredFreshnessAnchor {
     anchor: FreshnessAnchorContractV1,
 }
 
 impl AssuredFreshnessAnchor {
+    pub(crate) fn from_sealed_handoff(handoff: SealedAssuredFreshnessAnchorHandoff) -> Self {
+        handoff.complete_assured_construction(
+            AssuredFreshnessAnchorConstructionToken { _private: () },
+            Self::from_assured_contract,
+        )
+    }
+
+    fn from_assured_contract(anchor: FreshnessAnchorContractV1) -> Self {
+        Self { anchor }
+    }
+
     const fn anchor(&self) -> &FreshnessAnchorContractV1 {
         &self.anchor
     }
@@ -186,6 +202,11 @@ mod tests {
             PERMANENT_APPLICATION_IDENTIFIER, RecoveryOrReplacementGeneration,
             SetupPublicationIdentifier, UnvalidatedInstallationEvidenceContract,
         },
+        installation_evidence_protection::{
+            AuthenticatedActiveFreshnessAnchor, TrustedCurrentInstallationIdentity,
+            assure_installation_bound_authenticated_active_freshness_anchor,
+            synthetic_installation_bound_authenticated_active_freshness_anchor,
+        },
         storage_foundation::{APPLICATION_DATABASE_FORMAT_IDENTITY, ParishIdentifier},
     };
 
@@ -302,20 +323,89 @@ mod tests {
     }
 
     #[test]
-    fn assurance_wrapper_has_no_production_constructor_and_test_present_owns_it() {
+    fn production_assurance_consumes_only_the_installation_bound_proof() {
+        let marker =
+            "pub(crate) fn assure_installation_bound_authenticated_active_freshness_anchor(";
+        const PROTECTION_SOURCE: &str = include_str!("installation_evidence_protection/mod.rs");
+        let protection_production = PROTECTION_SOURCE.split("#[cfg(test)]").next().unwrap();
+        let transition = protection_production
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let signature: fn(
+            crate::installation_evidence_protection::InstallationBoundAuthenticatedActiveFreshnessAnchor,
+        ) -> AssuredFreshnessAnchor =
+            assure_installation_bound_authenticated_active_freshness_anchor;
+        let bound = synthetic_installation_bound_authenticated_active_freshness_anchor(anchor(
+            IDENTITY, 7, 11,
+        ));
+        let assured: AssuredFreshnessAnchor = signature(bound);
+
+        assert_eq!(protection_production.matches(marker).count(), 1);
+        assert!(
+            transition
+                .contains("bound_anchor: InstallationBoundAuthenticatedActiveFreshnessAnchor,")
+        );
+        assert!(transition.contains(") -> AssuredFreshnessAnchor {"));
+        for excluded_input in [
+            "contract: FreshnessAnchorContractV1",
+            "authenticated_anchor: AuthenticatedActiveFreshnessAnchor",
+            "trusted_installation: TrustedCurrentInstallationIdentity",
+            "installation_identifier: InstallationIdentifier",
+            "accepted: bool",
+            "metadata: DatabaseMetadataContractV1",
+        ] {
+            assert!(!transition.contains(excluded_input));
+        }
+        assert_eq!(assured.anchor(), &anchor(IDENTITY, 7, 11));
+        assert_eq!(format!("{assured:?}"), "AssuredFreshnessAnchor([REDACTED])");
+    }
+
+    #[test]
+    fn production_and_test_only_assurance_paths_are_distinct_and_private() {
         const SOURCE: &str = include_str!("database_freshness_classification.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let assured_body = production
+            .split_once("pub(crate) struct AssuredFreshnessAnchor {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
 
+        assert_eq!(assured_body, "\n    anchor: FreshnessAnchorContractV1,");
+        assert!(!assured_body.contains("pub"));
         assert!(!production.contains("fn new("));
-        assert!(!production.contains("fn from_"));
         assert!(!production.contains("impl From<"));
-        assert!(SOURCE.contains("from_synthetic_authenticated_load"));
+        assert!(!production.contains("impl Into<"));
+        assert!(
+            !production
+                .contains("pub(crate) fn from_assured_contract(anchor: FreshnessAnchorContractV1)")
+        );
+        assert!(!production.contains(
+            "pub(crate) const fn from_assured_contract(anchor: FreshnessAnchorContractV1)"
+        ));
+        assert!(!production.contains("from_synthetic_authenticated_load"));
+        assert!(SOURCE.contains(
+            "#[cfg(test)]\nimpl AssuredFreshnessAnchor {\n    const fn from_synthetic_authenticated_load("
+        ));
 
         let observation = present(IDENTITY, 7, 11);
         assert!(matches!(
             observation,
             NormalizedFreshnessAnchorObservation::Present(AssuredFreshnessAnchor { .. })
         ));
+
+        let _not_constructor_inputs = (
+            std::mem::size_of::<FreshnessAnchorContractV1>(),
+            std::mem::size_of::<AuthenticatedActiveFreshnessAnchor>(),
+            std::mem::size_of::<TrustedCurrentInstallationIdentity>(),
+            std::mem::size_of::<InstallationIdentifier>(),
+            std::mem::size_of::<bool>(),
+        );
     }
 
     #[test]

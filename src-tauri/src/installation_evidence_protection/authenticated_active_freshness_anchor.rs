@@ -19,6 +19,10 @@ impl AuthenticatedActiveFreshnessAnchor {
     pub(crate) const fn installation_identifier(&self) -> InstallationIdentifier {
         self.contract.installation_identifier()
     }
+
+    pub(super) const fn into_contract(self) -> FreshnessAnchorContractV1 {
+        self.contract
+    }
 }
 
 impl fmt::Debug for AuthenticatedActiveFreshnessAnchor {
@@ -99,11 +103,11 @@ mod tests {
     }
 
     #[test]
-    fn constructor_is_parent_only_and_identifier_is_the_only_crate_visible_method() {
+    fn constructor_and_consuming_transition_are_parent_only_and_identifier_is_crate_visible() {
         const SOURCE: &str = include_str!("authenticated_active_freshness_anchor.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
 
-        assert_eq!(production.matches("pub(super) const fn").count(), 1);
+        assert_eq!(production.matches("pub(super) const fn").count(), 2);
         assert_eq!(production.matches("pub(crate) const fn").count(), 1);
         assert!(!production.contains("pub(crate) const fn from_"));
         assert!(!production.contains("pub(crate) fn from_"));
@@ -115,7 +119,12 @@ mod tests {
                 .count(),
             1
         );
-        assert!(!production.contains("into_contract"));
+        assert_eq!(
+            production
+                .matches("pub(super) const fn into_contract(self) -> FreshnessAnchorContractV1")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -128,6 +137,14 @@ mod tests {
             format!("{proof:?}"),
             "AuthenticatedActiveFreshnessAnchor([REDACTED])"
         );
+    }
+
+    #[test]
+    fn consuming_transition_preserves_the_owned_contract() {
+        let expected = synthetic_contract();
+        let recovered = synthetic_proof().into_contract();
+
+        assert_eq!(recovered, expected);
     }
 
     #[test]
