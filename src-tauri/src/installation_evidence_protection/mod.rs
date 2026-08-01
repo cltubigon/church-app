@@ -28,6 +28,7 @@ use crate::{
     storage_foundation::InstallationEvidencePersistencePaths,
 };
 
+mod authenticated_active_freshness_anchor;
 mod freshness_anchor_current_user_dpapi;
 mod protected_blob_wrapper;
 mod protected_key_payload;
@@ -35,6 +36,7 @@ mod trusted_current_installation_identity;
 #[cfg(windows)]
 mod windows_current_user_dpapi;
 
+pub(crate) use authenticated_active_freshness_anchor::AuthenticatedActiveFreshnessAnchor;
 pub(crate) use protected_blob_wrapper::EncodedProtectedWrapper;
 use protected_blob_wrapper::{ProtectedObjectKind, ValidatedProtectedWrapper};
 pub(crate) use protected_key_payload::DecodedProtectedKeyMaterial;

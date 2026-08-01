@@ -23,7 +23,8 @@ use crate::{
 #[cfg(windows)]
 use super::windows_current_user_dpapi::WindowsCurrentUserDpapi;
 use super::{
-    EncodedProtectedWrapper, InMemoryProtector, ProtectionStageError,
+    AuthenticatedActiveFreshnessAnchor, EncodedProtectedWrapper, InMemoryProtector,
+    ProtectionStageError,
     protected_blob_wrapper::{ProtectedObjectKind, ValidatedProtectedWrapper},
 };
 
@@ -253,7 +254,7 @@ fn recover_and_validate_freshness_anchor_with(
 #[cfg(windows)]
 pub(crate) fn recover_and_validate_loaded_freshness_anchor_pair(
     loaded_pair: LoadedActiveFreshnessAnchorWrapperPair,
-) -> Result<FreshnessAnchorContractV1, LoadedFreshnessAnchorValidationError> {
+) -> Result<AuthenticatedActiveFreshnessAnchor, LoadedFreshnessAnchorValidationError> {
     recover_and_validate_loaded_freshness_anchor_pair_with(&WindowsCurrentUserDpapi, loaded_pair)
 }
 
@@ -261,14 +262,14 @@ pub(crate) fn recover_and_validate_loaded_freshness_anchor_pair(
 fn recover_and_validate_loaded_freshness_anchor_pair_with(
     protector: &impl InMemoryProtector,
     loaded_pair: LoadedActiveFreshnessAnchorWrapperPair,
-) -> Result<FreshnessAnchorContractV1, LoadedFreshnessAnchorValidationError> {
+) -> Result<AuthenticatedActiveFreshnessAnchor, LoadedFreshnessAnchorValidationError> {
     let (authentication_key, recovered_generation_identifier) =
         recover_anchor_authentication_material_with(protector, loaded_pair.key_wrapper_bytes())
             .map_err(|_| {
                 LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed
             })?;
 
-    recover_and_validate_freshness_anchor_with(
+    let contract = recover_and_validate_freshness_anchor_with(
         protector,
         loaded_pair.authenticated_anchor_wrapper_bytes(),
         &authentication_key,
@@ -296,7 +297,9 @@ fn recover_and_validate_loaded_freshness_anchor_pair_with(
         | AnchorProtectionError::UnsupportedAnchorKeyPayloadVersion => {
             LoadedFreshnessAnchorValidationError::AuthenticatedAnchorWrapperOrProtectionFailed
         }
-    })
+    })?;
+
+    Ok(AuthenticatedActiveFreshnessAnchor::from_authenticated_active_contract(contract))
 }
 
 #[cfg(test)]
@@ -760,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn loaded_pair_composition_consumes_only_the_pair_and_returns_the_exact_contract() {
+    fn loaded_pair_composition_consumes_only_the_pair_and_returns_the_exact_proof() {
         let fake = FakeProtector::unprotecting_many([
             Ok(encoded_key_payload()),
             Ok(envelope().as_bytes().to_vec()),
@@ -769,8 +772,11 @@ mod tests {
             recover_and_validate_loaded_freshness_anchor_pair_with(&fake, canonical_loaded_pair())
                 .unwrap();
 
-        fn require_exact_type(_: FreshnessAnchorContractV1) {}
-        assert_eq!(recovered, contract());
+        fn require_exact_type(_: AuthenticatedActiveFreshnessAnchor) {}
+        assert_eq!(
+            recovered.installation_identifier(),
+            contract().installation_identifier()
+        );
         require_exact_type(recovered);
         assert_eq!(
             fake.unprotected_inputs.borrow().as_slice(),
@@ -787,8 +793,9 @@ mod tests {
         );
         let fake = FakeProtector::unprotecting(encoded_key_payload());
         assert_eq!(
-            recover_and_validate_loaded_freshness_anchor_pair_with(&fake, malformed_key),
-            Err(LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed)
+            recover_and_validate_loaded_freshness_anchor_pair_with(&fake, malformed_key)
+                .unwrap_err(),
+            LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed
         );
         assert!(fake.unprotected_inputs.borrow().is_empty());
 
@@ -798,15 +805,16 @@ mod tests {
         );
         let fake = FakeProtector::unprotecting(encoded_key_payload());
         assert_eq!(
-            recover_and_validate_loaded_freshness_anchor_pair_with(&fake, wrong_kind),
-            Err(LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed)
+            recover_and_validate_loaded_freshness_anchor_pair_with(&fake, wrong_kind).unwrap_err(),
+            LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed
         );
         assert!(fake.unprotected_inputs.borrow().is_empty());
 
         let fake = FakeProtector::unprotection_failure();
         assert_eq!(
-            recover_and_validate_loaded_freshness_anchor_pair_with(&fake, canonical_loaded_pair()),
-            Err(LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed)
+            recover_and_validate_loaded_freshness_anchor_pair_with(&fake, canonical_loaded_pair())
+                .unwrap_err(),
+            LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed
         );
         assert_eq!(fake.unprotected_inputs.borrow().as_slice(), &[vec![0x61]]);
     }
@@ -824,8 +832,9 @@ mod tests {
                 recover_and_validate_loaded_freshness_anchor_pair_with(
                     &fake,
                     canonical_loaded_pair()
-                ),
-                Err(LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed)
+                )
+                .unwrap_err(),
+                LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed
             );
             assert_eq!(fake.unprotected_inputs.borrow().as_slice(), &[vec![0x61]]);
         }
@@ -846,10 +855,8 @@ mod tests {
                 anchor_bytes,
             );
             assert_eq!(
-                recover_and_validate_loaded_freshness_anchor_pair_with(&fake, pair),
-                Err(
-                    LoadedFreshnessAnchorValidationError::AuthenticatedAnchorWrapperOrProtectionFailed
-                )
+                recover_and_validate_loaded_freshness_anchor_pair_with(&fake, pair).unwrap_err(),
+                LoadedFreshnessAnchorValidationError::AuthenticatedAnchorWrapperOrProtectionFailed
             );
             assert_eq!(fake.unprotected_inputs.borrow().as_slice(), &[vec![0x61]]);
         }
@@ -859,8 +866,9 @@ mod tests {
             Err(ProtectorOperationError),
         ]);
         assert_eq!(
-            recover_and_validate_loaded_freshness_anchor_pair_with(&fake, canonical_loaded_pair()),
-            Err(LoadedFreshnessAnchorValidationError::AuthenticatedAnchorWrapperOrProtectionFailed)
+            recover_and_validate_loaded_freshness_anchor_pair_with(&fake, canonical_loaded_pair())
+                .unwrap_err(),
+            LoadedFreshnessAnchorValidationError::AuthenticatedAnchorWrapperOrProtectionFailed
         );
         assert_eq!(
             fake.unprotected_inputs.borrow().as_slice(),
@@ -912,8 +920,9 @@ mod tests {
                 recover_and_validate_loaded_freshness_anchor_pair_with(
                     &fake,
                     canonical_loaded_pair()
-                ),
-                Err(expected)
+                )
+                .unwrap_err(),
+                expected
             );
         }
     }
@@ -943,8 +952,9 @@ mod tests {
                 recover_and_validate_loaded_freshness_anchor_pair_with(
                     &fake,
                     canonical_loaded_pair()
-                ),
-                Err(expected)
+                )
+                .unwrap_err(),
+                expected
             );
         }
     }
@@ -967,7 +977,7 @@ mod tests {
             "#[cfg(windows)]\npub(crate) fn recover_and_validate_loaded_freshness_anchor_pair("
         ));
         assert!(production.contains(
-            "loaded_pair: LoadedActiveFreshnessAnchorWrapperPair,\n) -> Result<FreshnessAnchorContractV1"
+            "loaded_pair: LoadedActiveFreshnessAnchorWrapperPair,\n) -> Result<AuthenticatedActiveFreshnessAnchor"
         ));
         assert!(!LOADER_SOURCE.contains("impl Clone for LoadedActiveFreshnessAnchorWrapperPair"));
         assert!(!LOADER_SOURCE.contains("impl Copy for LoadedActiveFreshnessAnchorWrapperPair"));
@@ -1032,6 +1042,17 @@ mod tests {
             assert!(position >= previous, "transition out of order: {marker}");
             previous = position;
         }
+        let loaded_recovery = production
+            .split_once("fn recover_and_validate_loaded_freshness_anchor_pair_with(")
+            .unwrap()
+            .1;
+        let structural_validation = loaded_recovery
+            .find("recover_and_validate_freshness_anchor_with(")
+            .unwrap();
+        let proof_construction = loaded_recovery
+            .find("AuthenticatedActiveFreshnessAnchor::from_authenticated_active_contract(")
+            .unwrap();
+        assert!(structural_validation < proof_construction);
         assert!(
             production
                 .contains("#[cfg(windows)]\npub(crate) fn protect_anchor_authentication_material")
@@ -1092,9 +1113,10 @@ mod tests {
             key_wrapper.as_bytes().to_vec(),
             anchor_wrapper.as_bytes().to_vec(),
         );
+        let recovered_proof = recover_and_validate_loaded_freshness_anchor_pair(loaded).unwrap();
         assert_eq!(
-            recover_and_validate_loaded_freshness_anchor_pair(loaded).unwrap(),
-            contract()
+            recovered_proof.installation_identifier(),
+            contract().installation_identifier()
         );
     }
 
