@@ -34,6 +34,7 @@ use crate::{
 
 mod authenticated_active_freshness_anchor;
 mod freshness_anchor_current_user_dpapi;
+mod freshness_anchor_observation;
 mod installation_bound_authenticated_active_freshness_anchor;
 mod protected_blob_wrapper;
 mod protected_key_payload;
