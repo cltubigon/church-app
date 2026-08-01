@@ -22,6 +22,14 @@ pub(crate) const STAGED_AUTHENTICATION_KEY_FILENAME: &str = "authentication-key.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const STAGED_AUTHENTICATED_EVIDENCE_FILENAME: &str =
     "authenticated-evidence.dpapi.stage";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const FRESHNESS_ANCHOR_DIRECTORY_NAME: &str = "freshness-anchor";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME: &str =
+    "anchor-authentication-key.dpapi";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME: &str =
+    "authenticated-freshness-anchor.dpapi";
 
 const DEVELOPMENT_STORAGE_IDENTITY: &str = "io.github.cltubigon.churchapp.development";
 const AUTOMATED_TEST_STORAGE_IDENTITY: &str = "church-app-automated-tests";
@@ -123,6 +131,9 @@ redacted_persistence_path!(ActiveAuthenticatedEvidencePath);
 redacted_persistence_path!(StagedAuthenticationKeyPath);
 redacted_persistence_path!(StagedAuthenticatedEvidencePath);
 redacted_persistence_path!(StagedDatabasePath);
+redacted_persistence_path!(FreshnessAnchorDirectoryPath);
+redacted_persistence_path!(ActiveAnchorAuthenticationKeyPath);
+redacted_persistence_path!(ActiveAuthenticatedFreshnessAnchorPath);
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Eq, PartialEq)]
@@ -139,6 +150,20 @@ pub(crate) struct InstallationEvidencePersistencePaths {
 impl fmt::Debug for InstallationEvidencePersistencePaths {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("InstallationEvidencePersistencePaths([REDACTED])")
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct FreshnessAnchorPersistencePaths {
+    pub(crate) freshness_anchor_directory: FreshnessAnchorDirectoryPath,
+    pub(crate) active_anchor_authentication_key: ActiveAnchorAuthenticationKeyPath,
+    pub(crate) active_authenticated_freshness_anchor: ActiveAuthenticatedFreshnessAnchorPath,
+}
+
+impl fmt::Debug for FreshnessAnchorPersistencePaths {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FreshnessAnchorPersistencePaths([REDACTED])")
     }
 }
 
@@ -179,6 +204,16 @@ pub fn resolve_development_database_path(base: &Path) -> DevelopmentDatabasePath
         base.join(DEVELOPMENT_STORAGE_IDENTITY)
             .join(PRODUCTION_DATABASE_FILENAME),
     )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn resolve_freshness_anchor_persistence_paths(
+    app: &tauri::AppHandle,
+) -> Result<FreshnessAnchorPersistencePaths, tauri::Error> {
+    let app_local_data_directory = app.path().app_local_data_dir()?;
+    Ok(freshness_anchor_persistence_paths(
+        &app_local_data_directory,
+    ))
 }
 
 pub fn resolve_automated_test_database_path(
@@ -242,6 +277,25 @@ pub(crate) fn installation_evidence_persistence_paths(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn freshness_anchor_persistence_paths(
+    synthetic_root: &Path,
+) -> FreshnessAnchorPersistencePaths {
+    let freshness_anchor_directory = synthetic_root.join(FRESHNESS_ANCHOR_DIRECTORY_NAME);
+
+    FreshnessAnchorPersistencePaths {
+        freshness_anchor_directory: FreshnessAnchorDirectoryPath(
+            freshness_anchor_directory.clone(),
+        ),
+        active_anchor_authentication_key: ActiveAnchorAuthenticationKeyPath(
+            freshness_anchor_directory.join(ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME),
+        ),
+        active_authenticated_freshness_anchor: ActiveAuthenticatedFreshnessAnchorPath(
+            freshness_anchor_directory.join(ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME),
+        ),
+    }
+}
+
 fn restore_staging_database_path(app_local_data_directory: PathBuf) -> RestoreStagingDatabasePath {
     RestoreStagingDatabasePath(
         app_local_data_directory
@@ -287,6 +341,43 @@ mod tests {
         );
     }
 
+    fn assert_freshness_anchor_paths(root: &Path) {
+        let paths = freshness_anchor_persistence_paths(root);
+        let anchor_directory = root.join(FRESHNESS_ANCHOR_DIRECTORY_NAME);
+
+        assert_eq!(paths.freshness_anchor_directory.as_path(), anchor_directory);
+        assert_eq!(
+            paths.active_anchor_authentication_key.as_path(),
+            anchor_directory.join(ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME)
+        );
+        assert_eq!(
+            paths.active_authenticated_freshness_anchor.as_path(),
+            anchor_directory.join(ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME)
+        );
+        assert_eq!(
+            paths.freshness_anchor_directory.as_path().parent(),
+            Some(root)
+        );
+        assert_eq!(
+            paths.active_anchor_authentication_key.as_path().parent(),
+            Some(anchor_directory.as_path())
+        );
+        assert_eq!(
+            paths
+                .active_authenticated_freshness_anchor
+                .as_path()
+                .parent(),
+            Some(anchor_directory.as_path())
+        );
+
+        for active_path in [
+            paths.active_anchor_authentication_key.as_path(),
+            paths.active_authenticated_freshness_anchor.as_path(),
+        ] {
+            assert!(active_path.starts_with(root));
+        }
+    }
+
     #[test]
     fn persistence_fixed_names_are_exact_and_database_name_remains_canonical() {
         assert_eq!(PRODUCTION_DATABASE_FILENAME, "parish-data.db");
@@ -317,6 +408,222 @@ mod tests {
             paths.active_database,
             production_database_path(PathBuf::from("synthetic-root"))
         );
+    }
+
+    #[test]
+    fn freshness_anchor_fixed_names_and_synthetic_layout_are_exact() {
+        assert_eq!(FRESHNESS_ANCHOR_DIRECTORY_NAME, "freshness-anchor");
+        assert_eq!(
+            ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            "anchor-authentication-key.dpapi"
+        );
+        assert_eq!(
+            ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+            "authenticated-freshness-anchor.dpapi"
+        );
+        assert_ne!(
+            ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME
+        );
+
+        assert_freshness_anchor_paths(Path::new(r"X:\synthetic-local-app-data\church-app"));
+        assert_freshness_anchor_paths(Path::new("synthetic/portable/church-app"));
+        assert_freshness_anchor_paths(Path::new("synthetic root/δοκιμή/教会-app"));
+    }
+
+    #[test]
+    fn freshness_anchor_paths_are_structurally_independent_siblings() {
+        let root = Path::new("synthetic-root");
+        let anchor_paths = freshness_anchor_persistence_paths(root);
+        let evidence_paths = installation_evidence_persistence_paths(root);
+        let anchor_directory = root.join(FRESHNESS_ANCHOR_DIRECTORY_NAME);
+        let evidence_directory = root.join(INSTALLATION_EVIDENCE_DIRECTORY_NAME);
+        let database = root.join(PRODUCTION_DATABASE_FILENAME);
+        let staged_database = root.join(PRODUCTION_DATABASE_STAGE_FILENAME);
+
+        assert_eq!(anchor_directory.parent(), Some(root));
+        assert_eq!(evidence_directory.parent(), Some(root));
+        assert_ne!(anchor_directory, evidence_directory);
+        assert_eq!(
+            evidence_paths.evidence_directory.as_path(),
+            evidence_directory
+        );
+
+        for active_path in [
+            anchor_paths.active_anchor_authentication_key.as_path(),
+            anchor_paths.active_authenticated_freshness_anchor.as_path(),
+        ] {
+            assert_eq!(active_path.parent(), Some(anchor_directory.as_path()));
+            assert!(!active_path.starts_with(&evidence_directory));
+            assert_ne!(active_path, database);
+            assert_ne!(active_path, staged_database);
+            assert!(active_path.starts_with(root));
+        }
+    }
+
+    #[test]
+    fn freshness_anchor_path_debug_output_redacts_every_inner_path_and_fixed_name() {
+        let paths = freshness_anchor_persistence_paths(Path::new("sensitive-synthetic-root"));
+        let debug_values = [
+            format!("{:?}", paths.freshness_anchor_directory),
+            format!("{:?}", paths.active_anchor_authentication_key),
+            format!("{:?}", paths.active_authenticated_freshness_anchor),
+            format!("{paths:?}"),
+        ];
+
+        for debug in debug_values {
+            assert!(debug.contains("[REDACTED]"));
+            for excluded in [
+                "sensitive-synthetic-root",
+                FRESHNESS_ANCHOR_DIRECTORY_NAME,
+                ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+                ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+            ] {
+                assert!(!debug.contains(excluded));
+            }
+        }
+    }
+
+    #[test]
+    fn freshness_anchor_aggregate_has_exactly_the_three_approved_fields() {
+        const SOURCE: &str = include_str!("storage_foundation.rs");
+        let aggregate = SOURCE
+            .split("pub(crate) struct FreshnessAnchorPersistencePaths")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("impl fmt::Debug for FreshnessAnchorPersistencePaths")
+                    .next()
+            })
+            .expect("freshness-anchor aggregate should remain a distinct definition");
+
+        assert_eq!(aggregate.matches("pub(crate)").count(), 3);
+        for approved in [
+            "freshness_anchor_directory: FreshnessAnchorDirectoryPath",
+            "active_anchor_authentication_key: ActiveAnchorAuthenticationKeyPath",
+            "active_authenticated_freshness_anchor: ActiveAuthenticatedFreshnessAnchorPath",
+        ] {
+            assert!(aggregate.contains(approved));
+        }
+        for excluded in [
+            "database",
+            "evidence",
+            "stage",
+            "previous",
+            "retained",
+            "intent",
+            "backup",
+            "recovery",
+            "migration",
+            "reset",
+        ] {
+            assert!(!aggregate.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn freshness_anchor_contract_declares_only_the_three_approved_path_owners() {
+        const SOURCE: &str = include_str!("storage_foundation.rs");
+        let production_source = SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("module should contain a test boundary");
+
+        for approved in [
+            "redacted_persistence_path!(FreshnessAnchorDirectoryPath);",
+            "redacted_persistence_path!(ActiveAnchorAuthenticationKeyPath);",
+            "redacted_persistence_path!(ActiveAuthenticatedFreshnessAnchorPath);",
+        ] {
+            assert_eq!(production_source.matches(approved).count(), 1);
+        }
+        assert_eq!(
+            production_source
+                .lines()
+                .filter(|line| line.contains("redacted_persistence_path!("))
+                .filter(|line| {
+                    line.contains("FreshnessAnchor") || line.contains("AnchorAuthenticationKeyPath")
+                })
+                .count(),
+            3
+        );
+        for excluded in [
+            "StagedFreshnessAnchor",
+            "PreviousFreshnessAnchor",
+            "RetainedFreshnessAnchor",
+            "FreshnessAnchorPublicationIntent",
+            "FreshnessAnchorBackup",
+            "FreshnessAnchorRecovery",
+            "FreshnessAnchorMigration",
+            "FreshnessAnchorReset",
+        ] {
+            assert!(!production_source.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn freshness_anchor_constructor_uses_only_path_joins() {
+        const SOURCE: &str = include_str!("storage_foundation.rs");
+        let constructor = SOURCE
+            .split("pub(crate) fn freshness_anchor_persistence_paths")
+            .nth(1)
+            .and_then(|tail| tail.split("fn restore_staging_database_path").next())
+            .expect("freshness-anchor constructor should remain a distinct function");
+
+        assert!(constructor.contains(".join("));
+        for excluded in [
+            "std::fs",
+            "File",
+            "OpenOptions",
+            "create_dir",
+            ".read(",
+            ".write(",
+            "remove",
+            "rename",
+            "canonicalize",
+            "metadata",
+            "read_dir",
+            "windows_sys",
+            "app.path()",
+            "std::env",
+            "std::time",
+            "getrandom",
+        ] {
+            assert!(!constructor.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn freshness_anchor_resolver_is_a_single_canonical_tauri_path_boundary() {
+        let resolver: fn(
+            &tauri::AppHandle,
+        ) -> Result<FreshnessAnchorPersistencePaths, tauri::Error> =
+            resolve_freshness_anchor_persistence_paths;
+        let _ = resolver;
+
+        const SOURCE: &str = include_str!("storage_foundation.rs");
+        let resolver_source = SOURCE
+            .split("pub(crate) fn resolve_freshness_anchor_persistence_paths")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub fn resolve_automated_test_database_path")
+                    .next()
+            })
+            .expect("freshness-anchor resolver should remain a distinct function");
+
+        assert_eq!(resolver_source.matches("app_local_data_dir()").count(), 1);
+        assert!(resolver_source.contains("freshness_anchor_persistence_paths("));
+        for excluded in [
+            "std::fs",
+            "File::",
+            "OpenOptions",
+            "create_dir",
+            ".exists()",
+            ".open(",
+            ".read(",
+            ".write(",
+            "std::env",
+        ] {
+            assert!(!resolver_source.contains(excluded));
+        }
     }
 
     #[test]
