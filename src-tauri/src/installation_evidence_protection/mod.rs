@@ -30,6 +30,7 @@ use crate::{
 
 mod authenticated_active_freshness_anchor;
 mod freshness_anchor_current_user_dpapi;
+mod installation_bound_authenticated_active_freshness_anchor;
 mod protected_blob_wrapper;
 mod protected_key_payload;
 mod trusted_current_installation_identity;
@@ -37,6 +38,7 @@ mod trusted_current_installation_identity;
 mod windows_current_user_dpapi;
 
 pub(crate) use authenticated_active_freshness_anchor::AuthenticatedActiveFreshnessAnchor;
+pub(crate) use installation_bound_authenticated_active_freshness_anchor::InstallationBoundAuthenticatedActiveFreshnessAnchor;
 pub(crate) use protected_blob_wrapper::EncodedProtectedWrapper;
 use protected_blob_wrapper::{ProtectedObjectKind, ValidatedProtectedWrapper};
 pub(crate) use protected_key_payload::DecodedProtectedKeyMaterial;
@@ -46,6 +48,40 @@ pub(crate) use trusted_current_installation_identity::TrustedCurrentInstallation
 use windows_current_user_dpapi::WindowsCurrentUserDpapi;
 
 const AUTHENTICATED_ENVELOPE_LENGTH: usize = 226;
+
+pub(crate) enum FreshnessAnchorInstallationBindingError {
+    InstallationIdentifierMismatch,
+}
+
+impl fmt::Debug for FreshnessAnchorInstallationBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InstallationIdentifierMismatch => {
+                formatter.write_str("InstallationIdentifierMismatch")
+            }
+        }
+    }
+}
+
+pub(crate) fn bind_authenticated_active_freshness_anchor_to_current_installation(
+    authenticated_anchor: AuthenticatedActiveFreshnessAnchor,
+    trusted_installation: &TrustedCurrentInstallationIdentity,
+) -> Result<
+    InstallationBoundAuthenticatedActiveFreshnessAnchor,
+    FreshnessAnchorInstallationBindingError,
+> {
+    if authenticated_anchor.installation_identifier()
+        == trusted_installation.installation_identifier()
+    {
+        Ok(
+            InstallationBoundAuthenticatedActiveFreshnessAnchor::from_authenticated_anchor(
+                authenticated_anchor,
+            ),
+        )
+    } else {
+        Err(FreshnessAnchorInstallationBindingError::InstallationIdentifierMismatch)
+    }
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProtectionStageError {
@@ -567,13 +603,14 @@ mod tests {
         InstallationEvidencePersistencePaths, installation_evidence_persistence_paths,
     };
     use crate::{
+        freshness_anchor_contract::FreshnessAnchorContractV1,
         installation_evidence_authenticated_envelope::construct_authenticated_envelope_v1,
         installation_evidence_contract::{
-            ContractValidationError, EncodedInstallationEvidence,
+            ContractValidationError, DatabaseKeyGenerationIdentifier, EncodedInstallationEvidence,
             INSTALLATION_EVIDENCE_FORMAT_IDENTITY, InstallationEvidenceParseError,
-            InstallationGeneration, PERMANENT_APPLICATION_IDENTIFIER,
+            InstallationGeneration, InstallationIdentifier, PERMANENT_APPLICATION_IDENTIFIER,
             RecoveryOrReplacementGeneration, SUPPORTED_EVIDENCE_FORMAT_VERSION,
-            UnvalidatedInstallationEvidenceContract,
+            SetupPublicationIdentifier, UnvalidatedInstallationEvidenceContract,
         },
         installation_evidence_persistence::read_bounded_protected_wrapper,
         storage_foundation::APPLICATION_DATABASE_FORMAT_IDENTITY,
@@ -581,6 +618,148 @@ mod tests {
 
     const KEY: [u8; 32] = [0x5a; 32];
     const IDENTIFIER: [u8; 16] = [0xa5; 16];
+
+    fn synthetic_freshness_anchor_binding_inputs(
+        anchor_installation_identifier: [u8; 16],
+        trusted_installation_identifier: [u8; 16],
+    ) -> (
+        AuthenticatedActiveFreshnessAnchor,
+        TrustedCurrentInstallationIdentity,
+    ) {
+        let anchor_contract = FreshnessAnchorContractV1::new(
+            InstallationIdentifier::from_bytes(anchor_installation_identifier).unwrap(),
+            InstallationGeneration::new(7).unwrap(),
+            RecoveryOrReplacementGeneration::new(9).unwrap(),
+            DatabaseKeyGenerationIdentifier::from_bytes([0x42; 16]).unwrap(),
+            SetupPublicationIdentifier::from_bytes([0x53; 16]).unwrap(),
+        );
+        let authenticated_anchor =
+            AuthenticatedActiveFreshnessAnchor::from_authenticated_active_contract(anchor_contract);
+        let trusted_installation =
+            TrustedCurrentInstallationIdentity::from_validated_installation_identifier(
+                InstallationIdentifier::from_bytes(trusted_installation_identifier).unwrap(),
+            );
+        (authenticated_anchor, trusted_installation)
+    }
+
+    #[test]
+    fn bind_authenticated_active_freshness_anchor_to_current_installation_matches_typed_identity() {
+        let (authenticated_anchor, trusted_installation) =
+            synthetic_freshness_anchor_binding_inputs([0x31; 16], [0x31; 16]);
+        let expected_identifier = authenticated_anchor.installation_identifier();
+        let binding: fn(
+            AuthenticatedActiveFreshnessAnchor,
+            &TrustedCurrentInstallationIdentity,
+        ) -> Result<
+            InstallationBoundAuthenticatedActiveFreshnessAnchor,
+            FreshnessAnchorInstallationBindingError,
+        > = bind_authenticated_active_freshness_anchor_to_current_installation;
+
+        let bound = binding(authenticated_anchor, &trusted_installation)
+            .expect("matching typed installation identifiers must bind");
+        assert_eq!(
+            trusted_installation.installation_identifier(),
+            expected_identifier,
+            "the trusted proof remains borrowed and available"
+        );
+        let recovered_authenticated_anchor = bound.into_authenticated_anchor();
+        assert_eq!(
+            recovered_authenticated_anchor.installation_identifier(),
+            expected_identifier,
+            "the bound proof must preserve ownership of the authenticated proof"
+        );
+    }
+
+    #[test]
+    fn bind_authenticated_active_freshness_anchor_to_current_installation_mismatch_fails_closed() {
+        let (authenticated_anchor, trusted_installation) =
+            synthetic_freshness_anchor_binding_inputs([0x31; 16], [0x32; 16]);
+
+        let error = bind_authenticated_active_freshness_anchor_to_current_installation(
+            authenticated_anchor,
+            &trusted_installation,
+        )
+        .expect_err("different typed installation identifiers must not bind");
+
+        assert!(matches!(
+            error,
+            FreshnessAnchorInstallationBindingError::InstallationIdentifierMismatch
+        ));
+        assert_eq!(format!("{error:?}"), "InstallationIdentifierMismatch");
+        assert!(!format!("{error:?}").contains("31"));
+        assert!(!format!("{error:?}").contains("32"));
+    }
+
+    #[test]
+    fn bind_authenticated_active_freshness_anchor_boundary_is_pure_strong_and_narrow() {
+        const SOURCE: &str = include_str!("mod.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let marker =
+            "pub(crate) fn bind_authenticated_active_freshness_anchor_to_current_installation(";
+        assert_eq!(production.matches(marker).count(), 1);
+        let boundary = production
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+
+        assert!(boundary.contains(
+            "authenticated_anchor: AuthenticatedActiveFreshnessAnchor,\n    trusted_installation: &TrustedCurrentInstallationIdentity,"
+        ));
+        assert!(boundary.contains(
+            ") -> Result<\n    InstallationBoundAuthenticatedActiveFreshnessAnchor,\n    FreshnessAnchorInstallationBindingError,\n>"
+        ));
+        assert_eq!(
+            boundary
+                .matches("authenticated_anchor.installation_identifier()")
+                .count(),
+            1
+        );
+        assert_eq!(
+            boundary
+                .matches("trusted_installation.installation_identifier()")
+                .count(),
+            1
+        );
+        assert!(boundary.contains(
+            "authenticated_anchor.installation_identifier()\n        == trusted_installation.installation_identifier()"
+        ));
+        assert!(boundary.contains(
+            "InstallationBoundAuthenticatedActiveFreshnessAnchor::from_authenticated_anchor(\n                authenticated_anchor,"
+        ));
+        assert!(boundary.contains(
+            "Err(FreshnessAnchorInstallationBindingError::InstallationIdentifierMismatch)"
+        ));
+
+        for excluded in [
+            "FreshnessAnchorContractV1",
+            "InstallationIdentifier,",
+            "StructurallyValidatedInstallationEvidence",
+            "bool",
+            "AssuredFreshnessAnchor",
+            "NormalizedFreshnessAnchorObservation",
+            "classify_database_freshness",
+            "Present",
+            "write_bytes_into",
+            "as_bytes",
+            "database",
+            "filesystem",
+            "DPAPI",
+            "HMAC",
+            "parse",
+            "publication",
+            "startup",
+            "recovery",
+            "replacement",
+        ] {
+            assert!(
+                !boundary.contains(excluded),
+                "binding boundary unexpectedly contains out-of-scope surface: {excluded}"
+            );
+        }
+    }
 
     #[derive(Default)]
     struct FakeProtector {
