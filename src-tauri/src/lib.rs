@@ -7,6 +7,7 @@ mod database_metadata_correspondence;
 mod database_metadata_decoding;
 mod freshness_anchor_authenticated_envelope;
 mod freshness_anchor_authentication_key;
+mod freshness_anchor_authentication_key_generation;
 mod freshness_anchor_contract;
 mod freshness_anchor_plaintext;
 mod freshness_anchor_protected_key_payload;
