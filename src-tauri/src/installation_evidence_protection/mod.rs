@@ -31,6 +31,7 @@ use crate::{
 mod freshness_anchor_current_user_dpapi;
 mod protected_blob_wrapper;
 mod protected_key_payload;
+mod trusted_current_installation_identity;
 #[cfg(windows)]
 mod windows_current_user_dpapi;
 
@@ -38,6 +39,7 @@ pub(crate) use protected_blob_wrapper::EncodedProtectedWrapper;
 use protected_blob_wrapper::{ProtectedObjectKind, ValidatedProtectedWrapper};
 pub(crate) use protected_key_payload::DecodedProtectedKeyMaterial;
 use protected_key_payload::EncodedProtectedKeyPayload;
+pub(crate) use trusted_current_installation_identity::TrustedCurrentInstallationIdentity;
 #[cfg(windows)]
 use windows_current_user_dpapi::WindowsCurrentUserDpapi;
 
@@ -415,6 +417,29 @@ impl fmt::Debug for ActiveStructurallyValidatedEvidenceRecoveryError {
 }
 
 #[cfg(windows)]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum TrustedCurrentInstallationIdentityError {
+    ActiveEvidenceLoadingUnavailable,
+    EvidenceProtectionOrAuthenticationFailed,
+    EvidencePlaintextParseFailed,
+    EvidenceStructuralValidationFailed,
+}
+
+#[cfg(windows)]
+impl fmt::Debug for TrustedCurrentInstallationIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ActiveEvidenceLoadingUnavailable => "ActiveEvidenceLoadingUnavailable",
+            Self::EvidenceProtectionOrAuthenticationFailed => {
+                "EvidenceProtectionOrAuthenticationFailed"
+            }
+            Self::EvidencePlaintextParseFailed => "EvidencePlaintextParseFailed",
+            Self::EvidenceStructuralValidationFailed => "EvidenceStructuralValidationFailed",
+        })
+    }
+}
+
+#[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
 fn load_and_recover_generation_matched_installation_evidence(
     paths: &InstallationEvidencePersistencePaths,
@@ -462,6 +487,33 @@ fn load_and_validate_active_installation_evidence(
         // Any future broader protection-stage failure remains fail-closed.
         _ => ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed,
     })
+}
+
+#[cfg(windows)]
+pub(crate) fn load_trusted_current_installation_identity(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<TrustedCurrentInstallationIdentity, TrustedCurrentInstallationIdentityError> {
+    let structurally_validated =
+        load_and_validate_active_installation_evidence(paths).map_err(|error| match error {
+            ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed => {
+                TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable
+            }
+            ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed => {
+                TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed
+            }
+            ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed => {
+                TrustedCurrentInstallationIdentityError::EvidencePlaintextParseFailed
+            }
+            ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed => {
+                TrustedCurrentInstallationIdentityError::EvidenceStructuralValidationFailed
+            }
+        })?;
+    let installation_identifier = structurally_validated.installation_identifier();
+    Ok(
+        TrustedCurrentInstallationIdentity::from_validated_installation_identifier(
+            installation_identifier,
+        ),
+    )
 }
 
 #[cfg(windows)]
@@ -1655,7 +1707,7 @@ mod tests {
             production_source
                 .matches("load_and_validate_active_installation_evidence(")
                 .count(),
-            1
+            2
         );
         let before_definition = production_source.split_once(definition_marker).unwrap().0;
         let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
@@ -1710,6 +1762,351 @@ mod tests {
         }
         assert!(!boundary.contains(&["std", "::fs"].concat()));
         assert!(!boundary.contains(&["installation", "_state"].concat()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_current_installation_identity_returns_only_the_validated_active_identifier() {
+        let canonical_plaintext = *plaintext().as_bytes();
+        let expected = ParsedUntrustedInstallationEvidenceContract::parse_v1(&canonical_plaintext)
+            .unwrap()
+            .validate_structure()
+            .unwrap()
+            .installation_identifier();
+        let fixture = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            canonical_plaintext,
+        );
+
+        let proof = load_trusted_current_installation_identity(&fixture.paths)
+            .expect("canonical hardened active evidence must produce a trusted identity");
+
+        fn require_exact_result_type(_: &TrustedCurrentInstallationIdentity) {}
+        require_exact_result_type(&proof);
+        assert_eq!(proof.installation_identifier(), expected);
+        assert_eq!(
+            format!("{proof:?}"),
+            "TrustedCurrentInstallationIdentity([REDACTED])"
+        );
+        fixture.assert_canonical_active_state();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_current_installation_identity_rejects_missing_stage_and_unexpected_artifacts() {
+        for missing_key in [true, false] {
+            let fixture = structurally_validated_active_evidence_composition_fixture(
+                KEY,
+                IDENTIFIER,
+                IDENTIFIER,
+                *plaintext().as_bytes(),
+            );
+            let missing = if missing_key {
+                fixture.paths.active_authentication_key.as_path()
+            } else {
+                fixture.paths.active_authenticated_evidence.as_path()
+            };
+            fs::remove_file(missing).unwrap();
+
+            assert!(matches!(
+                load_trusted_current_installation_identity(&fixture.paths),
+                Err(TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable)
+            ));
+            fixture.assert_no_stage_artifacts();
+        }
+
+        for stages in [(true, false), (false, true), (true, true)] {
+            let fixture = structurally_validated_active_evidence_composition_fixture(
+                KEY,
+                IDENTIFIER,
+                IDENTIFIER,
+                *plaintext().as_bytes(),
+            );
+            if stages.0 {
+                fs::write(
+                    fixture.paths.staged_authentication_key.as_path(),
+                    b"synthetic-stage-key",
+                )
+                .unwrap();
+            }
+            if stages.1 {
+                fs::write(
+                    fixture.paths.staged_authenticated_evidence.as_path(),
+                    b"synthetic-stage-evidence",
+                )
+                .unwrap();
+            }
+
+            assert!(matches!(
+                load_trusted_current_installation_identity(&fixture.paths),
+                Err(TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable)
+            ));
+        }
+
+        for unexpected_directory in [false, true] {
+            let fixture = structurally_validated_active_evidence_composition_fixture(
+                KEY,
+                IDENTIFIER,
+                IDENTIFIER,
+                *plaintext().as_bytes(),
+            );
+            let unexpected = fixture
+                .paths
+                .evidence_directory
+                .as_path()
+                .join("unexpected.synthetic");
+            if unexpected_directory {
+                fs::create_dir(unexpected).unwrap();
+            } else {
+                fs::write(unexpected, b"synthetic").unwrap();
+            }
+
+            assert!(matches!(
+                load_trusted_current_installation_identity(&fixture.paths),
+                Err(TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable)
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_current_installation_identity_rejects_wrapper_dpapi_key_and_authentication_failures()
+    {
+        let canonical_key = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticationKey,
+            &key_payload(KEY, IDENTIFIER),
+        );
+        let canonical_envelope = encoded_envelope(KEY, IDENTIFIER);
+        let canonical_evidence = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticatedEvidence,
+            canonical_envelope.as_bytes(),
+        );
+
+        let wrong_key_kind = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticatedEvidence,
+            &key_payload(KEY, IDENTIFIER),
+        );
+        let fixture = ActiveEvidenceLoadTrustChainCompositionTestRoot::create(
+            wrong_key_kind.as_bytes(),
+            canonical_evidence.as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&fixture.paths),
+            Err(TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable)
+        ));
+
+        let wrong_evidence_kind = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticationKey,
+            canonical_envelope.as_bytes(),
+        );
+        let fixture = ActiveEvidenceLoadTrustChainCompositionTestRoot::create(
+            canonical_key.as_bytes(),
+            wrong_evidence_kind.as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&fixture.paths),
+            Err(TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable)
+        ));
+
+        let key_dpapi_failure = owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0; 16]);
+        let fixture = ActiveEvidenceLoadTrustChainCompositionTestRoot::create(
+            key_dpapi_failure.as_bytes(),
+            canonical_evidence.as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&fixture.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed)
+        ));
+
+        let evidence_dpapi_failure =
+            owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0; 16]);
+        let fixture = ActiveEvidenceLoadTrustChainCompositionTestRoot::create(
+            canonical_key.as_bytes(),
+            evidence_dpapi_failure.as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&fixture.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed)
+        ));
+
+        let malformed_key_payload = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticationKey,
+            b"synthetic-malformed-key-payload",
+        );
+        let fixture = ActiveEvidenceLoadTrustChainCompositionTestRoot::create(
+            malformed_key_payload.as_bytes(),
+            canonical_evidence.as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&fixture.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed)
+        ));
+
+        let wrong_hmac = structurally_validated_active_evidence_composition_fixture(
+            [0x44; 32],
+            IDENTIFIER,
+            IDENTIFIER,
+            *plaintext().as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&wrong_hmac.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed)
+        ));
+
+        let generation_mismatch = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            [0x77; 16],
+            IDENTIFIER,
+            *plaintext().as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&generation_mismatch.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_current_installation_identity_rejects_parse_and_structural_failures() {
+        let mut malformed_plaintext = *plaintext().as_bytes();
+        malformed_plaintext[0] = 0;
+        let fixture = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            malformed_plaintext,
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&fixture.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidencePlaintextParseFailed)
+        ));
+
+        let mut structurally_invalid_plaintext = *plaintext().as_bytes();
+        structurally_invalid_plaintext[12..28].fill(0);
+        ParsedUntrustedInstallationEvidenceContract::parse_v1(&structurally_invalid_plaintext)
+            .expect("structural failure fixture must remain parseable");
+        let fixture = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            structurally_invalid_plaintext,
+        );
+        assert!(matches!(
+            load_trusted_current_installation_identity(&fixture.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceStructuralValidationFailed)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_current_installation_identity_errors_are_payload_free_and_redacted() {
+        for (error, expected) in [
+            (
+                TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable,
+                "ActiveEvidenceLoadingUnavailable",
+            ),
+            (
+                TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed,
+                "EvidenceProtectionOrAuthenticationFailed",
+            ),
+            (
+                TrustedCurrentInstallationIdentityError::EvidencePlaintextParseFailed,
+                "EvidencePlaintextParseFailed",
+            ),
+            (
+                TrustedCurrentInstallationIdentityError::EvidenceStructuralValidationFailed,
+                "EvidenceStructuralValidationFailed",
+            ),
+        ] {
+            let debug = format!("{error:?}");
+            assert_eq!(debug, expected);
+            for forbidden in [
+                "path",
+                "CHDPAPI",
+                "CHEVAUTH",
+                "identifier",
+                "native",
+                "account",
+            ] {
+                assert!(!debug.to_ascii_lowercase().contains(forbidden));
+            }
+        }
+    }
+
+    #[test]
+    fn trusted_current_installation_identity_source_proves_sealed_complete_boundary() {
+        const SOURCE: &str = include_str!("mod.rs");
+        const TYPE_SOURCE: &str = include_str!("trusted_current_installation_identity.rs");
+        const LIB_SOURCE: &str = include_str!("../lib.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let marker = "pub(crate) fn load_trusted_current_installation_identity(";
+        assert_eq!(production.matches(marker).count(), 1);
+        let before = production.split_once(marker).unwrap().0;
+        let attributes = before.rsplit_once("\n\n").unwrap().1;
+        assert!(attributes.contains("#[cfg(windows)]"));
+        let boundary = production
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+
+        assert!(boundary.contains("paths: &InstallationEvidencePersistencePaths"));
+        assert!(!boundary.contains("paths:".repeat(2).as_str()));
+        assert!(boundary.contains("Result<TrustedCurrentInstallationIdentity"));
+        let stages = [
+            "load_and_validate_active_installation_evidence(paths)",
+            "structurally_validated.installation_identifier()",
+            "TrustedCurrentInstallationIdentity::from_validated_installation_identifier(",
+        ];
+        let positions = stages.map(|stage| {
+            assert_eq!(boundary.matches(stage).count(), 1);
+            boundary.find(stage).unwrap()
+        });
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+
+        for excluded in [
+            "FreshnessAnchor",
+            "AssuredFreshnessAnchor",
+            "classif",
+            "database",
+            "startup",
+            "publication",
+            "recovery",
+            "replacement",
+            "migration",
+            "reset",
+            "tauri",
+            "unsafe",
+        ] {
+            assert!(!boundary.contains(excluded), "unexpected term: {excluded}");
+        }
+
+        let type_production = TYPE_SOURCE.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            type_production
+                .matches("pub(super) const fn from_validated_installation_identifier(")
+                .count(),
+            1
+        );
+        assert!(!type_production.contains("pub(crate) const fn from_"));
+        assert!(!type_production.contains("StructurallyValidatedInstallationEvidence"));
+        assert!(!type_production.contains("UnvalidatedInstallationEvidenceContract"));
+        assert_eq!(
+            LIB_SOURCE
+                .matches("TrustedCurrentInstallationIdentity")
+                .count(),
+            0
+        );
+        assert_eq!(
+            LIB_SOURCE
+                .matches("trusted_current_installation_identity")
+                .count(),
+            0
+        );
     }
 
     #[cfg(windows)]
