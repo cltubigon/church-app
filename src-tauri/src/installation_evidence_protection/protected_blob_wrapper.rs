@@ -11,6 +11,8 @@ pub(super) const MAXIMUM_BLOB_LENGTH: usize = 65_536;
 pub(crate) enum ProtectedObjectKind {
     AuthenticationKey = 1,
     AuthenticatedEvidence = 2,
+    AnchorAuthenticationKey = 3,
+    AuthenticatedFreshnessAnchor = 4,
 }
 
 impl ProtectedObjectKind {
@@ -18,6 +20,8 @@ impl ProtectedObjectKind {
         match value {
             1 => Ok(Self::AuthenticationKey),
             2 => Ok(Self::AuthenticatedEvidence),
+            3 => Ok(Self::AnchorAuthenticationKey),
+            4 => Ok(Self::AuthenticatedFreshnessAnchor),
             _ => Err(ProtectionStageError::WrapperParseFailed),
         }
     }
@@ -209,6 +213,8 @@ mod tests {
         for (kind, kind_byte) in [
             (ProtectedObjectKind::AuthenticationKey, 1),
             (ProtectedObjectKind::AuthenticatedEvidence, 2),
+            (ProtectedObjectKind::AnchorAuthenticationKey, 3),
+            (ProtectedObjectKind::AuthenticatedFreshnessAnchor, 4),
         ] {
             let wrapper = encoded(kind, vec![0xaa, 0xbb, 0xcc]);
             assert_eq!(&wrapper.as_bytes()[0..8], b"CHDPAPI\0");
@@ -288,7 +294,7 @@ mod tests {
                 ProtectionStageError::UnsupportedWrapperVersion,
             );
         }
-        for kind in [0, 3, u8::MAX] {
+        for kind in [0, 5, u8::MAX] {
             let mut mutated = valid.as_bytes().to_vec();
             mutated[9] = kind;
             assert_wrapper_failure(
@@ -302,6 +308,32 @@ mod tests {
             ProtectedObjectKind::AuthenticatedEvidence,
             ProtectionStageError::WrongProtectedObjectKind,
         );
+    }
+
+    #[test]
+    fn all_four_object_kinds_are_distinct_and_cross_kind_substitution_fails() {
+        let kinds = [
+            ProtectedObjectKind::AuthenticationKey,
+            ProtectedObjectKind::AuthenticatedEvidence,
+            ProtectedObjectKind::AnchorAuthenticationKey,
+            ProtectedObjectKind::AuthenticatedFreshnessAnchor,
+        ];
+        assert_eq!(kinds.map(|kind| kind as u8), [1, 2, 3, 4]);
+
+        for encoded_kind in kinds {
+            let wrapper = encoded(encoded_kind, vec![0x42; 8]);
+            for requested_kind in kinds {
+                let result = ValidatedProtectedWrapper::parse(wrapper.as_bytes(), requested_kind);
+                if encoded_kind == requested_kind {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        ProtectionStageError::WrongProtectedObjectKind
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -477,6 +509,9 @@ mod tests {
             .unwrap_err(),
             ProtectionStageError::ProtectionUnavailable
         );
+        assert_eq!(HEADER_LENGTH, 14);
+        assert_eq!(MAXIMUM_BLOB_LENGTH, 65_536);
+        assert_eq!(HEADER_LENGTH + MAXIMUM_BLOB_LENGTH, 65_550);
     }
 
     #[test]
