@@ -21,6 +21,13 @@ impl DatabaseKey {
         Self { bytes }
     }
 
+    pub(crate) fn from_bytes_with_cleared_source(source: &mut [u8; 32]) -> Self {
+        let mut key = Self { bytes: [0; 32] };
+        key.bytes.copy_from_slice(source);
+        source.zeroize();
+        key
+    }
+
     pub(crate) fn expose_bytes<R>(&self, operation: impl FnOnce(&[u8; 32]) -> R) -> R {
         operation(&self.bytes)
     }
@@ -59,6 +66,16 @@ mod tests {
         let key = DatabaseKey::from_bytes(SYNTHETIC_KEY_BYTES);
 
         assert_eq!(size_of::<DatabaseKey>(), 32);
+        key.expose_bytes(|bytes| assert_eq!(bytes, &SYNTHETIC_KEY_BYTES));
+    }
+
+    #[test]
+    fn cleared_source_construction_transfers_then_immediately_clears_the_source() {
+        let mut source = SYNTHETIC_KEY_BYTES;
+
+        let key = DatabaseKey::from_bytes_with_cleared_source(&mut source);
+
+        assert_eq!(source, [0; 32]);
         key.expose_bytes(|bytes| assert_eq!(bytes, &SYNTHETIC_KEY_BYTES));
     }
 
@@ -113,6 +130,14 @@ mod tests {
         assert_eq!(
             production_source
                 .matches(
+                    "pub(crate) fn from_bytes_with_cleared_source(source: &mut [u8; 32]) -> Self"
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            production_source
+                .matches(
                     "pub(crate) fn expose_bytes<R>(&self, operation: impl FnOnce(&[u8; 32]) -> R) -> R"
                 )
                 .count(),
@@ -121,7 +146,13 @@ mod tests {
         assert_eq!(production_source.matches("\nimpl ").count(), 3);
         assert!(needs_drop::<DatabaseKey>());
         assert_eq!(LIB_SOURCE.matches("mod database_key;").count(), 1);
-        assert_eq!(LIB_SOURCE.matches("database_key").count(), 1);
+        assert_eq!(
+            LIB_SOURCE
+                .matches("mod database_key_protected_payload;")
+                .count(),
+            1
+        );
+        assert!(!LIB_SOURCE.contains("pub mod database_key"));
 
         for forbidden in [
             "#[derive(",
@@ -184,5 +215,7 @@ mod tests {
             .0;
         assert!(drop_body.contains("self.zeroize_owned_bytes();"));
         assert!(production_source.contains("self.bytes.zeroize();"));
+        assert!(production_source.contains("key.bytes.copy_from_slice(source);"));
+        assert!(production_source.contains("source.zeroize();"));
     }
 }
