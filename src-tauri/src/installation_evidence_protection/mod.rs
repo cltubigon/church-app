@@ -1998,10 +1998,13 @@ mod tests {
             let error =
                 load_and_validate_active_installation_evidence(&fixture.paths).expect_err(case);
 
-            assert!(matches!(
-                error,
-                ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed
-            ));
+            assert!(
+                matches!(
+                    &error,
+                    ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed
+                ),
+                "expected coarse plaintext-parse failure, got {error:?}"
+            );
             fixture.assert_canonical_active_state();
         }
     }
@@ -2027,10 +2030,13 @@ mod tests {
             let error =
                 load_and_validate_active_installation_evidence(&fixture.paths).expect_err(case);
 
-            assert!(matches!(
-                error,
-                ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed
-            ));
+            assert!(
+                matches!(
+                    &error,
+                    ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed
+                ),
+                "expected coarse structural-validation failure, got {error:?}"
+            );
             fixture.assert_canonical_active_state();
         }
     }
