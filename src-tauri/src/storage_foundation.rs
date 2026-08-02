@@ -30,6 +30,10 @@ pub(crate) const ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME: &str =
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME: &str =
     "authenticated-freshness-anchor.dpapi";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const DATABASE_KEY_DIRECTORY_NAME: &str = "database-key";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const ACTIVE_DATABASE_KEY_FILENAME: &str = "active-database-key.dpapi";
 
 const DEVELOPMENT_STORAGE_IDENTITY: &str = "io.github.cltubigon.churchapp.development";
 const AUTOMATED_TEST_STORAGE_IDENTITY: &str = "church-app-automated-tests";
@@ -134,6 +138,8 @@ redacted_persistence_path!(StagedDatabasePath);
 redacted_persistence_path!(FreshnessAnchorDirectoryPath);
 redacted_persistence_path!(ActiveAnchorAuthenticationKeyPath);
 redacted_persistence_path!(ActiveAuthenticatedFreshnessAnchorPath);
+redacted_persistence_path!(DatabaseKeyDirectoryPath);
+redacted_persistence_path!(ActiveDatabaseKeyPath);
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Eq, PartialEq)]
@@ -164,6 +170,19 @@ pub(crate) struct FreshnessAnchorPersistencePaths {
 impl fmt::Debug for FreshnessAnchorPersistencePaths {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("FreshnessAnchorPersistencePaths([REDACTED])")
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct DatabaseKeyPersistencePaths {
+    pub(crate) database_key_directory: DatabaseKeyDirectoryPath,
+    pub(crate) active_database_key: ActiveDatabaseKeyPath,
+}
+
+impl fmt::Debug for DatabaseKeyPersistencePaths {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DatabaseKeyPersistencePaths([REDACTED])")
     }
 }
 
@@ -236,6 +255,14 @@ pub fn resolve_automated_test_database_path(
     ))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn resolve_database_key_persistence_paths(
+    app: &tauri::AppHandle,
+) -> Result<DatabaseKeyPersistencePaths, tauri::Error> {
+    let app_local_data_directory = app.path().app_local_data_dir()?;
+    Ok(database_key_persistence_paths(&app_local_data_directory))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidTestStorageIdentifier;
 
@@ -292,6 +319,20 @@ pub(crate) fn freshness_anchor_persistence_paths(
         ),
         active_authenticated_freshness_anchor: ActiveAuthenticatedFreshnessAnchorPath(
             freshness_anchor_directory.join(ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME),
+        ),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn database_key_persistence_paths(
+    app_local_data_root: &Path,
+) -> DatabaseKeyPersistencePaths {
+    let database_key_directory = app_local_data_root.join(DATABASE_KEY_DIRECTORY_NAME);
+
+    DatabaseKeyPersistencePaths {
+        database_key_directory: DatabaseKeyDirectoryPath(database_key_directory.clone()),
+        active_database_key: ActiveDatabaseKeyPath(
+            database_key_directory.join(ACTIVE_DATABASE_KEY_FILENAME),
         ),
     }
 }
@@ -375,6 +416,112 @@ mod tests {
             paths.active_authenticated_freshness_anchor.as_path(),
         ] {
             assert!(active_path.starts_with(root));
+        }
+    }
+
+    fn assert_database_key_paths(root: &Path) {
+        let paths = database_key_persistence_paths(root);
+        let directory = root.join(DATABASE_KEY_DIRECTORY_NAME);
+
+        assert_eq!(paths.database_key_directory.as_path(), directory);
+        assert_eq!(
+            paths.active_database_key.as_path(),
+            directory.join(ACTIVE_DATABASE_KEY_FILENAME)
+        );
+        assert_eq!(paths.database_key_directory.as_path().parent(), Some(root));
+        assert_eq!(
+            paths.active_database_key.as_path().parent(),
+            Some(directory.as_path())
+        );
+    }
+
+    #[test]
+    fn database_key_fixed_names_and_path_layout_are_exact() {
+        assert_eq!(DATABASE_KEY_DIRECTORY_NAME, "database-key");
+        assert_eq!(ACTIVE_DATABASE_KEY_FILENAME, "active-database-key.dpapi");
+
+        assert_database_key_paths(Path::new(r"X:\synthetic-local-app-data\church-app"));
+        assert_database_key_paths(Path::new("synthetic/portable/church-app"));
+        assert_database_key_paths(Path::new("synthetic root/δοκιμή/教会-app"));
+    }
+
+    #[test]
+    fn database_key_paths_are_pure_and_do_not_create_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "church-app-database-key-path-purity-{}",
+            std::process::id()
+        ));
+        assert!(!root.exists());
+
+        let paths = database_key_persistence_paths(&root);
+
+        assert!(!root.exists());
+        assert!(!paths.database_key_directory.as_path().exists());
+        assert!(!paths.active_database_key.as_path().exists());
+    }
+
+    #[test]
+    fn database_key_path_debug_output_is_fully_redacted() {
+        let paths = database_key_persistence_paths(Path::new("sensitive-synthetic-root"));
+        for debug in [
+            format!("{:?}", paths.database_key_directory),
+            format!("{:?}", paths.active_database_key),
+            format!("{paths:?}"),
+        ] {
+            assert!(debug.contains("[REDACTED]"));
+            for excluded in [
+                "sensitive-synthetic-root",
+                DATABASE_KEY_DIRECTORY_NAME,
+                ACTIVE_DATABASE_KEY_FILENAME,
+            ] {
+                assert!(!debug.contains(excluded));
+            }
+        }
+    }
+
+    #[test]
+    fn database_key_aggregate_has_only_directory_and_active_fields() {
+        const SOURCE: &str = include_str!("storage_foundation.rs");
+        let aggregate = SOURCE
+            .split("pub(crate) struct DatabaseKeyPersistencePaths")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("impl fmt::Debug for DatabaseKeyPersistencePaths")
+                    .next()
+            })
+            .expect("database-key aggregate should remain a distinct definition");
+
+        assert_eq!(aggregate.matches("pub(crate)").count(), 2);
+        assert!(aggregate.contains("database_key_directory: DatabaseKeyDirectoryPath"));
+        assert!(aggregate.contains("active_database_key: ActiveDatabaseKeyPath"));
+        for excluded in [
+            "staged",
+            "previous",
+            "backup",
+            "temporary",
+            "legacy",
+            "recovery",
+        ] {
+            assert!(!aggregate.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn database_key_resolver_remains_a_rust_owned_tauri_path_boundary() {
+        let resolver: fn(&tauri::AppHandle) -> Result<DatabaseKeyPersistencePaths, tauri::Error> =
+            resolve_database_key_persistence_paths;
+        let _ = resolver;
+
+        const SOURCE: &str = include_str!("storage_foundation.rs");
+        let body = SOURCE
+            .split("pub(crate) fn resolve_database_key_persistence_paths")
+            .nth(1)
+            .and_then(|tail| tail.split("pub struct InvalidTestStorageIdentifier").next())
+            .expect("database-key resolver should remain distinct");
+        assert!(body.contains("app.path().app_local_data_dir()?"));
+        assert!(body.contains("database_key_persistence_paths(&app_local_data_directory)"));
+        for excluded in ["canonicalize", "read_dir", "create_dir", "env::", "command"] {
+            assert!(!body.contains(excluded));
         }
     }
 

@@ -2,6 +2,7 @@ use serde::Serialize;
 
 mod database_freshness_classification;
 mod database_key;
+mod database_key_presence;
 mod database_key_protected_payload;
 mod database_metadata_contract;
 mod database_metadata_correspondence;
