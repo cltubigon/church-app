@@ -2,11 +2,11 @@
 
 ## 1. Initiative and status
 
-Active multi-stage initiative. Carlo has explicitly approved the bounded production database and evidence-correspondence architecture package, including the corrected `ApplicationDatabaseFormatIdentity` exactly-16-byte SQLite `BLOB` encoding. The active stage records that decision in documentation only. SQLCipher Community Edition is selected for future production use, but production database implementation and production dependency promotion are not present or authorized by this stage. The accepted installation-evidence, local-volume, device-property, and controlled-host evidence remains unchanged.
+Active multi-stage initiative. Carlo has explicitly approved the bounded production database and evidence-correspondence architecture package, including the corrected `ApplicationDatabaseFormatIdentity` exactly-16-byte SQLite `BLOB` encoding. The Windows production SQLCipher dependency promotion and private raw-key application primitive are implemented and accepted. They are a narrow production-capable foundation only: no operational production database-opening, validation, startup, setup, schema, migration, backup, restore, recovery, replacement, or frontend flow exists. The accepted installation-evidence, local-volume, device-property, and controlled-host evidence remains unchanged.
 
 ## 2. Authority and objective
 
-The active objective is to establish a canonical, working-tree-grounded decision record and a narrow future implementation sequence. This documentation stage adds no dependency, database code, SQL, schema, migration, key wrapper, freshness anchor, adapter, setup/startup integration, backup/restore, or recovery behavior.
+The active objective is to preserve the approved typed trust-chain sequence while recording the accepted Windows production dependency and raw-key primitive gate. The next implementation must remain separately scoped to the production database-open trust chain and must not introduce schema, migration, setup/startup integration, backup/restore, recovery, replacement, or frontend behavior.
 
 ## 3. Locked operational decisions relevant to the initiative
 
@@ -18,27 +18,27 @@ The active objective is to establish a canonical, working-tree-grounded decision
 
 ## 4. Current repository baseline
 
-The repository is a Tauri 2 foundation with four unavailable React areas, one non-sensitive Rust health command, typed Rust storage-path and identity foundations, and pure installation-state decisions. It has no production database, schema, authentication, recovery, backup, or parish workflow.
+The repository is a Tauri 2 foundation with four unavailable React areas, one non-sensitive Rust health command, typed Rust storage, evidence, key, metadata, correspondence, and freshness foundations, a Windows production SQLCipher dependency, and a private Windows-only raw-key application primitive. It has no operational production database-opening flow, schema, authentication, recovery, backup, or parish workflow.
 
 ## 5. Approved technical direction
 
-Keep database-key ownership, metadata contracts, metadata decoding, correspondence, freshness, operating-system randomness, DPAPI protection, path validation, database inspection, integrity, migrations, setup/startup decisions, recovery, and destructive authority as separate typed transitions. No earlier stage grants later authority. SQLCipher Community Edition is the approved production engine; the existing SQLCipher feasibility module remains test-only.
+Keep database-key ownership, metadata contracts, metadata decoding, correspondence, freshness, operating-system randomness, DPAPI protection, path validation, database inspection, key application, integrity, migrations, setup/startup decisions, recovery, and destructive authority as separate typed transitions. No earlier stage grants later authority. SQLCipher Community Edition is the approved production engine. The earlier feasibility module remains historical Windows test-only evidence; the accepted production dependency and private primitive are separate current implementation.
 
 ## 6. Active stage
 
-Approved production database architecture documentation. The next implementation program begins only through separately approved tasks: (1) pure database-key secret-owner and metadata contract types; (2) pure metadata decoding/validation tests; (3) pure correspondence and freshness models; and only then (4) production dependency promotion and database adapters.
+The exact Windows production dependency promotion and private raw-key application primitive are complete and accepted. The larger production database-opening flow remains incomplete. The active next implementation stage must be a separately scoped database-open trust-chain task that composes an already-open production handle, trusted key recovery, the accepted key-application primitive, and later validation boundaries without adding schema or operational startup/setup authority.
 
 ## 7. Allowed scope
 
-Documentation-only recording of Carlo's approved package in `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, `docs/verification.md`, and only directly relevant review gates. Existing installation-evidence decisions and repository safeguards must remain unchanged.
+Documentation-only reconciliation of the accepted dependency and primitive state in `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Existing installation-evidence decisions and repository safeguards remain unchanged.
 
 ## 8. Prohibited scope
 
-No production dependency or dependency-scope change; database code; SQL; schema or migration; database-key or recovery wrapper; freshness anchor; database opening or VFS/path adapter; setup/startup/recovery integration; backup/restore; Tauri command; frontend change; generated inventory; application runtime; database creation; or destructive operation.
+This documentation reconciliation authorizes no code, dependency, SQL, schema or migration, database opening or VFS/path adapter, setup/startup/recovery integration, backup/restore, Tauri command, frontend change, generated inventory, application runtime, database creation, or destructive operation. The accepted dependency and primitive are recorded facts, not changes made by this documentation task.
 
 ## 9. Dependency approvals
 
-No dependency change is approved in this documentation stage. Future production promotion requires a separate task approving one exact pinned `rusqlite` version with `bundled-sqlcipher-vendored-openssl`, no system SQLCipher/OpenSSL discovery, no plaintext fallback, a pinned lockfile, and recorded SQLCipher/OpenSSL release evidence. Metadata schema creation, migrations, key and recovery wrappers, freshness anchors, path/VFS hardening, read-only opening, backup/restore, setup/startup/recovery authority, replacement, retention, and cleanup each require separately scoped approval.
+The accepted Windows production dependency is exactly `rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }` under `[target.'cfg(windows)'.dependencies]`. There is no Windows `rusqlite` development dependency and no direct `libsqlite3-sys` dependency. Metadata schema creation, migrations, remaining database-open orchestration, key and recovery persistence, freshness-anchor operational integration, backup/restore, setup/startup/recovery authority, replacement, retention, and cleanup each require separately scoped approval.
 
 ## 10. Milestones
 
@@ -98,10 +98,12 @@ No dependency change is approved in this documentation stage. Future production 
 - [x] Add a private controlled-host-only first-failed-stage diagnostic after the supplied USB observation failed during hardened child-directory validation before drive-type classification. The accepted shared hardening helper and classifiers remain unchanged.
 - [x] Record the accepted diagnostic USB observation: prerequisite present; zero drive-type, volume-open, property-IOCTL, and hot-plug calls; sentinel verification not reached; exact-root cleanup attempted and succeeded; every authority field false; and the manual leftover-folder check found no entries. The USB row remains failed and incomplete.
 - [x] Record Carlo's explicit approval of the bounded production database and evidence-correspondence architecture package.
-- [ ] Implement pure database-key secret-owner and metadata contract types in a separately approved task.
-- [ ] Add pure metadata decoding and validation tests in a separately approved task.
-- [ ] Add pure correspondence and freshness models in a separately approved task.
-- [ ] Only after those pure layers, separately approve production dependency promotion and database adapters.
+- [x] Implement the separately approved pure database-key secret-owner and metadata contract types.
+- [x] Add the separately approved pure metadata decoding and validation tests.
+- [x] Add the separately approved pure correspondence and freshness models.
+- [x] Promote exact pinned `rusqlite` 0.39.0 with only `bundled-sqlcipher-vendored-openssl` into Windows production dependencies, with no Windows `rusqlite` development dependency or direct `libsqlite3-sys` dependency.
+- [x] Add and accept the private Windows-only raw-key application primitive over `&GenerationBoundDatabaseKey`, with exact fixed encoding, one `sqlite3_key` call, `SQLITE_OK`-only success, and coarse failure.
+- [ ] Separately scope and implement the production database-open trust chain without schema or startup/setup integration.
 
 ## 11. Discoveries
 
@@ -127,13 +129,14 @@ On the observed Windows host, the accepted `LocalFixedCandidate` prerequisite an
 
 - Carlo-approved: permanent identifier and display name; current-account, non-elevated ordinary-use direction with a dedicated standard Windows account optional and recommended for a parish-owned shared workstation; per-user application-data direction; application-owned-directory-only operation; explicit setup-only creation; no silent startup creation; immutable random parish identifier direction; temporary Windows SQLCipher feasibility; future verified restore condition; and the bounded SQLCipher Community Edition production database, independent database-key, metadata, correspondence, freshness, opening, integrity, path/sidecar, journal/durability, migration, support, redaction, and authority-separation package.
 - Implemented foundation: all previously accepted foundations plus operating-system-backed authentication-material generation, HMAC-SHA-256 envelope authentication, current-user in-memory DPAPI protection for separate key and evidence objects, strict wrapper and key-payload codecs, native clear-before-free handling, and a typed generation-match transition before plaintext release. Protection remains separate from persistence, structural validation, database cross-checking, setup, startup, and operational evidence.
-- Technical experiment: the current exact bundled `rusqlite` configuration, SQLCipher mechanics, and `sqlcipher_windows_feasibility` module remain Windows test-only evidence.
-- Approved but not implemented: the production engine and bounded architecture package. Deferred implementation details include exact Rust symbols, wrapper byte layouts, Windows API composition, VFS technique, compile-time flags, recovery-envelope framing, progress reporting, fixture layout, and release automation.
-- Separate approval/scoping still required: production dependency promotion; metadata schema creation; database-key wrapper; portable recovery envelope; freshness anchor; production path/VFS hardening; read-only opening; migration; backup/restore; setup/startup/recovery authority; database or anchor replacement; and destructive retention or cleanup.
+- Historical technical experiment: `sqlcipher_windows_feasibility` and its former development-dependency state remain Windows test-only evidence of the earlier candidate evaluation.
+- Implemented and accepted production foundation: the exact Windows production `rusqlite` configuration and the private raw-key application primitive. The primitive accepts only a generation-bound database key and an already-open caller-supplied handle; it does not provide an operational database-opening workflow.
+- Approved but not fully implemented: the larger bounded architecture package. Deferred implementation includes database-open orchestration and validation, metadata schema creation, portable recovery, operational freshness integration, migrations, backup/restore, setup/startup/recovery authority, replacement, destructive retention or cleanup, and release automation.
+- Separate approval/scoping still required: the production database-open trust chain; metadata schema creation; portable recovery envelope; migrations; backup/restore; setup/startup/recovery authority; database or anchor replacement; and destructive retention or cleanup.
 
 ## 13. Validation status
 
-The accepted earlier proofs remain recorded in history. This stage validates the focused controlled-matrix diagnostics and one current-account baseline runtime case with one test thread, plus the accepted local-volume and device-property regressions, strict source exclusions, exact teardown, lockfile preservation, protected-source hashes, and repository diffs. The accepted diagnostic USB rerun stopped at `DirectoryAttributeInfoUnavailable` with disposition `Unavailable`, before drive-type classification. The USB row remains failed and incomplete.
+The accepted earlier proofs remain recorded in history. The Windows dependency promotion and raw-key primitive passed clean CI at commit `58e903bf7f1ac186a5172a8be96a5d5cf66d8b58`. Accepted local validation covers the exact manifest and private-module contract, fixed raw-key encoding and redaction, owned-buffer zeroization, one-call success and failure classification, null-handle refusal, full Rust regressions, source exclusions, and repository checks. This evidence does not include manual operational database opening or runtime database behavior. The accepted controlled-host evidence remains unchanged; the USB row remains failed and incomplete.
 
 ## 14. Manual testing status
 
@@ -141,15 +144,15 @@ The DPAPI hardening manual Windows application regression remains accepted. The 
 
 ## 15. Completed work
 
-All prior completed history remains accepted. The current stage adds one private nested Windows-test-only harness for exactly the baseline and USB-flash cases. It uses the operating-system temporary directory for the baseline and only `CHURCH_APP_USB_TEST_ROOT` for the USB case. It creates one exact child and one sentinel, retains the hardened child handle through classification, removes only that child, and records coarse non-authoritative results. USB `DevicePropertyCandidate` is a defect/unresolved false-confidence result, never success.
+All prior completed history remains accepted. The current production SQLCipher foundation now includes the exact Windows production `rusqlite` promotion and the private `sqlcipher_database_key_application` module. Its 67-byte owner encodes a 32-byte generation-bound key as lowercase `x'<64 hex characters>'`, invokes `sqlite3_key` exactly once for a non-null caller-supplied already-open handle, accepts only `SQLITE_OK`, clears its owned encoded buffer best-effort, and otherwise returns only `DatabaseKeyApplicationError::Failed`. It has no active caller, Tauri command, frontend, IPC, database-open, query, inspection, mutation, rekey, close, startup, or setup behavior.
 
 ## 16. Remaining risks
 
-Two manually rooted USB attempts ran. The first failed broadly during hardened child-directory validation; the accepted diagnostic rerun stopped at `DirectoryAttributeInfoUnavailable` with disposition `Unavailable`, before the first drive-type query, and produced no local-volume or device-property classification. Exact-root cleanup succeeded, the manual leftover-folder check found no entries, and no successful USB observation exists. No filesystem-format or hardware cause is established. Driver-reported removable and bus facts remain incomplete. Hot-plug inspection, external USB SSD/HDD, fixed-reporting enclosure, SD, VHDX, mapped SMB, Windows 10, profile-container, iSCSI, Storage Spaces, ReFS, Thunderbolt, dock, provenance, database/evidence locality policy, and all production integration remain separate deferred stages. Test-root teardown is not production cleanup.
+The accepted raw-key primitive does not establish handle provenance, key correctness, database readability, encryption, metadata validity, integrity, correspondence, freshness, startup authorization, or operational authority. No production database is selected or opened; the key is not applied through startup or setup; SQLite metadata reads, SQLCipher integrity checks, first-time creation, schema, migrations, backup, restore, recovery, replacement, and frontend/Tauri exposure remain absent. The existing controlled-host risks also remain: no successful USB observation exists, no filesystem-format or hardware cause is established, and the deferred host/storage matrix and production integration remain separate stages. Test-root teardown is not production cleanup.
 
 ## 17. Next smallest safe step
 
-After Carlo reviews this decision record, separately scope the first implementation task to pure database-key secret-owner and metadata contract types only. It must add no `rusqlite` production dependency, database adapter, SQL, schema, migration, DPAPI wrapper, freshness anchor, filesystem behavior, or setup/startup/recovery integration. Pure metadata decoding/validation tests and pure correspondence/freshness models follow as separate narrow steps before any production dependency promotion.
+After Carlo reviews this reconciliation, separately scope the production database-open trust-chain task. It should compose the already implemented production-file inspection and trusted key-recovery boundaries with one controlled database connection open, the accepted raw-key primitive, and later SQLite/SQLCipher validation boundaries. It must remain distinct from schema creation, migrations, first-time database creation, operational setup/startup authorization, backup/restore, recovery, replacement, Tauri commands, and frontend exposure.
 
 ## 18. Links
 
