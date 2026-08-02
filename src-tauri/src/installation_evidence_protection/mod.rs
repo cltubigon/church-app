@@ -38,6 +38,7 @@ mod freshness_anchor_observation;
 mod installation_bound_authenticated_active_freshness_anchor;
 mod protected_blob_wrapper;
 mod protected_key_payload;
+mod trusted_current_installation_evidence_assessment;
 mod trusted_current_installation_identity;
 #[cfg(windows)]
 mod windows_current_user_dpapi;
@@ -48,6 +49,9 @@ pub(crate) use protected_blob_wrapper::EncodedProtectedWrapper;
 use protected_blob_wrapper::{ProtectedObjectKind, ValidatedProtectedWrapper};
 pub(crate) use protected_key_payload::DecodedProtectedKeyMaterial;
 use protected_key_payload::EncodedProtectedKeyPayload;
+pub(crate) use trusted_current_installation_evidence_assessment::TrustedCurrentInstallationEvidenceAssessment;
+#[cfg(windows)]
+pub(crate) use trusted_current_installation_evidence_assessment::load_trusted_current_installation_evidence_assessment;
 pub(crate) use trusted_current_installation_identity::TrustedCurrentInstallationIdentity;
 #[cfg(windows)]
 use windows_current_user_dpapi::WindowsCurrentUserDpapi;
@@ -586,27 +590,8 @@ fn load_and_validate_active_installation_evidence(
 pub(crate) fn load_trusted_current_installation_identity(
     paths: &InstallationEvidencePersistencePaths,
 ) -> Result<TrustedCurrentInstallationIdentity, TrustedCurrentInstallationIdentityError> {
-    let structurally_validated =
-        load_and_validate_active_installation_evidence(paths).map_err(|error| match error {
-            ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed => {
-                TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable
-            }
-            ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed => {
-                TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed
-            }
-            ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed => {
-                TrustedCurrentInstallationIdentityError::EvidencePlaintextParseFailed
-            }
-            ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed => {
-                TrustedCurrentInstallationIdentityError::EvidenceStructuralValidationFailed
-            }
-        })?;
-    let installation_identifier = structurally_validated.installation_identifier();
-    Ok(
-        TrustedCurrentInstallationIdentity::from_validated_installation_identifier(
-            installation_identifier,
-        ),
-    )
+    load_trusted_current_installation_evidence_assessment(paths)
+        .map(TrustedCurrentInstallationEvidenceAssessment::into_trusted_identity)
 }
 
 #[cfg(windows)]
@@ -2044,7 +2029,10 @@ mod tests {
     #[test]
     fn structurally_validated_active_evidence_composition_source_proves_private_narrow_boundary() {
         const SOURCE: &str = include_str!("mod.rs");
-        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        const ASSESSMENT_SOURCE: &str =
+            include_str!("trusted_current_installation_evidence_assessment.rs");
+        let production_source = SOURCE.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let assessment_production = ASSESSMENT_SOURCE.split("#[cfg(test)]").next().unwrap();
         let error_marker = "enum ActiveStructurallyValidatedEvidenceRecoveryError {";
         assert_eq!(production_source.matches(error_marker).count(), 1);
         let error_body = production_source
@@ -2071,7 +2059,13 @@ mod tests {
             production_source
                 .matches("load_and_validate_active_installation_evidence(")
                 .count(),
-            2
+            1
+        );
+        assert_eq!(
+            assessment_production
+                .matches("load_and_validate_active_installation_evidence(paths)")
+                .count(),
+            1
         );
         let before_definition = production_source.split_once(definition_marker).unwrap().0;
         let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
@@ -2126,6 +2120,211 @@ mod tests {
         }
         assert!(!boundary.contains(&["std", "::fs"].concat()));
         assert!(!boundary.contains(&["installation", "_state"].concat()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_trusted_current_installation_evidence_assessment_returns_both_same_load_outputs() {
+        let canonical_plaintext = *plaintext().as_bytes();
+        let expected = ParsedUntrustedInstallationEvidenceContract::parse_v1(&canonical_plaintext)
+            .unwrap()
+            .validate_structure()
+            .unwrap();
+        let fixture = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            canonical_plaintext,
+        );
+
+        let assessment = load_trusted_current_installation_evidence_assessment(&fixture.paths)
+            .expect("canonical hardened active evidence must produce both trusted outputs");
+
+        fn require_exact_result_type(_: &TrustedCurrentInstallationEvidenceAssessment) {}
+        fn require_evidence_borrow(_: &StructurallyValidatedInstallationEvidence) {}
+        fn require_identity_borrow(_: &TrustedCurrentInstallationIdentity) {}
+        require_exact_result_type(&assessment);
+        require_evidence_borrow(assessment.evidence());
+        require_identity_borrow(assessment.trusted_identity());
+
+        assert_eq!(assessment.evidence(), &expected);
+        assert_eq!(
+            assessment.trusted_identity().installation_identifier(),
+            assessment.evidence().installation_identifier()
+        );
+        assert_eq!(
+            format!("{assessment:?}"),
+            "TrustedCurrentInstallationEvidenceAssessment([REDACTED])"
+        );
+        fixture.assert_canonical_active_state();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_trusted_current_installation_evidence_assessment_returns_no_partial_result_on_failure()
+    {
+        let missing = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            *plaintext().as_bytes(),
+        );
+        fs::remove_file(missing.paths.active_authenticated_evidence.as_path()).unwrap();
+        assert!(matches!(
+            load_trusted_current_installation_evidence_assessment(&missing.paths),
+            Err(TrustedCurrentInstallationIdentityError::ActiveEvidenceLoadingUnavailable)
+        ));
+
+        let canonical_evidence = protected_wrapper_trust_chain_orchestration_dpapi_wrapper(
+            ProtectedObjectKind::AuthenticatedEvidence,
+            encoded_envelope(KEY, IDENTIFIER).as_bytes(),
+        );
+        let dpapi_failure = ActiveEvidenceLoadTrustChainCompositionTestRoot::create(
+            owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0; 16]).as_bytes(),
+            canonical_evidence.as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_evidence_assessment(&dpapi_failure.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed)
+        ));
+
+        let wrong_hmac = structurally_validated_active_evidence_composition_fixture(
+            [0x44; 32],
+            IDENTIFIER,
+            IDENTIFIER,
+            *plaintext().as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_evidence_assessment(&wrong_hmac.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed)
+        ));
+
+        let generation_mismatch = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            [0x77; 16],
+            IDENTIFIER,
+            *plaintext().as_bytes(),
+        );
+        assert!(matches!(
+            load_trusted_current_installation_evidence_assessment(&generation_mismatch.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceProtectionOrAuthenticationFailed)
+        ));
+
+        let mut malformed_plaintext = *plaintext().as_bytes();
+        malformed_plaintext[0] = 0;
+        let parse_failure = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            malformed_plaintext,
+        );
+        assert!(matches!(
+            load_trusted_current_installation_evidence_assessment(&parse_failure.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidencePlaintextParseFailed)
+        ));
+
+        let mut structurally_invalid_plaintext = *plaintext().as_bytes();
+        structurally_invalid_plaintext[12..28].fill(0);
+        let structural_failure = structurally_validated_active_evidence_composition_fixture(
+            KEY,
+            IDENTIFIER,
+            IDENTIFIER,
+            structurally_invalid_plaintext,
+        );
+        assert!(matches!(
+            load_trusted_current_installation_evidence_assessment(&structural_failure.paths),
+            Err(TrustedCurrentInstallationIdentityError::EvidenceStructuralValidationFailed)
+        ));
+    }
+
+    #[test]
+    fn load_trusted_current_installation_evidence_assessment_source_proves_one_canonical_load() {
+        const SOURCE: &str = include_str!("mod.rs");
+        const AGGREGATE_SOURCE: &str =
+            include_str!("trusted_current_installation_evidence_assessment.rs");
+        let production = SOURCE.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let aggregate_production = AGGREGATE_SOURCE.split("#[cfg(test)]").next().unwrap();
+        let marker = "pub(crate) fn load_trusted_current_installation_evidence_assessment(";
+        assert_eq!(aggregate_production.matches(marker).count(), 1);
+        let before = aggregate_production.split_once(marker).unwrap().0;
+        let attributes = before.rsplit_once("\n\n").unwrap().1;
+        assert!(attributes.contains("#[cfg(windows)]"));
+        let boundary = aggregate_production
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+
+        assert!(boundary.contains("paths: &InstallationEvidencePersistencePaths"));
+        assert!(boundary.contains("TrustedCurrentInstallationEvidenceAssessment"));
+        assert!(boundary.contains("TrustedCurrentInstallationIdentityError"));
+        assert_eq!(
+            boundary
+                .matches("load_and_validate_active_installation_evidence(paths)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            boundary
+                .matches("TrustedCurrentInstallationEvidenceAssessment {")
+                .count(),
+            1
+        );
+
+        for excluded in [
+            "load_active_installation_evidence_wrapper_pair",
+            "load_and_recover_generation_matched_installation_evidence",
+            "WindowsCurrentUserDpapi",
+            "parse_generation_matched_installation_evidence_plaintext",
+            "validate_parsed_installation_evidence_structure",
+            "encode_v1",
+            ".clone()",
+            "FreshnessAnchor",
+            "database_metadata",
+            "classify_database_freshness",
+            "startup",
+            "publication",
+            "replacement",
+            "migration",
+            "reset",
+            "repair",
+            "retry",
+            "fallback",
+            "tauri",
+            "unsafe",
+        ] {
+            assert!(!boundary.contains(excluded), "unexpected term: {excluded}");
+        }
+
+        assert_eq!(
+            aggregate_production
+                .matches("evidence.installation_identifier()")
+                .count(),
+            1
+        );
+        assert_eq!(
+            aggregate_production
+                .matches(
+                    "TrustedCurrentInstallationIdentity::from_validated_installation_identifier("
+                )
+                .count(),
+            1
+        );
+        assert!(!aggregate_production.contains("encode_v1"));
+        assert!(!aggregate_production.contains("parse_v1"));
+        assert!(!aggregate_production.contains(".clone()"));
+        assert!(!aggregate_production.contains("fn from_"));
+        assert_eq!(production.matches(marker).count(), 0);
+        assert_eq!(
+            production
+                .matches(
+                    "pub(crate) use trusted_current_installation_evidence_assessment::load_trusted_current_installation_evidence_assessment;"
+                )
+                .count(),
+            1
+        );
     }
 
     #[cfg(windows)]
@@ -2400,11 +2599,11 @@ mod tests {
     }
 
     #[test]
-    fn trusted_current_installation_identity_source_proves_sealed_complete_boundary() {
+    fn trusted_current_installation_identity_source_proves_canonical_aggregate_delegation() {
         const SOURCE: &str = include_str!("mod.rs");
         const TYPE_SOURCE: &str = include_str!("trusted_current_installation_identity.rs");
         const LIB_SOURCE: &str = include_str!("../lib.rs");
-        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production = SOURCE.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
         let marker = "pub(crate) fn load_trusted_current_installation_identity(";
         assert_eq!(production.matches(marker).count(), 1);
         let before = production.split_once(marker).unwrap().0;
@@ -2421,16 +2620,21 @@ mod tests {
         assert!(boundary.contains("paths: &InstallationEvidencePersistencePaths"));
         assert!(!boundary.contains("paths:".repeat(2).as_str()));
         assert!(boundary.contains("Result<TrustedCurrentInstallationIdentity"));
-        let stages = [
-            "load_and_validate_active_installation_evidence(paths)",
-            "structurally_validated.installation_identifier()",
-            "TrustedCurrentInstallationIdentity::from_validated_installation_identifier(",
-        ];
-        let positions = stages.map(|stage| {
-            assert_eq!(boundary.matches(stage).count(), 1);
-            boundary.find(stage).unwrap()
-        });
-        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            boundary
+                .matches("load_trusted_current_installation_evidence_assessment(paths)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            boundary
+                .matches("TrustedCurrentInstallationEvidenceAssessment::into_trusted_identity")
+                .count(),
+            1
+        );
+        assert!(!boundary.contains("load_and_validate_active_installation_evidence"));
+        assert!(!boundary.contains("from_validated_installation_identifier"));
+        assert!(!boundary.contains("installation_identifier()"));
 
         for excluded in [
             "FreshnessAnchor",
@@ -2550,7 +2754,7 @@ mod tests {
     #[test]
     fn active_evidence_load_trust_chain_composition_source_proves_exact_private_boundary() {
         const SOURCE: &str = include_str!("mod.rs");
-        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production_source = SOURCE.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
         let error_marker = "enum ActiveInstallationEvidenceRecoveryError {";
         assert_eq!(production_source.matches(error_marker).count(), 1);
         let error_body = production_source
