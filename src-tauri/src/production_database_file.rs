@@ -1149,15 +1149,24 @@ mod tests {
         const SOURCE: &str = include_str!("production_database_file.rs");
         const CARGO: &str = include_str!("../Cargo.toml");
         const LIB: &str = include_str!("lib.rs");
+        const WINDOWS_DEPENDENCIES: &str = "[target.'cfg(windows)'.dependencies]";
+        const WINDOWS_DEV_DEPENDENCIES: &str = "[target.'cfg(windows)'.dev-dependencies]";
+        const RUSQLITE_DECLARATION: &str = "rusqlite = { version = \"=0.39.0\", default-features = false, features = [\"bundled-sqlcipher-vendored-openssl\"] }";
         assert_eq!(LIB.matches("mod production_database_file;").count(), 1);
         assert!(!LIB.contains("pub mod production_database_file"));
         assert_eq!(
             CARGO
-                .matches("[target.'cfg(windows)'.dev-dependencies]")
+                .matches(&[WINDOWS_DEPENDENCIES, RUSQLITE_DECLARATION].join("\n"))
                 .count(),
             1
         );
-        assert!(!CARGO.contains("[target.'cfg(windows)'.dependencies]\nrusqlite"));
+        assert_eq!(CARGO.matches("rusqlite").count(), 1);
+        let windows_dev_dependencies = CARGO
+            .split_once(WINDOWS_DEV_DEPENDENCIES)
+            .map(|(_, remainder)| remainder.split("\n[").next().unwrap_or(remainder))
+            .unwrap_or_default();
+        assert!(!windows_dev_dependencies.contains("rusqlite"));
+        assert!(!CARGO.contains("libsqlite3-sys"));
         assert!(!SOURCE.contains(&["use rusq", "lite"].concat()));
         assert!(!SOURCE.contains(&["std::io::", "Read"].concat()));
     }

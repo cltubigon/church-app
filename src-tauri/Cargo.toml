@@ -22,6 +22,7 @@ tauri = { version = "=2.11.5", features = [] }
 zeroize = { version = "=1.9.0", default-features = false, features = [] }
 
 [target.'cfg(windows)'.dependencies]
+rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 windows-sys = { version = "=0.61.2", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
@@ -29,6 +30,3 @@ windows-sys = { version = "=0.61.2", default-features = false, features = [
     "Win32_System_IO",
     "Win32_System_Ioctl",
 ] }
-
-[target.'cfg(windows)'.dev-dependencies]
-rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }

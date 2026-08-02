@@ -24,6 +24,8 @@ mod installation_evidence_persistence;
 mod installation_evidence_protection;
 pub mod installation_state;
 mod production_database_file;
+#[cfg(windows)]
+mod sqlcipher_database_key_application;
 pub mod storage_foundation;
 
 #[cfg(all(test, target_os = "windows"))]
