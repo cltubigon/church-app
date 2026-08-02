@@ -24,6 +24,11 @@ impl LoadedActiveDatabaseKeyWrapper {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_synthetic_wrapper_bytes(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
 }
 
 impl fmt::Debug for LoadedActiveDatabaseKeyWrapper {

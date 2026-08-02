@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod authenticated_active_freshness_anchor;
+mod database_key_current_user_dpapi;
 mod freshness_anchor_current_user_dpapi;
 mod freshness_anchor_observation;
 mod installation_bound_authenticated_active_freshness_anchor;
@@ -44,6 +45,11 @@ mod trusted_current_installation_identity;
 mod windows_current_user_dpapi;
 
 pub(crate) use authenticated_active_freshness_anchor::AuthenticatedActiveFreshnessAnchor;
+#[allow(unused_imports)]
+pub(crate) use database_key_current_user_dpapi::DatabaseKeyCandidateRecoveryError;
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use database_key_current_user_dpapi::recover_database_key_candidate_from_loaded_wrapper;
 pub(crate) use installation_bound_authenticated_active_freshness_anchor::InstallationBoundAuthenticatedActiveFreshnessAnchor;
 pub(crate) use protected_blob_wrapper::EncodedProtectedWrapper;
 use protected_blob_wrapper::{ProtectedObjectKind, ValidatedProtectedWrapper};
@@ -205,11 +211,26 @@ impl fmt::Debug for OpaqueProtectedBytes {
     }
 }
 
-struct UnprotectedBytes(Vec<u8>);
+struct UnprotectedBytes(
+    Vec<u8>,
+    #[cfg(test)] Option<std::rc::Rc<std::cell::Cell<bool>>>,
+);
 
 impl UnprotectedBytes {
     fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(
+            bytes,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_clear_observer(
+        bytes: Vec<u8>,
+        cleared: std::rc::Rc<std::cell::Cell<bool>>,
+    ) -> Self {
+        Self(bytes, Some(cleared))
     }
 
     fn as_bytes(&self) -> &[u8] {
@@ -220,6 +241,10 @@ impl UnprotectedBytes {
 impl Drop for UnprotectedBytes {
     fn drop(&mut self) {
         self.0.zeroize();
+        #[cfg(test)]
+        if let Some(cleared) = &self.1 {
+            cleared.set(self.0.iter().all(|byte| *byte == 0));
+        }
     }
 }
 
