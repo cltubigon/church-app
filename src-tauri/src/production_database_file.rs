@@ -42,6 +42,17 @@ pub(crate) struct InspectedProductionDatabaseFile {
     _file_identity: RetainedFileIdentity,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ProductionDatabaseFileIdentityRevalidationError {
+    Failed,
+}
+
+impl fmt::Debug for ProductionDatabaseFileIdentityRevalidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Failed")
+    }
+}
+
 impl fmt::Debug for InspectedProductionDatabaseFile {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("InspectedProductionDatabaseFile([REDACTED])")
@@ -552,6 +563,63 @@ mod windows {
         Ok(())
     }
 
+    pub(super) fn identities_match(
+        left: RetainedFileIdentity,
+        right: RetainedFileIdentity,
+    ) -> bool {
+        left.volume_serial == right.volume_serial && left.file_id == right.file_id
+    }
+
+    fn identity_from_borrowed_handle(
+        handle: HANDLE,
+    ) -> Result<RetainedFileIdentity, InspectionIssue> {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(InspectionIssue::Unavailable);
+        }
+        let mut identity = FILE_ID_INFO::default();
+        // SAFETY: `handle` is borrowed for this synchronous query only and the
+        // initialized output exactly matches the requested information class.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileIdInfo,
+                (&raw mut identity).cast::<c_void>(),
+                checked_size(std::mem::size_of::<FILE_ID_INFO>())?,
+            )
+        } == 0
+        {
+            return Err(InspectionIssue::Unavailable);
+        }
+        Ok(RetainedFileIdentity {
+            volume_serial: identity.VolumeSerialNumber,
+            file_id: identity.FileId.Identifier,
+        })
+    }
+
+    pub(super) fn revalidate_borrowed_file(
+        proof: &InspectedProductionDatabaseFile,
+        borrowed_handle: HANDLE,
+    ) -> Result<(), super::ProductionDatabaseFileIdentityRevalidationError> {
+        let result = (|| {
+            let parent = query_observation(&proof._retained_parent)?;
+            let file = query_observation(&proof._retained_file)?;
+            validate_directory(&parent)?;
+            validate_file(&file)?;
+            exact_child(&parent, &file, PRODUCTION_DATABASE_FILENAME)?;
+            if !identities_match(parent.identity, proof._parent_identity)
+                || !identities_match(file.identity, proof._file_identity)
+                || !identities_match(
+                    identity_from_borrowed_handle(borrowed_handle)?,
+                    proof._file_identity,
+                )
+            {
+                return Err(InspectionIssue::Unstable);
+            }
+            Ok(())
+        })();
+        result.map_err(|_| super::ProductionDatabaseFileIdentityRevalidationError::Failed)
+    }
+
     fn reopen_and_confirm(
         path: &Path,
         retained: &RetainedEntry,
@@ -763,6 +831,31 @@ pub(crate) fn inspect_production_database_file(
     path: &crate::storage_foundation::ProductionDatabasePath,
 ) -> ProductionDatabaseInspection {
     windows::inspect(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn revalidate_borrowed_production_database_file_handle(
+    inspected: &InspectedProductionDatabaseFile,
+    borrowed_handle: windows_sys::Win32::Foundation::HANDLE,
+) -> Result<(), ProductionDatabaseFileIdentityRevalidationError> {
+    windows::revalidate_borrowed_file(inspected, borrowed_handle)
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn synthetic_inspected_file_with_volume_mismatch(
+    mut inspected: InspectedProductionDatabaseFile,
+) -> InspectedProductionDatabaseFile {
+    inspected._file_identity.volume_serial ^= 1;
+    inspected
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn synthetic_inspected_file_with_file_id_mismatch(
+    mut inspected: InspectedProductionDatabaseFile,
+    offset: usize,
+) -> InspectedProductionDatabaseFile {
+    inspected._file_identity.file_id[offset] ^= 1;
+    inspected
 }
 
 #[cfg(all(test, windows))]
@@ -1117,6 +1210,33 @@ mod tests {
     }
 
     #[test]
+    fn exact_file_identity_comparison_rejects_volume_and_every_file_id_difference() {
+        let retained = RetainedFileIdentity {
+            volume_serial: 0x1122_3344_5566_7788,
+            file_id: [0x5a; 16],
+        };
+        assert!(windows::identities_match(retained, retained));
+
+        let different_volume = RetainedFileIdentity {
+            volume_serial: retained.volume_serial ^ 1,
+            ..retained
+        };
+        assert!(!windows::identities_match(retained, different_volume));
+
+        for offset in 0..16 {
+            let mut file_id = retained.file_id;
+            file_id[offset] ^= 1;
+            assert!(!windows::identities_match(
+                retained,
+                RetainedFileIdentity {
+                    volume_serial: retained.volume_serial,
+                    file_id,
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn sidecar_appearing_between_observations_is_invalid() {
         let root = TestRoot::create();
         let sidecar = root.path().join("parish-data.db-wal");
@@ -1169,5 +1289,7 @@ mod tests {
         assert!(!CARGO.contains("libsqlite3-sys"));
         assert!(!SOURCE.contains(&["use rusq", "lite"].concat()));
         assert!(!SOURCE.contains(&["std::io::", "Read"].concat()));
+        assert!(!SOURCE.contains(&["FILE_READ_", "DATA"].concat()));
+        assert!(SOURCE.contains("const FILE_ACCESS: u32 = FILE_READ_ATTRIBUTES;"));
     }
 }

@@ -23,6 +23,8 @@ pub mod installation_evidence_contract;
 mod installation_evidence_persistence;
 mod installation_evidence_protection;
 pub mod installation_state;
+#[cfg(windows)]
+mod production_database_connection_handoff;
 mod production_database_file;
 #[cfg(windows)]
 mod sqlcipher_database_key_application;

@@ -81,9 +81,9 @@ impl fmt::Debug for DatabaseKeyApplicationError {
 /// `handle` must name a live SQLCipher connection that the caller exclusively
 /// controls for this operation, must be in the state where SQLCipher permits
 /// initial key application, and must remain live for the complete call. This
-/// function verifies only that the pointer is non-null. No caller exists yet.
+/// function verifies only that the pointer is non-null.
 #[allow(dead_code)]
-unsafe fn apply_generation_bound_database_key_to_handle(
+pub(crate) unsafe fn apply_generation_bound_database_key_to_handle(
     handle: *mut rusqlite::ffi::sqlite3,
     key: &GenerationBoundDatabaseKey,
 ) -> Result<(), DatabaseKeyApplicationError> {
