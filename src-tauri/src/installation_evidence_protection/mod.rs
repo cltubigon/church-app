@@ -36,6 +36,7 @@ mod authenticated_active_freshness_anchor;
 mod database_key_current_user_dpapi;
 mod freshness_anchor_current_user_dpapi;
 mod freshness_anchor_observation;
+mod generation_bound_database_key;
 mod installation_bound_authenticated_active_freshness_anchor;
 mod protected_blob_wrapper;
 mod protected_key_payload;
@@ -50,6 +51,11 @@ pub(crate) use database_key_current_user_dpapi::DatabaseKeyCandidateRecoveryErro
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub(crate) use database_key_current_user_dpapi::recover_database_key_candidate_from_loaded_wrapper;
+#[allow(unused_imports)]
+pub(crate) use generation_bound_database_key::{
+    DatabaseKeyGenerationBindingError, GenerationBoundDatabaseKey,
+    bind_database_key_candidate_to_trusted_installation_evidence,
+};
 pub(crate) use installation_bound_authenticated_active_freshness_anchor::InstallationBoundAuthenticatedActiveFreshnessAnchor;
 pub(crate) use protected_blob_wrapper::EncodedProtectedWrapper;
 use protected_blob_wrapper::{ProtectedObjectKind, ValidatedProtectedWrapper};

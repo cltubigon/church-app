@@ -23,6 +23,7 @@ pub mod installation_evidence_contract;
 mod installation_evidence_persistence;
 mod installation_evidence_protection;
 pub mod installation_state;
+mod production_database_file;
 pub mod storage_foundation;
 
 #[cfg(all(test, target_os = "windows"))]

@@ -96,8 +96,14 @@ fn hex_value(byte: u8) -> Result<u8, InvalidParishIdentifier> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProductionDatabasePath(PathBuf);
+
+impl fmt::Debug for ProductionDatabasePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProductionDatabasePath([REDACTED])")
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DevelopmentDatabasePath(PathBuf);
@@ -273,8 +279,17 @@ pub fn resolve_restore_staging_database_path(
     Ok(restore_staging_database_path(app_local_data_directory))
 }
 
-fn production_database_path(app_local_data_directory: PathBuf) -> ProductionDatabasePath {
+pub(crate) fn production_database_path(
+    app_local_data_directory: PathBuf,
+) -> ProductionDatabasePath {
     ProductionDatabasePath(app_local_data_directory.join(PRODUCTION_DATABASE_FILENAME))
+}
+
+#[cfg(test)]
+pub(crate) fn production_database_path_from_synthetic_value(
+    value: PathBuf,
+) -> ProductionDatabasePath {
+    ProductionDatabasePath(value)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -902,6 +917,7 @@ mod tests {
             path.as_path().file_name().and_then(|name| name.to_str()),
             Some("parish-data.db")
         );
+        assert_eq!(format!("{path:?}"), "ProductionDatabasePath([REDACTED])");
     }
 
     #[test]

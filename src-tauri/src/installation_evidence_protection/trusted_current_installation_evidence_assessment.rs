@@ -67,6 +67,22 @@ impl fmt::Debug for TrustedCurrentInstallationEvidenceAssessment {
 }
 
 #[cfg(test)]
+impl TrustedCurrentInstallationEvidenceAssessment {
+    pub(super) fn from_synthetic_evidence(
+        evidence: StructurallyValidatedInstallationEvidence,
+    ) -> Self {
+        let trusted_identity =
+            TrustedCurrentInstallationIdentity::from_validated_installation_identifier(
+                evidence.installation_identifier(),
+            );
+        Self {
+            evidence,
+            trusted_identity,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -98,15 +114,7 @@ mod tests {
     }
 
     fn synthetic_assessment() -> TrustedCurrentInstallationEvidenceAssessment {
-        let evidence = synthetic_evidence();
-        let trusted_identity =
-            TrustedCurrentInstallationIdentity::from_validated_installation_identifier(
-                evidence.installation_identifier(),
-            );
-        TrustedCurrentInstallationEvidenceAssessment {
-            evidence,
-            trusted_identity,
-        }
+        TrustedCurrentInstallationEvidenceAssessment::from_synthetic_evidence(synthetic_evidence())
     }
 
     #[test]
