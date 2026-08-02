@@ -13,6 +13,7 @@ pub(crate) enum ProtectedObjectKind {
     AuthenticatedEvidence = 2,
     AnchorAuthenticationKey = 3,
     AuthenticatedFreshnessAnchor = 4,
+    DatabaseKey = 0x05,
 }
 
 impl ProtectedObjectKind {
@@ -22,6 +23,7 @@ impl ProtectedObjectKind {
             2 => Ok(Self::AuthenticatedEvidence),
             3 => Ok(Self::AnchorAuthenticationKey),
             4 => Ok(Self::AuthenticatedFreshnessAnchor),
+            5 => Ok(Self::DatabaseKey),
             _ => Err(ProtectionStageError::WrapperParseFailed),
         }
     }
@@ -215,6 +217,7 @@ mod tests {
             (ProtectedObjectKind::AuthenticatedEvidence, 2),
             (ProtectedObjectKind::AnchorAuthenticationKey, 3),
             (ProtectedObjectKind::AuthenticatedFreshnessAnchor, 4),
+            (ProtectedObjectKind::DatabaseKey, 5),
         ] {
             let wrapper = encoded(kind, vec![0xaa, 0xbb, 0xcc]);
             assert_eq!(&wrapper.as_bytes()[0..8], b"CHDPAPI\0");
@@ -294,7 +297,7 @@ mod tests {
                 ProtectionStageError::UnsupportedWrapperVersion,
             );
         }
-        for kind in [0, 5, u8::MAX] {
+        for kind in [0, 6, u8::MAX] {
             let mut mutated = valid.as_bytes().to_vec();
             mutated[9] = kind;
             assert_wrapper_failure(
@@ -311,14 +314,15 @@ mod tests {
     }
 
     #[test]
-    fn all_four_object_kinds_are_distinct_and_cross_kind_substitution_fails() {
+    fn all_five_object_kinds_are_distinct_and_cross_kind_substitution_fails() {
         let kinds = [
             ProtectedObjectKind::AuthenticationKey,
             ProtectedObjectKind::AuthenticatedEvidence,
             ProtectedObjectKind::AnchorAuthenticationKey,
             ProtectedObjectKind::AuthenticatedFreshnessAnchor,
+            ProtectedObjectKind::DatabaseKey,
         ];
-        assert_eq!(kinds.map(|kind| kind as u8), [1, 2, 3, 4]);
+        assert_eq!(kinds.map(|kind| kind as u8), [1, 2, 3, 4, 5]);
 
         for encoded_kind in kinds {
             let wrapper = encoded(encoded_kind, vec![0x42; 8]);
@@ -333,6 +337,80 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn database_key_kind_has_stable_numeric_value_and_exact_canonical_layout() {
+        let blob = vec![0x13, 0x57, 0x9b, 0xdf];
+        let wrapper = encoded(ProtectedObjectKind::DatabaseKey, blob.clone());
+
+        assert_eq!(ProtectedObjectKind::AuthenticationKey as u8, 0x01);
+        assert_eq!(ProtectedObjectKind::AuthenticatedEvidence as u8, 0x02);
+        assert_eq!(ProtectedObjectKind::AnchorAuthenticationKey as u8, 0x03);
+        assert_eq!(
+            ProtectedObjectKind::AuthenticatedFreshnessAnchor as u8,
+            0x04
+        );
+        assert_eq!(ProtectedObjectKind::DatabaseKey as u8, 0x05);
+        assert_eq!(&wrapper.as_bytes()[..8], b"CHDPAPI\0");
+        assert_eq!(wrapper.as_bytes()[8], 1);
+        assert_eq!(wrapper.as_bytes()[9], 0x05);
+        assert_eq!(&wrapper.as_bytes()[10..14], &[0, 0, 0, 4]);
+        assert_eq!(&wrapper.as_bytes()[HEADER_LENGTH..], blob);
+
+        let parsed =
+            ValidatedProtectedWrapper::parse(wrapper.as_bytes(), ProtectedObjectKind::DatabaseKey)
+                .expect("canonical database-key wrapper must parse for its exact kind");
+        assert_eq!(parsed.blob(), blob);
+        for debug in [format!("{wrapper:?}"), format!("{parsed:?}")] {
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains("19"));
+            assert!(!debug.contains("87"));
+        }
+    }
+
+    #[test]
+    fn database_key_kind_remains_strictly_separate_from_every_existing_kind() {
+        let existing_kinds = [
+            ProtectedObjectKind::AuthenticationKey,
+            ProtectedObjectKind::AuthenticatedEvidence,
+            ProtectedObjectKind::AnchorAuthenticationKey,
+            ProtectedObjectKind::AuthenticatedFreshnessAnchor,
+        ];
+        let database_key_wrapper = encoded(ProtectedObjectKind::DatabaseKey, vec![0x26; 8]);
+
+        for existing_kind in existing_kinds {
+            assert_wrapper_failure(
+                database_key_wrapper.as_bytes(),
+                existing_kind,
+                ProtectionStageError::WrongProtectedObjectKind,
+            );
+
+            let existing_wrapper = encoded(existing_kind, vec![0x37; 8]);
+            assert_wrapper_failure(
+                existing_wrapper.as_bytes(),
+                ProtectedObjectKind::DatabaseKey,
+                ProtectionStageError::WrongProtectedObjectKind,
+            );
+        }
+    }
+
+    #[test]
+    fn every_unassigned_object_kind_byte_remains_unsupported() {
+        let canonical = encoded(ProtectedObjectKind::DatabaseKey, vec![0x48; 8]);
+
+        for unsupported in u8::MIN..=u8::MAX {
+            if (1..=5).contains(&unsupported) {
+                continue;
+            }
+            let mut mutated = canonical.as_bytes().to_vec();
+            mutated[9] = unsupported;
+            assert_wrapper_failure(
+                &mutated,
+                ProtectedObjectKind::DatabaseKey,
+                ProtectionStageError::WrapperParseFailed,
+            );
         }
     }
 
@@ -529,6 +607,33 @@ mod tests {
             assert!(debug.contains("[REDACTED]"));
             assert!(!debug.contains("222"));
             assert!(!debug.contains("173"));
+        }
+    }
+
+    #[test]
+    fn database_key_kind_is_only_an_opaque_discriminator_in_wrapper_source() {
+        const SOURCE: &str = include_str!("protected_blob_wrapper.rs");
+        let tests = SOURCE.find("mod tests {").unwrap();
+        let production = &SOURCE[..tests];
+
+        assert_eq!(production.matches("DatabaseKey").count(), 2);
+        for forbidden in [
+            "crate::database_key",
+            "EncodedDatabaseKeyPayload",
+            "DecodedDatabaseKeyCandidate",
+            "DatabaseKeyGenerationIdentifier",
+            "std::fs",
+            "std::path",
+            "CryptProtectData",
+            "CryptUnprotectData",
+            "rusqlite",
+            "sqlcipher",
+            "SQLCipher",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "protected wrapper unexpectedly crosses its opaque protocol boundary: {forbidden}"
+            );
         }
     }
 }
