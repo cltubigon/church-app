@@ -1013,8 +1013,29 @@ mod tests {
     fn classifier_has_no_operational_installation_state_conversion() {
         const SOURCE: &str = include_str!("installation_evidence_persistence.rs");
         let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
-        assert!(!production_source.contains("installation_state"));
-        assert!(!production_source.contains("InstallationEvidence"));
+        for forbidden_identifier in [
+            "installation_state",
+            "InstallationEvidence",
+            "ExpectedStorageEvidence",
+            "SetupAuthorizationState",
+            "FirstTimeSetupAuthorization",
+            "StorageDecision",
+            "StorageBlock",
+            "StorageStateCategory",
+            "SetupAuthorizationDenied",
+            "decide_ordinary_startup",
+            "authorize_first_time_setup",
+            "decide_storage",
+        ] {
+            assert!(
+                !production_source
+                    .split(|character: char| {
+                        !character.is_ascii_alphanumeric() && character != '_'
+                    })
+                    .any(|identifier| identifier == forbidden_identifier),
+                "forbidden installation-state identifier: {forbidden_identifier}"
+            );
+        }
     }
 
     fn begin(operation: PublicationOperationKind) -> PublicationStateMachine {

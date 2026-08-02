@@ -669,6 +669,13 @@ mod tests {
     use sha2::Sha256;
 
     use super::*;
+
+    fn source_before_test_module(source: &str) -> &str {
+        source
+            .split_once("mod tests {")
+            .expect("source must contain the test module boundary")
+            .0
+    }
     #[cfg(windows)]
     use crate::storage_foundation::{
         InstallationEvidencePersistencePaths, installation_evidence_persistence_paths,
@@ -1525,7 +1532,7 @@ mod tests {
 
         const SOURCE: &str = include_str!("mod.rs");
         let definition_marker = "fn authenticate_unprotected_installation_evidence(";
-        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production_source = source_before_test_module(SOURCE);
         assert_eq!(production_source.matches(definition_marker).count(), 1);
         let before_definition = production_source.split_once(definition_marker).unwrap().0;
         let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
@@ -1618,7 +1625,7 @@ mod tests {
     #[test]
     fn generation_matched_evidence_boundary_source_proves_private_narrow_transition() {
         const SOURCE: &str = include_str!("mod.rs");
-        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production_source = source_before_test_module(SOURCE);
         let definition_marker = "fn match_authenticated_installation_evidence_generation(";
         assert_eq!(production_source.matches(definition_marker).count(), 1);
         assert_eq!(
@@ -1682,7 +1689,7 @@ mod tests {
     fn protected_wrapper_trust_chain_orchestration_source_proves_exact_private_windows_composition()
     {
         const SOURCE: &str = include_str!("mod.rs");
-        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production_source = source_before_test_module(SOURCE);
         let definition_marker =
             "fn recover_generation_matched_installation_evidence_from_wrappers(";
         assert_eq!(production_source.matches(definition_marker).count(), 1);
@@ -3338,7 +3345,7 @@ mod tests {
         const CONTRACT_SOURCE: &str = include_str!("../installation_evidence_contract.rs");
         const ENVELOPE_SOURCE: &str =
             include_str!("../installation_evidence_authenticated_envelope.rs");
-        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production_source = source_before_test_module(SOURCE);
         let definition_marker = "fn parse_generation_matched_installation_evidence_plaintext(";
 
         assert_eq!(production_source.matches(definition_marker).count(), 1);
@@ -3499,7 +3506,7 @@ mod tests {
     fn parsed_evidence_structural_validation_boundary_source_proves_private_narrow_transition() {
         const SOURCE: &str = include_str!("mod.rs");
         const CONTRACT_SOURCE: &str = include_str!("../installation_evidence_contract.rs");
-        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production_source = source_before_test_module(SOURCE);
         let definition_marker = "fn validate_parsed_installation_evidence_structure(";
 
         assert_eq!(production_source.matches(definition_marker).count(), 1);

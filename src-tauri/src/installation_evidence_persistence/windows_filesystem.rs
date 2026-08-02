@@ -1066,11 +1066,13 @@ pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(
 mod tests {
     use super::*;
     use std::{
+        cell::Cell,
         ffi::{OsStr, OsString},
         fmt, fs,
         io::{self, Cursor, Write},
         os::windows::ffi::{OsStrExt, OsStringExt},
         path::{Path, PathBuf},
+        rc::Rc,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -5949,8 +5951,6 @@ mod tests {
         const SENTINEL_CONTENT: &[u8] = b"synthetic-sentinel-preserved";
         const ACCOUNT_CONTEXT: &str = "Current Windows account, non-elevated session; administrator-group membership not established.";
 
-        static CLEANUP_TEST_CALLS: AtomicU64 = AtomicU64::new(0);
-
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         enum CaseKind {
             CurrentWindows11InternalBaseline,
@@ -6269,7 +6269,7 @@ mod tests {
             }
         }
 
-        type CleanupOperation = fn(&Path) -> io::Result<()>;
+        type CleanupOperation = Box<dyn FnMut(&Path) -> io::Result<()>>;
 
         fn remove_exact_root(root: &Path) -> io::Result<()> {
             fs::remove_dir_all(root)
@@ -6287,7 +6287,7 @@ mod tests {
             fn create(
                 parent: &Path,
                 prefix: &str,
-                cleanup_operation: CleanupOperation,
+                cleanup_operation: impl FnMut(&Path) -> io::Result<()> + 'static,
             ) -> Result<Self, FixtureCreationError> {
                 Self::create_with(
                     parent,
@@ -6301,7 +6301,7 @@ mod tests {
             fn create_with(
                 parent: &Path,
                 prefix: &str,
-                cleanup_operation: CleanupOperation,
+                cleanup_operation: impl FnMut(&Path) -> io::Result<()> + 'static,
                 create_child: impl FnOnce(&Path) -> io::Result<()>,
                 write_sentinel: impl FnOnce(&Path, &[u8]) -> io::Result<()>,
             ) -> Result<Self, FixtureCreationError> {
@@ -6324,7 +6324,7 @@ mod tests {
                     sentinel,
                     cleanup_attempted: false,
                     cleanup_succeeded: false,
-                    cleanup_operation,
+                    cleanup_operation: Box::new(cleanup_operation),
                 };
                 if write_sentinel(&fixture.sentinel, SENTINEL_CONTENT).is_err() {
                     let cleanup = match fixture.cleanup_once() {
@@ -6781,7 +6781,7 @@ mod tests {
         fn run_with_parent(
             case_kind: CaseKind,
             parent: &Path,
-            cleanup_operation: CleanupOperation,
+            cleanup_operation: impl FnMut(&Path) -> io::Result<()> + 'static,
         ) -> RedactedCaseResult {
             if case_kind == CaseKind::UsbFlash && !validate_manual_root(parent) {
                 let mut result = RedactedCaseResult::initial(case_kind, Prerequisite::Present);
@@ -6846,25 +6846,10 @@ mod tests {
             run_with_parent(CaseKind::UsbFlash, Path::new(&value), remove_exact_root)
         }
 
-        fn counted_cleanup(root: &Path) -> io::Result<()> {
-            CLEANUP_TEST_CALLS.fetch_add(1, Ordering::Relaxed);
-            remove_exact_root(root)
-        }
-
-        fn counted_cleanup_remove_then_fail(root: &Path) -> io::Result<()> {
-            CLEANUP_TEST_CALLS.fetch_add(1, Ordering::Relaxed);
-            remove_exact_root(root)?;
-            Err(io::Error::other("injected coarse cleanup failure"))
-        }
-
-        fn injected_cleanup_succeeds(_root: &Path) -> io::Result<()> {
-            CLEANUP_TEST_CALLS.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn injected_cleanup_fails(_root: &Path) -> io::Result<()> {
-            CLEANUP_TEST_CALLS.fetch_add(1, Ordering::Relaxed);
-            Err(io::Error::other("injected sensitive cleanup failure"))
+        fn cleanup_call_observer() -> (Rc<Cell<u64>>, impl FnMut() + 'static) {
+            let calls = Rc::new(Cell::new(0));
+            let observed_calls = Rc::clone(&calls);
+            (calls, move || observed_calls.set(observed_calls.get() + 1))
         }
 
         fn synthetic_result(
@@ -7019,11 +7004,14 @@ mod tests {
 
         #[test]
         fn controlled_storage_host_matrix_pure_child_creation_failure_has_no_cleanup_evidence() {
-            CLEANUP_TEST_CALLS.store(0, Ordering::Relaxed);
+            let (cleanup_calls, mut observe_cleanup) = cleanup_call_observer();
             let failure = match Fixture::create_with(
                 &std::env::temp_dir(),
                 "church-app-injected-child-failure-",
-                injected_cleanup_succeeds,
+                move |_| {
+                    observe_cleanup();
+                    Ok(())
+                },
                 |_| Err(io::Error::other("injected sensitive child failure")),
                 |_, _| panic!("sentinel write must not be reached"),
             ) {
@@ -7031,7 +7019,7 @@ mod tests {
                 Err(failure) => failure,
             };
             assert_eq!(failure, FixtureCreationError::child_creation_unavailable());
-            assert_eq!(CLEANUP_TEST_CALLS.load(Ordering::Relaxed), 0);
+            assert_eq!(cleanup_calls.get(), 0);
 
             let result = result_for_creation_failure(CaseKind::UsbFlash, failure);
             assert_eq!(
@@ -7045,11 +7033,14 @@ mod tests {
 
         #[test]
         fn controlled_storage_host_matrix_pure_sentinel_write_failure_retains_cleanup_success() {
-            CLEANUP_TEST_CALLS.store(0, Ordering::Relaxed);
+            let (cleanup_calls, mut observe_cleanup) = cleanup_call_observer();
             let failure = match Fixture::create_with(
                 &std::env::temp_dir(),
                 "church-app-injected-sentinel-failure-",
-                injected_cleanup_succeeds,
+                move |_| {
+                    observe_cleanup();
+                    Ok(())
+                },
                 |_| Ok(()),
                 |_, _| Err(io::Error::other("injected sensitive sentinel failure")),
             ) {
@@ -7061,7 +7052,7 @@ mod tests {
                 FixtureCreationFailure::SentinelWriteUnavailable
             );
             assert_eq!(failure.cleanup, FixtureCreationCleanupOutcome::Succeeded);
-            assert_eq!(CLEANUP_TEST_CALLS.load(Ordering::Relaxed), 1);
+            assert_eq!(cleanup_calls.get(), 1);
 
             let result = result_for_creation_failure(CaseKind::UsbFlash, failure);
             assert_eq!(
@@ -7077,11 +7068,14 @@ mod tests {
         #[test]
         fn controlled_storage_host_matrix_pure_sentinel_write_and_cleanup_failure_are_both_retained_without_drop_retry()
          {
-            CLEANUP_TEST_CALLS.store(0, Ordering::Relaxed);
+            let (cleanup_calls, mut observe_cleanup) = cleanup_call_observer();
             let failure = match Fixture::create_with(
                 &std::env::temp_dir(),
                 "church-app-injected-combined-failure-",
-                injected_cleanup_fails,
+                move |_| {
+                    observe_cleanup();
+                    Err(io::Error::other("injected sensitive cleanup failure"))
+                },
                 |_| Ok(()),
                 |_, _| Err(io::Error::other("injected sensitive sentinel failure")),
             ) {
@@ -7093,7 +7087,7 @@ mod tests {
                 FixtureCreationFailure::SentinelWriteUnavailable
             );
             assert_eq!(failure.cleanup, FixtureCreationCleanupOutcome::Failed);
-            assert_eq!(CLEANUP_TEST_CALLS.load(Ordering::Relaxed), 1);
+            assert_eq!(cleanup_calls.get(), 1);
 
             let result = result_for_creation_failure(CaseKind::UsbFlash, failure);
             assert_eq!(
@@ -7230,23 +7224,28 @@ mod tests {
 
         #[test]
         fn controlled_storage_host_matrix_pure_cleanup_is_attempted_once() {
-            CLEANUP_TEST_CALLS.store(0, Ordering::Relaxed);
+            let (cleanup_calls, mut observe_cleanup) = cleanup_call_observer();
             let mut fixture =
-                Fixture::create(&std::env::temp_dir(), USB_CHILD_PREFIX, counted_cleanup).unwrap();
+                Fixture::create(&std::env::temp_dir(), USB_CHILD_PREFIX, move |root| {
+                    observe_cleanup();
+                    remove_exact_root(root)
+                })
+                .unwrap();
             fixture.cleanup_once().unwrap();
             fixture.cleanup_once().unwrap();
-            assert_eq!(CLEANUP_TEST_CALLS.load(Ordering::Relaxed), 1);
+            assert_eq!(cleanup_calls.get(), 1);
         }
 
         #[test]
         fn controlled_storage_host_matrix_pure_primary_plus_cleanup_is_preserved() {
-            CLEANUP_TEST_CALLS.store(0, Ordering::Relaxed);
-            let mut fixture = Fixture::create(
-                &std::env::temp_dir(),
-                USB_CHILD_PREFIX,
-                counted_cleanup_remove_then_fail,
-            )
-            .unwrap();
+            let (cleanup_calls, mut observe_cleanup) = cleanup_call_observer();
+            let mut fixture =
+                Fixture::create(&std::env::temp_dir(), USB_CHILD_PREFIX, move |root| {
+                    observe_cleanup();
+                    remove_exact_root(root)?;
+                    Err(io::Error::other("injected coarse cleanup failure"))
+                })
+                .unwrap();
             let mut result = RedactedCaseResult::initial(CaseKind::UsbFlash, Prerequisite::Present);
             result.failure = CoarseFailureCategory::UsbCandidateDefectUnresolved;
             apply_cleanup_result(&mut result, fixture.cleanup_once());
@@ -7259,7 +7258,7 @@ mod tests {
                 result.primary_failure,
                 Some(CoarseFailureCategory::UsbCandidateDefectUnresolved)
             );
-            assert_eq!(CLEANUP_TEST_CALLS.load(Ordering::Relaxed), 1);
+            assert_eq!(cleanup_calls.get(), 1);
         }
 
         #[test]
@@ -8799,7 +8798,7 @@ mod tests {
             .split_once("fn load_active_authenticated_evidence_wrapper(")
             .unwrap()
             .1
-            .split_once("fn load_active_installation_evidence_wrappers(")
+            .split_once("\n}\n")
             .unwrap()
             .0;
         for required in [
