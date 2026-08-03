@@ -17,6 +17,17 @@ use super::{
     ReadabilityAndIntegrityValidatedProductionDatabaseConnection, close_lifetime_owner_using,
 };
 
+mod database_evidence_correspondence_validation;
+
+pub(crate) use database_evidence_correspondence_validation::{
+    DatabaseEvidenceCorrespondenceMismatch,
+    DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection,
+    DatabaseEvidenceCorrespondenceValidationCloseFailure,
+    DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome,
+    DatabaseEvidenceCorrespondenceValidationOutcome,
+    validate_production_database_evidence_correspondence,
+};
+
 const EXPECTED_APPLICATION_ID: i32 = 0x4348_4150;
 const APPLICATION_ID_QUERY: &str = "PRAGMA main.application_id";
 const USER_VERSION_QUERY: &str = "PRAGMA main.user_version";
@@ -483,13 +494,14 @@ mod tests {
         installation_evidence_authentication_key::EvidenceAuthenticationKey,
         installation_evidence_contract::{
             DatabaseKeyGenerationIdentifier, PERMANENT_APPLICATION_IDENTIFIER,
-            UnvalidatedInstallationEvidenceContract,
+            StructurallyValidatedInstallationEvidence, UnvalidatedInstallationEvidenceContract,
         },
         installation_evidence_protection::{
             GenerationBoundDatabaseKey,
             bind_database_key_candidate_to_trusted_installation_evidence,
             load_trusted_current_installation_evidence_assessment, protect_authenticated_evidence,
             protect_authentication_material,
+            trusted_current_installation_evidence_assessment_for_test,
         },
         production_database_connection_handoff::{
             ProductionDatabaseValidationOutcome, acquire_guarded_inspection, apply_key_once,
@@ -644,6 +656,49 @@ mod tests {
         ]
     }
 
+    fn correspondence_evidence(
+        parish_identifier: &str,
+        installation_identifier: [u8; 16],
+        installation_generation: u64,
+        recovery_replacement_generation: u64,
+        database_key_generation_identifier: [u8; 16],
+        setup_publication_identifier: [u8; 16],
+        creation_timestamp: u64,
+    ) -> StructurallyValidatedInstallationEvidence {
+        UnvalidatedInstallationEvidenceContract::new(
+            *crate::installation_evidence_contract::INSTALLATION_EVIDENCE_FORMAT_IDENTITY
+                .as_bytes(),
+            crate::installation_evidence_contract::SUPPORTED_EVIDENCE_FORMAT_VERSION,
+            PERMANENT_APPLICATION_IDENTIFIER,
+            *APPLICATION_DATABASE_FORMAT_IDENTITY.as_bytes(),
+            parish_identifier,
+            installation_identifier,
+            installation_generation,
+            recovery_replacement_generation,
+            database_key_generation_identifier,
+            setup_publication_identifier,
+            creation_timestamp,
+        )
+        .validate()
+        .expect("synthetic correspondence evidence should validate structurally")
+    }
+
+    fn matching_correspondence_evidence(
+        installation_generation: u64,
+        recovery_replacement_generation: u64,
+        creation_timestamp: u64,
+    ) -> StructurallyValidatedInstallationEvidence {
+        correspondence_evidence(
+            "11111111111111111111111111111111",
+            [0x21; 16],
+            installation_generation,
+            recovery_replacement_generation,
+            [0x43; 16],
+            [0x65; 16],
+            creation_timestamp,
+        )
+    }
+
     fn create_fixture(
         root: &TestRoot,
         application_id: i32,
@@ -786,6 +841,243 @@ mod tests {
         );
         assert!(matches!(
             owner.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    fn correspondence_fixture(
+        evidence: StructurallyValidatedInstallationEvidence,
+    ) -> (TestRoot, DatabaseEvidenceCorrespondenceValidationOutcome) {
+        let root = TestRoot::create();
+        create_fixture(
+            &root,
+            EXPECTED_APPLICATION_ID,
+            1,
+            Some(CREATE_METADATA_RELATION),
+            &[canonical_values()],
+            false,
+        );
+        let database = validate_fixture(&root).expect("live predecessor should validate");
+        let assessment = trusted_current_installation_evidence_assessment_for_test(evidence);
+        let outcome = validate_production_database_evidence_correspondence(database, assessment);
+        (root, outcome)
+    }
+
+    #[test]
+    fn database_evidence_correspondence_validation_matching_real_sqlcipher_chain_succeeds_redacts_closes_and_cleans_exactly()
+     {
+        let (root, outcome) =
+            correspondence_fixture(matching_correspondence_evidence(7, 11, 1_798_000_000));
+        let DatabaseEvidenceCorrespondenceValidationOutcome::Validated(owner) = outcome else {
+            panic!("matching trusted assessment should correspond");
+        };
+        assert_eq!(
+            format!("{owner:?}"),
+            "DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection([REDACTED])"
+        );
+        assert!(matches!(
+            owner.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    fn assert_correspondence_mismatch(evidence: StructurallyValidatedInstallationEvidence) {
+        let (root, outcome) = correspondence_fixture(evidence);
+        assert_eq!(
+            format!("{outcome:?}"),
+            "Mismatch(DatabaseEvidenceCorrespondenceMismatch)"
+        );
+        assert!(matches!(
+            outcome,
+            DatabaseEvidenceCorrespondenceValidationOutcome::Mismatch(
+                DatabaseEvidenceCorrespondenceMismatch
+            )
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn database_evidence_correspondence_validation_constructible_single_mismatches_are_one_coarse_category()
+     {
+        for evidence in [
+            correspondence_evidence(
+                "12121212121212121212121212121212",
+                [0x21; 16],
+                7,
+                11,
+                [0x43; 16],
+                [0x65; 16],
+                1_798_000_000,
+            ),
+            correspondence_evidence(
+                "11111111111111111111111111111111",
+                [0x22; 16],
+                7,
+                11,
+                [0x43; 16],
+                [0x65; 16],
+                1_798_000_000,
+            ),
+            correspondence_evidence(
+                "11111111111111111111111111111111",
+                [0x21; 16],
+                7,
+                11,
+                [0x44; 16],
+                [0x65; 16],
+                1_798_000_000,
+            ),
+            correspondence_evidence(
+                "11111111111111111111111111111111",
+                [0x21; 16],
+                7,
+                11,
+                [0x43; 16],
+                [0x66; 16],
+                1_798_000_000,
+            ),
+        ] {
+            assert_correspondence_mismatch(evidence);
+        }
+    }
+
+    #[test]
+    fn database_evidence_correspondence_validation_multiple_mismatches_remain_the_same_single_category()
+     {
+        assert_correspondence_mismatch(correspondence_evidence(
+            "12121212121212121212121212121212",
+            [0x22; 16],
+            7,
+            11,
+            [0x44; 16],
+            [0x66; 16],
+            1_798_000_000,
+        ));
+    }
+
+    #[test]
+    fn database_evidence_correspondence_validation_ignores_generations_and_database_evidence_timestamps()
+     {
+        for evidence in [
+            matching_correspondence_evidence(8, 11, 1_798_000_000),
+            matching_correspondence_evidence(7, 12, 1_798_000_000),
+            matching_correspondence_evidence(7, 11, 1_899_000_000),
+            matching_correspondence_evidence(71, 111, 1_899_000_000),
+        ] {
+            let (root, outcome) = correspondence_fixture(evidence);
+            let DatabaseEvidenceCorrespondenceValidationOutcome::Validated(owner) = outcome else {
+                panic!("excluded generation and timestamp differences must correspond");
+            };
+            assert!(matches!(
+                owner.close(),
+                ProductionDatabaseConnectionCloseOutcome::Closed
+            ));
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn database_evidence_correspondence_validation_mismatch_discards_inputs_before_close_and_close_success_is_primary()
+     {
+        let root = TestRoot::create();
+        let metadata_dropped = Cell::new(false);
+        let assessment_dropped = Cell::new(false);
+        let close_called = Cell::new(false);
+        let outcome = database_evidence_correspondence_validation::finish_mismatch_using(
+            direct_predecessor(&root).owner,
+            DropProbe(&metadata_dropped),
+            DropProbe(&assessment_dropped),
+            |connection| {
+                assert!(metadata_dropped.get());
+                assert!(assessment_dropped.get());
+                close_called.set(true);
+                drop(connection);
+                Ok(())
+            },
+        );
+        assert!(close_called.get());
+        assert!(matches!(
+            outcome,
+            DatabaseEvidenceCorrespondenceValidationOutcome::Mismatch(
+                DatabaseEvidenceCorrespondenceMismatch
+            )
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn database_evidence_correspondence_validation_mismatch_close_failure_retries_only_close_and_preserves_ownership()
+     {
+        let root = TestRoot::create();
+        let outcome = database_evidence_correspondence_validation::finish_mismatch_using(
+            direct_predecessor(&root).owner,
+            (),
+            (),
+            Err,
+        );
+        let DatabaseEvidenceCorrespondenceValidationOutcome::CloseFailed(failure) = outcome else {
+            panic!("injected mismatch close should fail");
+        };
+        assert_eq!(
+            format!("{failure:?}"),
+            "DatabaseEvidenceCorrespondenceValidationCloseFailure([REDACTED])"
+        );
+        let DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome::Failed(failure) =
+            failure.retry_close_using(Err)
+        else {
+            panic!("repeated injected close should preserve failure ownership");
+        };
+        let retry = DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome::Failed(failure);
+        assert_eq!(format!("{retry:?}"), "Failed([REDACTED])");
+        let DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome::Failed(failure) = retry
+        else {
+            unreachable!();
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome::Closed(
+                DatabaseEvidenceCorrespondenceMismatch
+            )
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn database_evidence_correspondence_validation_success_close_discards_inputs_first_and_failure_uses_general_owner()
+     {
+        let root = TestRoot::create();
+        let metadata_dropped = Cell::new(false);
+        let assessment_dropped = Cell::new(false);
+        let outcome = database_evidence_correspondence_validation::close_correspondence_owner_using(
+            direct_predecessor(&root).owner,
+            DropProbe(&metadata_dropped),
+            DropProbe(&assessment_dropped),
+            |connection| {
+                assert!(metadata_dropped.get());
+                assert!(assessment_dropped.get());
+                drop(connection);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            outcome,
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+
+        let (root, outcome) =
+            correspondence_fixture(matching_correspondence_evidence(7, 11, 1_798_000_000));
+        let DatabaseEvidenceCorrespondenceValidationOutcome::Validated(owner) = outcome else {
+            panic!("matching correspondence should validate");
+        };
+        let ProductionDatabaseConnectionCloseOutcome::Failed(failure) = owner.close_using(Err)
+        else {
+            panic!("injected successful-owner close should retain general lifetime ownership");
+        };
+        assert!(matches!(
+            failure.retry_close(),
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
         root.assert_exact_cleanup();

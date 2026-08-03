@@ -40,9 +40,15 @@ mod live_metadata_and_header_validation;
 
 #[allow(unused_imports)]
 pub(crate) use live_metadata_and_header_validation::{
+    DatabaseEvidenceCorrespondenceMismatch,
+    DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection,
+    DatabaseEvidenceCorrespondenceValidationCloseFailure,
+    DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome,
+    DatabaseEvidenceCorrespondenceValidationOutcome,
     LiveMetadataAndHeaderValidatedProductionDatabaseConnection,
     LiveMetadataAndHeaderValidationCloseFailure, LiveMetadataAndHeaderValidationCloseRetryOutcome,
     LiveMetadataAndHeaderValidationError, LiveMetadataAndHeaderValidationOutcome,
+    validate_production_database_evidence_correspondence,
     validate_production_database_live_metadata_and_headers,
 };
 

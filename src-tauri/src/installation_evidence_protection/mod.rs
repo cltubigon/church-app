@@ -136,6 +136,9 @@ pub(crate) fn assure_installation_bound_authenticated_active_freshness_anchor(
 }
 
 #[cfg(test)]
+pub(crate) use trusted_current_installation_evidence_assessment::trusted_current_installation_evidence_assessment_for_test;
+
+#[cfg(test)]
 pub(crate) fn synthetic_installation_bound_authenticated_active_freshness_anchor(
     contract: FreshnessAnchorContractV1,
 ) -> InstallationBoundAuthenticatedActiveFreshnessAnchor {
