@@ -172,7 +172,7 @@ The database-format identity is never UTF-8, hex, UUID text, Base64, a numeric r
 
 ### Correspondence, freshness, and authority
 
-Exact typed equality is required across database and evidence for the permanent application identifier, `ApplicationDatabaseFormatIdentity`, parish identifier, installation identifier, database-key generation identifier, and setup-publication identifier. Lineage comparison applies to installation generation and recovery/replacement generation. Evidence format identity and evidence format version remain evidence-only. Timestamps are diagnostic and never authorize freshness.
+Exact typed equality is required across database and evidence for the permanent application identifier, `ApplicationDatabaseFormatIdentity`, parish identifier, installation identifier, database-key generation identifier, and setup-publication identifier. The identity-only correspondence boundary ignores installation generation and recovery/replacement generation; only the later freshness boundary compares those values against the local anchor. Evidence-format identity and version remain evidence-only. Timestamps are diagnostic and affect neither correspondence nor freshness authorization.
 
 A future separate CurrentUser-DPAPI-protected freshness anchor records installation identifier, installation generation, recovery/replacement generation, database-key generation identifier, and setup-publication identifier. Normal startup eventually requires database, evidence, and anchor agreement: equal lineage succeeds; lower evidence is stale evidence; higher evidence is a stale database; opposing lineage movement is rollback suspicion; ambiguity fails closed. A coordinated rollback of every local artifact and applicable profile state to one mutually consistent snapshot is not detectable by this design, so it provides no cryptographic monotonic rollback guarantee.
 
@@ -240,4 +240,51 @@ On every primary failure, `Rows` and `Statement` are released before close, and 
 
 Success proves only the two exact header observations, correct `application_id`, exactly one metadata row, exact storage-class representations, strict UTF-8, success of the existing pure parse and structural validation, `user_version` agreement with the supported metadata schema version, and continued ownership of the same guarded readability-and-integrity-validated connection. Production only reads the already-existing named relation. The stage validates no physical DDL, constraints, indexes, triggers, object kind, wider product schema, database/evidence correspondence, freshness, startup or operational authorization, setup completion, migration status, recovery, backup/restore suitability, replacement authority, business data, or operational opening. All of those later boundaries remain separately scoped, and `LiveMetadataAndHeaderValidatedProductionDatabaseConnection` has no operational caller.
 
-Database/evidence correspondence is the next separately scoped boundary. It will compose `LiveMetadataAndHeaderValidatedProductionDatabaseConnection`, a trusted current installation-evidence input, and the existing pure correspondence foundation. The exact trusted input type, live taxonomy, mismatch precedence, success-owner contents, retention model, lineage handling, module placement, and test seams are not selected here.
+### Approved identity-only database/evidence correspondence adapter (not implemented)
+
+The next approved implementation boundary is the consuming conceptual transition:
+
+```rust
+validate_production_database_evidence_correspondence(
+    database: LiveMetadataAndHeaderValidatedProductionDatabaseConnection,
+    evidence: TrustedCurrentInstallationEvidenceAssessment,
+) -> DatabaseEvidenceCorrespondenceValidationOutcome
+```
+
+Both owners are consumed. No weaker evidence type is approved, and the adapter performs no hidden evidence loading. It borrows the retained metadata and trusted assessment only long enough to invoke exactly once:
+
+```rust
+classify_database_metadata_correspondence(
+    &metadata_contract,
+    trusted_assessment.evidence(),
+)
+```
+
+The existing pure classifier remains the sole correspondence authority. The adapter neither duplicates nor reinterprets its exact comparisons of permanent application identifier, application database-format identity, parish identifier, installation identifier, database-key generation identifier, and setup-publication identifier. One or multiple mismatches produce only unit-like `DatabaseEvidenceCorrespondenceMismatch`. Internal comparison order is not outward behavior; field-level precedence, mismatch counts, indexes, sets, and diagnostics are intentionally unobservable. There is no `CorrespondenceUnavailable`, evidence-loading failure, lineage/freshness category, or primary `CloseFailed` category.
+
+Success returns opaque `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection`. It privately owns exactly the unchanged `ConnectionLifetimeOwner`, one `DatabaseMetadataContractV1`, and one `TrustedCurrentInstallationEvidenceAssessment`; it retains no separate `DatabaseMetadataCorrespondence::Corresponds`. Possession of this owner is the correspondence proof. Keeping the full trusted assessment preserves trusted loading/authentication provenance, structurally validated evidence, and `TrustedCurrentInstallationIdentity`, while retaining no path, wrapper bytes, key, envelope bytes, native error, or loader state and avoiding an additional trusted projection.
+
+The success owner retains internally the database metadata, trusted structurally validated evidence, trusted current installation identity, installation generation, recovery/replacement generation, installation identifier, database-key generation identifier, and setup-publication identifier. A future sealed freshness transition will consume the entire owner. This architecture does not design that transition, its anchor loading, taxonomy, or outcomes.
+
+Correspondence itself ignores both generation values, evidence-format identity and version, and both database and evidence creation timestamps. It does not classify equal lineage, stale evidence, stale database, opposing movement, rollback suspicion, or ambiguity. Both generations remain unchanged for later three-way anchor-based freshness. No two-way pre-anchor lineage classifier is approved.
+
+The implementation is a nested child:
+
+```text
+production_database_connection_handoff/
+  live_metadata_and_header_validation.rs
+  live_metadata_and_header_validation/
+    database_evidence_correspondence_validation.rs
+```
+
+This placement allows the child to destructure the live owner and retain the ancestor-private lifetime owner without widening production visibility. `database_metadata_correspondence` remains pure and independent. No `Connection`, arbitrary-SQL callback, crate-root bridge, or detachable proof is exposed.
+
+On mismatch, both inputs have been consumed, the one pure comparison has completed, and all temporary borrows end. The adapter discards `DatabaseMetadataContractV1` and `TrustedCurrentInstallationEvidenceAssessment` before explicitly closing the unchanged lifetime owner. Close success returns `DatabaseEvidenceCorrespondenceMismatch`. Close failure returns ownership-bearing `DatabaseEvidenceCorrespondenceValidationCloseFailure`, retaining only that category and the complete lifetime owner. Its consuming retry performs only close; repeated failure preserves both and eventual success returns the original mismatch. Metadata and trusted evidence never enter this close-failure owner.
+
+Closing a successful correspondence owner first discards its metadata and trusted assessment, then attempts SQLite close. Failure reuses the existing capability-free `ProductionDatabaseConnectionCloseFailure` and retains only `ConnectionLifetimeOwner`; no second general close system is approved. The conceptual type family is `DatabaseEvidenceCorrespondenceMismatch`, `DatabaseEvidenceCorrespondenceValidationOutcome`, `DatabaseEvidenceCorrespondenceValidationCloseFailure`, `DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome`, and `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection`. The initial outcome distinguishes validated ownership, mismatch after successful close, and mismatch with retained close-failure ownership.
+
+Manual coarse `Debug` is required for the owner, category, initial outcome, close-failure owner, and retry outcome. Formatting must never delegate to metadata, evidence, or trusted-assessment formatting and must disclose no field, count, order, identifier, generation, timestamp, metadata/evidence value, evidence-format field, path, wrapper, DPAPI/HMAC state, SQL/PRAGMA text, SQLite/native error or code, handle, or connection detail. Ordinary success, mismatch, and close failure require no logging.
+
+Success proves only that all preceding database stages remain satisfied, the six approved identity fields correspond, the same guarded lifetime remains owned, the compared trusted assessment remains retained, and both generations remain available internally for later freshness. It proves no equal lineage, freshness, rollback resistance, startup authorization, operational opening, setup completion, migration status, physical DDL or object kind, wider schema correctness, recovery fitness, backup/restore suitability, replacement authority, or business-data correctness.
+
+Future tests may use only a narrow `#[cfg(test)] pub(crate)` `trusted_current_installation_evidence_assessment_for_test` owned by `installation_evidence_protection/trusted_current_installation_evidence_assessment.rs`. It accepts synthetic owned structurally validated evidence and derives `TrustedCurrentInstallationIdentity` internally through the existing pure derivation; it cannot accept a separately supplied identity, is absent from production compilation, performs no filesystem, DPAPI, HMAC, loading, or parsing, and grants no production authority. A test-only parent reexport is permitted only if required.
