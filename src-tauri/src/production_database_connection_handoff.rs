@@ -36,6 +36,16 @@ use crate::{
     storage_foundation::ProductionDatabasePath,
 };
 
+mod live_metadata_and_header_validation;
+
+#[allow(unused_imports)]
+pub(crate) use live_metadata_and_header_validation::{
+    LiveMetadataAndHeaderValidatedProductionDatabaseConnection,
+    LiveMetadataAndHeaderValidationCloseFailure, LiveMetadataAndHeaderValidationCloseRetryOutcome,
+    LiveMetadataAndHeaderValidationError, LiveMetadataAndHeaderValidationOutcome,
+    validate_production_database_live_metadata_and_headers,
+};
+
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAIN_DATABASE_NAME: &str = "main";
 const WIN32_VFS_NAME: &str = "win32";
