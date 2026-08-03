@@ -174,7 +174,7 @@ The database-format identity is never UTF-8, hex, UUID text, Base64, a numeric r
 
 Exact typed equality is required across database and evidence for the permanent application identifier, `ApplicationDatabaseFormatIdentity`, parish identifier, installation identifier, database-key generation identifier, and setup-publication identifier. The identity-only correspondence boundary ignores installation generation and recovery/replacement generation; only the later freshness boundary compares those values against the local anchor. Evidence-format identity and version remain evidence-only. Timestamps are diagnostic and affect neither correspondence nor freshness authorization.
 
-Freshness remains absent. The next separately scoped boundary will consume `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` and compose it with the existing local-anchor freshness foundation. Its exact input signature, anchor-loading boundary, live taxonomy, success-owner contents, close behavior, module placement, operational caller, and startup-authority integration require separate architecture review.
+Freshness implementation remains absent, but its next bounded architecture is approved. The future transition consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` plus exactly one preloaded `NormalizedFreshnessAnchorObservation`, advances only when the existing pure classifier returns `Fresh`, and otherwise explicitly closes. Anchor loading and normalization remain upstream. Startup authorization and operational opening remain separately scoped.
 
 Setup is the only creation authority. Ordinary startup never creates a database, key wrapper, evidence, anchor, metadata, or sidecar. Recovery, restore, migration, rekey, anchor replacement, database replacement, and destructive cleanup require separate explicit authorization. There is no generic repair authority.
 
@@ -264,7 +264,7 @@ The existing pure classifier remains the sole correspondence authority. The adap
 
 Success returns opaque `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection`. It privately owns exactly the unchanged `ConnectionLifetimeOwner`, one `DatabaseMetadataContractV1`, and one `TrustedCurrentInstallationEvidenceAssessment`; it retains no separate `DatabaseMetadataCorrespondence::Corresponds`. Possession of this owner is the correspondence proof. Keeping the full trusted assessment preserves trusted loading/authentication provenance, structurally validated evidence, and `TrustedCurrentInstallationIdentity`, while retaining no path, wrapper bytes, key, envelope bytes, native error, or loader state and avoiding an additional trusted projection.
 
-The success owner retains internally the database metadata, trusted structurally validated evidence, trusted current installation identity, installation generation, recovery/replacement generation, installation identifier, database-key generation identifier, and setup-publication identifier. The next separately scoped boundary will consume the entire owner and compose it with the existing local-anchor freshness foundation. This architecture does not design its exact input signature, anchor-loading boundary, live taxonomy, success-owner contents, close behavior, module placement, operational caller, or startup-authority integration.
+The success owner retains internally the database metadata, trusted structurally validated evidence, trusted current installation identity, installation generation, recovery/replacement generation, installation identifier, database-key generation identifier, and setup-publication identifier. The approved next boundary consumes this entire owner with one preloaded normalized anchor observation. Its live composition architecture is defined below; implementation, operational caller, and startup-authority integration remain absent.
 
 Correspondence itself ignores both generation values, evidence-format identity and version, and both database and evidence creation timestamps. It establishes no equal lineage, freshness, or rollback resistance. Both generations remain unchanged for the next separately scoped composition with the existing local-anchor freshness foundation.
 
@@ -288,3 +288,53 @@ Manual coarse `Debug` is implemented for the owner, category, initial outcome, c
 Success proves only that all preceding database stages remain satisfied, the six approved identity fields correspond, the same guarded lifetime remains owned, the compared trusted assessment remains retained, and both generations remain available internally for later freshness. It proves no equal lineage, freshness, rollback resistance, startup authorization, operational opening, setup completion, migration status, physical DDL or object kind, wider schema correctness, recovery fitness, backup/restore suitability, replacement authority, or business-data correctness.
 
 Tests use only the narrow `#[cfg(test)] pub(crate)` `trusted_current_installation_evidence_assessment_for_test` owned by `installation_evidence_protection/trusted_current_installation_evidence_assessment.rs`. It accepts synthetic owned structurally validated evidence and derives `TrustedCurrentInstallationIdentity` internally through the existing pure derivation; it cannot accept a separately supplied identity, is absent from production compilation, performs no filesystem, DPAPI, HMAC, loading, or parsing, and grants no production authority.
+
+### Approved preloaded normalized database-freshness composition
+
+The approved but unimplemented transition is:
+
+```rust
+validate_production_database_freshness(
+    database: DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection,
+    anchor_observation: NormalizedFreshnessAnchorObservation,
+) -> ProductionDatabaseFreshnessValidationOutcome
+```
+
+Both inputs are consumed. `NormalizedFreshnessAnchorObservation` is the mandatory and only live anchor input, accepting `Present(AssuredFreshnessAnchor)`, `Missing`, `Unavailable`, and `Invalid`. The adapter accepts no paths, `FreshnessAnchorPersistencePaths`, `LoadedActiveFreshnessAnchorWrapperPair`, `AuthenticatedActiveFreshnessAnchor`, `InstallationBoundAuthenticatedActiveFreshnessAnchor`, bare `AssuredFreshnessAnchor`, or generic alternative. It performs no presence inspection, filesystem or path operation, wrapper loading, DPAPI, HMAC, parsing, authentication, generation matching, installation binding, assurance, or normalization. That complete trust chain finishes before the input crosses this boundary.
+
+The correspondence owner contains no correspondence enum because possession is the proof. After privately destructuring the consumed owner, the sealed child constructs one ephemeral `DatabaseMetadataCorrespondence::Corresponds` solely to call:
+
+```rust
+classify_database_freshness(
+    DatabaseMetadataCorrespondence::Corresponds,
+    &metadata_contract,
+    trusted_assessment.evidence(),
+    &anchor_observation,
+)
+```
+
+The call occurs exactly once. The enum is not retained, returned, or exposed, and the correspondence classifier is not rerun. `classify_database_freshness` remains unchanged and is the sole authority for generation comparisons, three-way anchor identities, lineage combination, precedence, and timestamp exclusion. The adapter duplicates none of that logic and performs no SQL, PRAGMA, query, row read, or other database-content operation.
+
+Only `DatabaseFreshnessClassification::Fresh` produces `DatabaseFreshnessValidatedProductionDatabaseConnection`. Every other existing classification is non-success: `StaleEvidence`, `StaleDatabase`, `RollbackSuspicion`, `IdentityMismatch`, `AnchorMissing`, `AnchorUnavailable`, `AnchorInvalid`, and `Ambiguous`. The live outcome directly reuses `DatabaseFreshnessClassification`: `Fresh` advances; non-Fresh plus successful explicit close is `Failed(classification)`; non-Fresh plus failed close is ownership-bearing `CloseFailed`. `Fresh` is impossible in failure and retry forms. The live adapter adds no precedence beyond advancing `Fresh` and closing after an already determined non-Fresh classification.
+
+`DatabaseFreshnessValidatedProductionDatabaseConnection` privately retains exactly the unchanged `ConnectionLifetimeOwner`, one `DatabaseMetadataContractV1`, and one `TrustedCurrentInstallationEvidenceAssessment`. It retains no freshness classification, correspondence enum, normalized observation, assured/authenticated/installation-bound anchor, anchor contract or fields, path, wrapper bytes, loader state, or protection error. The normalized observation and any contained assured anchor are discarded after classification, including on success. Possession of the owner is the type-level proof that the approved classifier returned `Fresh` against the supplied normalized observation.
+
+For non-success, classifier borrows end before destruction and close. The classification is preserved while metadata, trusted assessment, normalized observation, and any assured anchor are discarded. The unchanged lifetime owner is then explicitly closed. Close success returns the original classification. `ProductionDatabaseFreshnessValidationCloseFailure` retains exactly `classification: DatabaseFreshnessClassification` and `owner: ConnectionLifetimeOwner`; consuming retry attempts only close, preserves both on repeated failure, and returns the original classification on eventual success. No metadata, assessment, trusted identity, observation, or anchor survives close failure. Closing the successful owner similarly discards metadata and the assessment before close and reuses `ProductionDatabaseConnectionCloseFailure`, which retains only lifetime ownership.
+
+The approved conceptual family is `ProductionDatabaseFreshnessValidationOutcome`, `ProductionDatabaseFreshnessValidationCloseFailure`, `ProductionDatabaseFreshnessValidationCloseRetryOutcome`, and `DatabaseFreshnessValidatedProductionDatabaseConnection`. Manual `Debug` is coarse: payload-free non-Fresh variant names may be shown, while owners and ownership-bearing failures are redacted. Formatting and ordinary logs reveal no identifier, generation, timestamp, metadata, evidence, trusted identity, anchor value, wrapper/protection state, path, DPAPI/HMAC detail, SQL/PRAGMA text, SQLite/native detail, handle, connection detail, or raw error chain. No ordinary success, non-success, or close-failure logging is required.
+
+The privacy-preserving placement is:
+
+```text
+production_database_connection_handoff/
+  live_metadata_and_header_validation/
+    database_evidence_correspondence_validation.rs
+    database_evidence_correspondence_validation/
+      database_freshness_validation.rs
+```
+
+The correspondence module declares and narrowly reexports its child. The child can destructure the correspondence owner without production visibility widening. No crate-root bridge, arbitrary metadata/assessment/`Connection` callback, connection ownership in `database_freshness_classification`, or database lifetime ownership in `installation_evidence_protection` is approved.
+
+Future live tests obtain genuine correspondence owners through the existing SQLCipher predecessor chain and provide synthetic preloaded normalized observations through existing contract, bound-anchor, assurance, and direct non-present-state seams. Only narrow `cfg(test)` close-injection and destruction-order seams may be added inside the nested module. Production constructors, visibility widening, arbitrary connection callbacks, forgeable freshness-success constructors, and classifier bypasses are prohibited.
+
+Success proves only that preceding guarded, keyed, readability, integrity, header, metadata, and correspondence stages remain represented; the pure classifier ran once with ephemeral `Corresponds`; the supplied observation was `Present` with an assured anchor; the three-way identities passed; both lineages were `Current`; and the same guarded lifetime remains owned. It does not prove cryptographic monotonic rollback prevention, absolute newest state, coordinated-rollback detection, startup authorization, operational opening or use, setup completion, migration state, physical DDL or wider schema correctness, recovery/replacement authority, backup/restore suitability, business-data correctness, or continued validity after external changes. No startup consumer or operational caller is designed here.
