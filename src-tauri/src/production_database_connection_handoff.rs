@@ -45,10 +45,14 @@ pub(crate) use live_metadata_and_header_validation::{
     DatabaseEvidenceCorrespondenceValidationCloseFailure,
     DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome,
     DatabaseEvidenceCorrespondenceValidationOutcome,
+    DatabaseFreshnessValidatedProductionDatabaseConnection,
     LiveMetadataAndHeaderValidatedProductionDatabaseConnection,
     LiveMetadataAndHeaderValidationCloseFailure, LiveMetadataAndHeaderValidationCloseRetryOutcome,
     LiveMetadataAndHeaderValidationError, LiveMetadataAndHeaderValidationOutcome,
-    validate_production_database_evidence_correspondence,
+    ProductionDatabaseFreshnessValidationCloseFailure,
+    ProductionDatabaseFreshnessValidationCloseRetryOutcome,
+    ProductionDatabaseFreshnessValidationOutcome,
+    validate_production_database_evidence_correspondence, validate_production_database_freshness,
     validate_production_database_live_metadata_and_headers,
 };
 

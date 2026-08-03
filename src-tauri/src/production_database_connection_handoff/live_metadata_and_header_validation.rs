@@ -25,7 +25,11 @@ pub(crate) use database_evidence_correspondence_validation::{
     DatabaseEvidenceCorrespondenceValidationCloseFailure,
     DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome,
     DatabaseEvidenceCorrespondenceValidationOutcome,
-    validate_production_database_evidence_correspondence,
+    DatabaseFreshnessValidatedProductionDatabaseConnection,
+    ProductionDatabaseFreshnessValidationCloseFailure,
+    ProductionDatabaseFreshnessValidationCloseRetryOutcome,
+    ProductionDatabaseFreshnessValidationOutcome,
+    validate_production_database_evidence_correspondence, validate_production_database_freshness,
 };
 
 const EXPECTED_APPLICATION_ID: i32 = 0x4348_4150;

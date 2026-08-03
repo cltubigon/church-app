@@ -18,6 +18,15 @@ use super::{
     LiveMetadataAndHeaderValidatedProductionDatabaseConnection,
 };
 
+mod database_freshness_validation;
+
+pub(crate) use database_freshness_validation::{
+    DatabaseFreshnessValidatedProductionDatabaseConnection,
+    ProductionDatabaseFreshnessValidationCloseFailure,
+    ProductionDatabaseFreshnessValidationCloseRetryOutcome,
+    ProductionDatabaseFreshnessValidationOutcome, validate_production_database_freshness,
+};
+
 pub(crate) struct DatabaseEvidenceCorrespondenceMismatch;
 
 impl fmt::Debug for DatabaseEvidenceCorrespondenceMismatch {
