@@ -242,8 +242,49 @@ The following gates apply only to separately approved future implementation task
 - Pure contract tests must cover non-`Copy`/non-unrestricted-`Clone` database-key ownership, redacted formatting, best-effort zeroization paths, and the complete metadata version-1 type contract without database I/O.
 - Pure metadata decoding and validation must cover exactly one canonical row; all fields; positive versions; non-negative UTC Unix milliseconds; storage class; nulls; missing, duplicate, partial, malformed, and unsupported values; exact lengths; and direct typed decoding. The `permanent_application_identifier` must be bounded canonical UTF-8 SQLite `TEXT`; `ApplicationDatabaseFormatIdentity` must be an exactly 16-byte SQLite `BLOB`, never text, and use exact typed equality. The other four 128-bit identifiers must be exactly 16-byte BLOBs, and both generations exactly 8-byte big-endian BLOBs.
 - Schema-creation tests must prove only the separately approved version-1 schema, singleton metadata row, `application_id = 0x43484150`, mirrored `user_version`, and fail-closed header/metadata disagreement. They must not be introduced with the pure-contract task.
-- Live metadata/header observation tests are the next future verification gate. They must remain separately scoped from the accepted readability-and-integrity evidence and from later correspondence, freshness, startup, setup, schema, migration, recovery, backup/restore, and operational authority. This documentation reconciliation does not choose the live query, failure taxonomy, observation order, header/metadata precedence, or owner details.
-- The metadata failure matrix must include absent/duplicate rows, nulls, partial rows, wrong classes and lengths, unsupported contract/schema versions, noncanonical application text, malformed 16-byte identifiers, malformed big-endian generations, invalid time, and header disagreement.
+- Live metadata/header observation tests are the next future verification gate. The architecture is approved, but there is no implementation, current test, passing evidence, manual runtime observation, or operational caller for this stage. Future tests must remain separately scoped from the accepted readability-and-integrity evidence and from later correspondence, freshness, startup, setup, schema creation, migration, recovery, backup/restore, replacement, and operational authority.
+
+### Future live metadata and header observation verification matrix
+
+Real encrypted SQLCipher fixtures must enter through the same guarded readability-and-integrity-validated ownership chain and cover:
+
+- correct `application_id`, matching `user_version`, exactly one canonical metadata row, successful `LiveMetadataAndHeaderValidatedProductionDatabaseConnection`, and consuming explicit close;
+- wrong `application_id` and immediate first-failed-stage precedence;
+- wrong `user_version` against supported validated metadata;
+- absent named relation;
+- present but empty relation;
+- duplicate rows, including a valid first row;
+- `NULL` representatives across integer, text, 16-byte BLOB, and 8-byte generation field families;
+- wrong storage classes across integer, text, 16-byte BLOB, and 8-byte generation field families;
+- short and long 16-byte BLOB values;
+- short and long 8-byte generation BLOB values;
+- invalid UTF-8 SQLite `TEXT`;
+- correctly represented unsupported metadata contract version;
+- correctly represented unsupported database schema version;
+- wrong canonical application identifier;
+- wrong database-format identity;
+- zero values for every identifier family;
+- zero installation and recovery/replacement generations;
+- negative creation timestamp;
+- supported schema metadata with a mismatching `user_version`;
+- missing required column or another non-preparable fixed-query state; and
+- source/behavior evidence that the adapter executes only the two fixed PRAGMAs and explicit 12-column `LIMIT 2` query, never filters by `singleton_id`, copies the first row before the second step, invokes `parse()` and `validate_structure()` exactly once each, and retains no separate header value on success.
+
+Private injected seams must cover states that the fixed valid statements cannot reliably produce:
+
+- header statement wrong column count;
+- metadata statement wrong column count;
+- header zero rows and extra rows;
+- metadata step failure before the first row;
+- metadata step failure during the second-step terminal check;
+- unavailable expected-column access;
+- close failure after every canonical primary category;
+- repeated consuming close-retry failure and eventual success; and
+- explicit close failure from the successful live-metadata owner after its metadata contract is discarded.
+
+Every test must assert the canonical taxonomy and exact first-failed-stage precedence: application-ID observation unavailable; wrong application ID; user-version observation unavailable; metadata preparation/query-startup unavailable; metadata stepping interruption or incomplete terminal state; missing row; duplicate rows; malformed storage class, UTF-8, parse, or non-version structural state; unsupported metadata contract version; unsupported database schema version; remaining structural invalidity as malformed; then user-version mismatch. Tests must prove that defects are not collected, `CloseFailed` is ownership-bearing rather than primary, temporary observations are discarded before close, close failures retain the original category plus the full connection/guard/inspection unit, and outward formatting reveals none of the prohibited live values or diagnostics.
+
+Fixture creation may use synthetic encrypted schemas, rows, and header assignments before the guarded read-only transition. That test-only preparation grants no production schema creation, header mutation, migration, repair, normalization, or other mutation authority. The live stage must fail closed on absence and must not claim physical DDL, constraints, indexes, triggers, object kind, wider product-schema correctness, correspondence, freshness, startup/setup authority, recovery, backup/restore, replacement, business-data correctness, or operational opening.
 - Pure correspondence tests must cover exact equality and each mismatch for application identifier, database-format identity, parish, installation, database-key generation, and setup-publication identifiers. Evidence format identity/version and timestamps must be shown incapable of authorizing correspondence or freshness.
 - Pure freshness tests must cover equal lineage, lower evidence, higher evidence, opposing movement, database/evidence/anchor mismatch, missing or unavailable anchor, ambiguity, and the documented coordinated-rollback limitation. They must not claim cryptographic monotonic rollback prevention.
 - Path/link/sidecar tests must cover the exact application-owned NTFS path and filename, reparse/symlink/junction/mount traversal, cloud placeholder, hard link, network/removable storage, stable final path and identity, race revalidation, unexpected sidecars, and initial WAL/SHM prohibition. Startup must be proven unable to delete or repair sidecars.
@@ -253,7 +294,7 @@ The following gates apply only to separately approved future implementation task
 - Authority tests must prove that persisted presence, evidence validation, path validation, key recovery, read-only opening, metadata decoding, integrity, correspondence, freshness, installation-state classification, startup authorization, operational opening, setup, migration, recovery, replacement, and destructive cleanup cannot substitute for one another.
 - Clean-machine release verification must run separately on supported Windows 10 x64 and Windows 11 x64 local-NTFS standard-user hosts. It must record pinned `rusqlite`, SQLCipher, OpenSSL, and lockfile identity; prove no system SQLCipher/OpenSSL dependency; and reject every unsupported platform/storage category. Release automation details remain deferred.
 
-Carlo must manually review the approval record; the metadata-only inspector versus the separate lifetime guard; the inspected proof, guard, SQLite handle, and owner identity/lifetime chain; the exact one-open flags and `win32` VFS; pre-key policy, one key application, and post-key query-only ordering; the bounded ordinary-Windows-open guarantee and exclusions; the distinct keyed-but-unvalidated and readability-and-integrity-validated results; the exact cipher-then-quick-check implementation and absence of a separate readability query; the four combined coarse categories; first-cipher-row disposal and exact quick-check row shape; fail-closed incompletion without active cancellation; same-connection/no-explicit-transaction policy; primary-category preservation on close failure; synchronous whole-file workload acceptance only while no operational caller exists; the still-later live metadata/header, correspondence/freshness, and startup-authority boundaries; and confirmation that no implementation entered this documentation task.
+Carlo must manually review the approval record; the metadata-only inspector versus the separate lifetime guard; the inspected proof, guard, SQLite handle, and owner identity/lifetime chain; the exact one-open flags and `win32` VFS; pre-key policy, one key application, and post-key query-only ordering; the bounded ordinary-Windows-open guarantee and exclusions; the distinct keyed-but-unvalidated and readability-and-integrity-validated results; the exact cipher-then-quick-check implementation and absence of a separate readability query; the four implemented readability categories; first-cipher-row disposal and exact quick-check row shape; fail-closed incompletion without active cancellation; same-connection/no-explicit-transaction policy; primary-category preservation on close failure; synchronous whole-file workload acceptance only while no operational caller exists; the approved future live-observation order, two PRAGMAs, explicit query, `LIMIT 2` policy, storage-class adapter, canonical taxonomy and precedence, owner and close-failure model, redaction, and authority limits; the still-later correspondence/freshness and startup-authority boundaries; the absence of current live-stage passing evidence; and confirmation that no implementation entered this documentation task.
 
 ## Environment-dependent and manual checks
 

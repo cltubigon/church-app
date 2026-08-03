@@ -168,7 +168,7 @@ The singleton table is named `church_app_database_metadata` and contains exactly
 | `setup_publication_identifier` | `BLOB`; exactly 16 bytes |
 | `database_created_at` | non-negative UTC Unix milliseconds in `INTEGER`; diagnostic only |
 
-The database-format identity is never UTF-8, hex, UUID text, Base64, a numeric reinterpretation, alternate spelling, hash, prefix, or fingerprint. SQLite `application_id` is `0x43484150`. SQLite `user_version` mirrors `database_schema_version`, while metadata remains authoritative; disagreement fails as malformed or unsupported state and is never auto-repaired.
+The database-format identity is never UTF-8, hex, UUID text, Base64, a numeric reinterpretation, alternate spelling, hash, prefix, or fingerprint. SQLite `application_id` is `0x43484150`. SQLite `user_version` mirrors `database_schema_version`, while metadata remains authoritative. A wrong fixed application ID, unsupported correctly represented metadata version, malformed representation, and supported metadata/user-version disagreement have distinct fail-closed categories under the approved future live-observation boundary; no state is auto-repaired.
 
 ### Correspondence, freshness, and authority
 
@@ -204,4 +204,38 @@ Transactions use rollback-journal `DELETE`, `synchronous=FULL`, explicit transac
 
 Coarse errors outside this validation stage remain separately scoped. Within this stage the only primary categories are `EncryptedDatabaseAuthenticationOrCipherIntegrityFailed`, `SQLiteReadabilityOrIntegrityFailed`, `ValidationUnavailable`, and `ValidationInterruptedOrIncomplete`; wrong key versus cipher-page corruption and corrupt versus unsupported SQLite content are intentionally not split. Later metadata, correspondence, freshness, sidecar, and operational errors remain separate. No error exposes a path, SQL or PRAGMA text, result diagnostic, key, identifier or identity, generation, metadata value, DPAPI data, native status, raw handle, raw error chain, username, or profile directory.
 
-The next separately scoped implementation boundary is live metadata/header observation over the opaque readability-and-integrity-validated owner. No live metadata table query, row-count or storage-class enforcement, `application_id`/`user_version` observation, or live metadata structural validation exists yet. This document does not choose that boundary's SQL, failure taxonomy, observation order, header/metadata precedence, or owner details. Database/evidence correspondence, live freshness classification, startup authorization, operational database opening, schema, migration, portable recovery, backup/restore, replacement, frontend, IPC, Tauri commands, and destructive operations remain later separately scoped work. The validated owner has no operational caller.
+### Approved live metadata and header observation (not implemented)
+
+The next separately scoped implementation boundary is approved but absent. It consumes `ReadabilityAndIntegrityValidatedProductionDatabaseConnection` and uses only fixed operations on its same privately retained connection. It first prepares and fully observes `PRAGMA main.application_id`, requiring one result column, exactly one row, SQLite `INTEGER`, signed-32-bit representability, and normal terminal end-of-stream. It then compares with `0x43484150` and stops immediately with `WrongApplicationId` on mismatch. Only after that success does it prepare and fully observe `PRAGMA main.user_version` under the same strict result-shape policy, retaining the signed value temporarily.
+
+It then prepares and executes exactly:
+
+```sql
+SELECT
+    singleton_id,
+    metadata_contract_version,
+    database_schema_version,
+    permanent_application_identifier,
+    database_format_identity,
+    parish_identifier,
+    installation_identifier,
+    installation_generation,
+    recovery_replacement_generation,
+    database_key_generation_identifier,
+    setup_publication_identifier,
+    database_created_at
+FROM main.church_app_database_metadata
+LIMIT 2
+```
+
+The metadata statement must expose exactly 12 result columns. Normal completion with no first row is `MetadataRowMissing`. The adapter copies the first row's 12 values into one private owned raw observation before stepping again because live row references must not outlive their row-stream step. A second row is `DuplicateMetadataRows`; normal end after the first proves exactly one row; a stepping failure is `MetadataObservationInterruptedOrIncomplete`. Fixed `LIMIT 2` distinguishes zero, exactly one, and more than one row without unbounded enumeration. The query does not filter on `singleton_id = 1`, because such a predicate could hide additional noncanonical rows.
+
+The adapter preserves exact SQLite storage classes without casts or `typeof()`: `INTEGER` maps to `Integer(i64)`; `TEXT` undergoes strict UTF-8 validation before `Text(&str)`; `BLOB` maps to `Blob(&[u8])`; `NULL` maps to `Null`; and `REAL` is `MalformedMetadata`. The adapter constructs exactly one `RawDatabaseMetadataRow`, calls its existing `parse()` exactly once, calls `validate_structure()` exactly once, and does not duplicate pure field validation. It finally compares the validated metadata `database_schema_version` with the observed `user_version`; equality returns opaque `LiveMetadataAndHeaderValidatedProductionDatabaseConnection`. No other query, PRAGMA, schema introspection, dynamic SQL, cast, `typeof()`, or arbitrary content access is approved.
+
+The success owner privately retains the unchanged `ConnectionLifetimeOwner` and one owned `DatabaseMetadataContractV1`. The accepted application ID is fixed and the accepted user version duplicates the validated metadata schema version, so neither header value remains separately stored. The owner exposes only consuming explicit close and later separately approved fixed consuming transitions. It exposes no `Connection`, arbitrary SQL, callback over `Connection`, detachable proof, raw header, raw metadata observation, path, handle, identity, or diagnostic.
+
+Implementation belongs in a sealed private child module beneath `production_database_connection_handoff`. The private visibility of `ConnectionLifetimeOwner`, `Connection`, the guard, the inspection proof, and close helpers remains unchanged. A generic connection callback or crate-root sibling bridge is prohibited unless a later implementation report proves the child-module approach impossible.
+
+On every primary failure, `Rows` and `Statement` are released before close, and temporary header values, owned raw observations, parsed metadata, and partially validated metadata are discarded. Explicit close success returns the primary category. Close failure retains that same category plus the complete connection/guard/inspection lifetime unit in an opaque consuming retry owner, and repeated failures preserve both. Explicit close of a successfully validated live-metadata owner first discards its metadata contract; if close fails, only the complete connection/guard/inspection lifetime unit remains in the close-retry owner.
+
+Success proves only the two exact header observations, correct `application_id`, exactly one metadata row, exact storage-class representations, strict UTF-8, success of the existing pure parse and structural validation, `user_version` agreement with the supported metadata schema version, and continued ownership of the same guarded readability-and-integrity-validated connection. Production only reads the already-existing named relation. No live implementation or passing live-stage evidence exists. The stage validates no physical DDL, constraints, indexes, triggers, object kind, wider product schema, database/evidence correspondence, freshness, startup or operational authorization, setup completion, migration status, recovery, backup/restore suitability, replacement authority, business data, or operational opening. All of those later boundaries remain separately scoped, and the current validated owner still has no operational caller.

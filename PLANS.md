@@ -6,7 +6,7 @@ Active multi-stage initiative. Carlo has explicitly approved the bounded product
 
 ## 2. Authority and objective
 
-The active objective is to preserve the approved typed trust-chain sequence while recording the completed readability-and-integrity transition and keeping its authority narrow. The next separately scoped implementation boundary is live metadata/header observation over the opaque readability-and-integrity-validated owner. Its design remains outside this documentation reconciliation; correspondence, freshness, schema, migration, setup/startup integration, backup/restore, recovery, replacement, frontend behavior, IPC, Tauri commands, and operational use remain later separate boundaries.
+The active objective is to preserve the approved typed trust-chain sequence while recording the completed readability-and-integrity transition and keeping its authority narrow. Carlo has now approved the architecture, but not implementation, of the next consuming boundary: live metadata and SQLite-header observation over the opaque readability-and-integrity-validated owner. This documentation reconciliation records that exact future transition before implementation begins. Correspondence, freshness, schema creation, migration, setup/startup integration, backup/restore, recovery, replacement, frontend behavior, IPC, Tauri commands, and operational use remain later separate boundaries.
 
 ## 3. Locked operational decisions relevant to the initiative
 
@@ -26,15 +26,15 @@ Keep database-key ownership, metadata contracts, metadata decoding, corresponden
 
 ## 6. Active stage
 
-The guarded read-only SQLCipher connection handoff and its consuming readability-and-integrity validation transition are complete and accepted. The handoff composes the existing successful metadata-only inspection proof, a separate connection-lifetime write guard, guard/proof identity binding, one read-only path-based SQLite/SQLCipher open, SQLite-handle/proof identity binding, connection hardening, one key application, post-key query-only enforcement, and opaque keyed-but-unvalidated ownership. The consuming transition runs the two fixed checks on that same retained connection and returns an opaque readability-and-integrity-validated owner. Both stages preserve explicit close-failure ownership. Live metadata/header observation is the next separately scoped boundary; correspondence, freshness, schema, and operational startup/setup authority remain later stages.
+The guarded read-only SQLCipher connection handoff and its consuming readability-and-integrity validation transition are complete and accepted. The handoff composes the existing successful metadata-only inspection proof, a separate connection-lifetime write guard, guard/proof identity binding, one read-only path-based SQLite/SQLCipher open, SQLite-handle/proof identity binding, connection hardening, one key application, post-key query-only enforcement, and opaque keyed-but-unvalidated ownership. The consuming transition runs the two fixed checks on that same retained connection and returns an opaque readability-and-integrity-validated owner. Both stages preserve explicit close-failure ownership. The approved but unimplemented next stage consumes that owner, strictly observes the two fixed SQLite headers and exactly one fixed metadata-row query, reuses the existing pure parser and structural validator, enforces header/metadata agreement, and returns an opaque live-metadata-and-header-validated owner. Correspondence, freshness, schema creation, and operational startup/setup authority remain later stages.
 
 ## 7. Allowed scope
 
-Documentation-only reconciliation of the approved database readability-and-integrity validation architecture in `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Existing connection-handoff and installation-evidence decisions and repository safeguards remain unchanged.
+Documentation-only reconciliation of the approved future live database metadata and SQLite-header observation architecture in `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Existing connection-handoff, readability-and-integrity, and installation-evidence decisions and repository safeguards remain unchanged.
 
 ## 8. Prohibited scope
 
-This documentation reconciliation authorizes no code, dependency, schema or migration, database execution, database opening or VFS/path adapter, setup/startup/recovery integration, backup/restore, Tauri command, frontend change, generated inventory, application runtime, database creation, or destructive operation. The two fixed PRAGMA strings describe the committed implementation and are not executed by this documentation task.
+This documentation reconciliation authorizes no code, test, dependency, schema or migration, SQL or PRAGMA execution, database opening or VFS/path adapter, setup/startup/recovery integration, backup/restore, replacement, Tauri command, IPC, frontend change, generated inventory, application runtime, database creation, header mutation, or destructive operation. The approved future statements are recorded only and are not executed by this documentation task.
 
 ## 9. Dependency approvals
 
@@ -105,6 +105,7 @@ The accepted Windows production dependency is exactly `rusqlite = { version = "=
 - [x] Add and accept the private Windows-only raw-key application primitive over `&GenerationBoundDatabaseKey`, with exact fixed encoding, one `sqlite3_key` call, `SQLITE_OK`-only success, and coarse failure.
 - [x] Implement and accept the guarded read-only SQLCipher connection handoff without validation, schema, or startup/setup integration.
 - [x] Implement and accept the database readability-and-integrity validation transition over the opaque keyed-but-unvalidated owner using only `PRAGMA cipher_integrity_check` followed by `PRAGMA main.quick_check(1)`.
+- [x] Approve and canonically document, without implementing, the next live metadata and SQLite-header observation architecture.
 
 ## 11. Implemented readability-and-integrity boundary
 
@@ -120,9 +121,45 @@ On validation failure, explicit close is attempted after the row stream and stat
 
 Carlo accepts that `cipher_integrity_check` may synchronously scan the whole file with work proportional to database pages. This stage introduces no production database-size ceiling and makes no bounded-latency or active-cancellation claim. That is acceptable only because the boundary has no operational caller. Operational integration must later define database-size limits, execution-time expectations, responsiveness, and cancellation policy.
 
-The next separately scoped implementation boundary is live metadata/header observation over the opaque readability-and-integrity-validated owner. This reconciliation does not design its queries, failure taxonomy, header/metadata precedence, ordering, or owner composition. Correspondence, freshness, startup/setup integration, schema, migrations, recovery, backup/restore, replacement, frontend, IPC, Tauri commands, and operational callers remain later separately approved work.
+The next separately scoped implementation boundary is the approved live metadata and SQLite-header observation transition over the opaque readability-and-integrity-validated owner. Correspondence, freshness, startup/setup integration, schema creation, migrations, recovery, backup/restore, replacement, frontend, IPC, Tauri commands, and operational callers remain later separately approved work.
 
-## 12. Discoveries
+## 12. Approved live metadata and SQLite-header observation boundary (not implemented)
+
+The future consuming transition starts from `ReadabilityAndIntegrityValidatedProductionDatabaseConnection` and performs only this first-failed-stage sequence: prepare and fully observe `PRAGMA main.application_id`; require one result column, exactly one row, SQLite `INTEGER`, signed-32-bit representability, and normal terminal completion; compare with `0x43484150` and fail immediately with `WrongApplicationId` on mismatch; then apply the same strict shape policy to `PRAGMA main.user_version` and retain that value temporarily. It next prepares and executes exactly this fixed query:
+
+```sql
+SELECT
+    singleton_id,
+    metadata_contract_version,
+    database_schema_version,
+    permanent_application_identifier,
+    database_format_identity,
+    parish_identifier,
+    installation_identifier,
+    installation_generation,
+    recovery_replacement_generation,
+    database_key_generation_identifier,
+    setup_publication_identifier,
+    database_created_at
+FROM main.church_app_database_metadata
+LIMIT 2
+```
+
+The statement must expose exactly 12 result columns. Normal zero-row completion is `MetadataRowMissing`. The first row's values are copied into a private owned raw observation before stepping again. A second row is `DuplicateMetadataRows`; normal completion after the first proves exactly one row; a step failure is `MetadataObservationInterruptedOrIncomplete`. `LIMIT 2` is approved because it distinguishes zero, exactly one, and more than one row without unbounded enumeration. The query never filters on `singleton_id = 1`, because that could hide additional noncanonical rows.
+
+The live adapter preserves exact storage classes only: `INTEGER` becomes `Integer(i64)`; `TEXT` undergoes strict UTF-8 validation before `Text(&str)`; `BLOB` becomes `Blob(&[u8])`; `NULL` becomes `Null`; and `REAL` is `MalformedMetadata`. It constructs one `RawDatabaseMetadataRow`, invokes `parse()` exactly once, invokes `validate_structure()` exactly once, then compares the validated metadata `database_schema_version` with the observed `user_version`. Equality returns the future opaque `LiveMetadataAndHeaderValidatedProductionDatabaseConnection`. No other query, PRAGMA, schema introspection, dynamic SQL, cast, `typeof()`, or arbitrary content access is approved.
+
+The canonical primary categories are `HeaderObservationUnavailable`, `WrongApplicationId`, `MetadataObservationUnavailable`, `MetadataObservationInterruptedOrIncomplete`, `MetadataRowMissing`, `DuplicateMetadataRows`, `MalformedMetadata`, `UnsupportedMetadataContractVersion`, `UnsupportedDatabaseSchemaVersion`, and `UserVersionMismatch`. `CloseFailed` is an ownership-bearing result, not a primary category. Correctly represented metadata contract or schema versions other than 1 map to their respective unsupported category; wrong storage class or parse range is malformed; a wrong fixed application ID has its dedicated category; and supported validated metadata that disagrees with `user_version` is `UserVersionMismatch`. Unsupported versions precede the user-version comparison. There is no automatic repair, assignment, normalization, or fallback.
+
+The exact precedence is: application-ID observation unavailable; wrong application ID; user-version observation unavailable; metadata preparation/query-startup unavailable; metadata stepping interruption or incomplete terminal state; missing row; duplicate rows; malformed storage class, UTF-8, parse, or non-version structural state; unsupported metadata contract version; unsupported database schema version; remaining structural invalidity as malformed; then user-version mismatch. Observation stops at the first failure and never collects or exposes multiple defects.
+
+The future success owner privately retains the unchanged `ConnectionLifetimeOwner` and one owned `DatabaseMetadataContractV1`; it does not retain `application_id` or `user_version` separately. It exposes only consuming explicit close and later separately approved fixed consuming transitions. Implementation belongs in a sealed private child module beneath `production_database_connection_handoff`; it must not widen the visibility of the lifetime owner, connection, guard, inspection proof, or close helpers, and must not introduce a generic connection callback or crate-root sibling bridge unless a later implementation report proves the child-module approach impossible.
+
+Every primary failure releases `Rows` and `Statement`, discards temporary header values, raw observations, parsed metadata, and partially validated metadata, then explicitly closes. Close success returns the primary category. Close failure retains that same category plus the full connection/guard/inspection lifetime unit across consuming retries. Explicit close of the successful live-metadata owner first discards its retained metadata contract; close failure then retains only the full connection/guard/inspection lifetime unit.
+
+Production reads only the already-existing named relation. Tests may later create synthetic schemas, rows, and header values, but no production schema creation, header mutation, migration, repair, normalization, or mutation is authorized. Absence fails closed. This stage validates neither physical DDL, constraints, indexes, triggers, object kind, the wider product schema, correspondence, freshness, startup or operational authority, setup completion, migration status, recovery, backup/restore suitability, replacement authority, business data, nor operational opening.
+
+## 13. Discoveries
 
 The accepted plaintext remains exactly 164 bytes. The envelope layout is a 30-byte header, unchanged plaintext at `30..194`, and the full 32-byte HMAC-SHA-256 tag at `194..226`. The exact authentication-input region is `0..194`; the tag is excluded from its own computation. Version 1 has no nonce, salt, padding, reserved bytes, extension area, negotiation, fallback, or trailing data.
 
@@ -142,36 +179,36 @@ On the observed Windows host, a retained validated handle to one unique temporar
 
 On the observed Windows host, the accepted `LocalFixedCandidate` prerequisite and retained root handle yielded the exact volume-GUID device name. One access-zero, read/write-shared volume open succeeded, followed by exactly one descriptor-header and one bounded full-descriptor `IOCTL_STORAGE_QUERY_PROPERTY` call. The installed binding layout version matched, the descriptor was non-removable, its bus was in the approved candidate family, and the private classifier reported only `DevicePropertyCandidate`. No hot-plug query ran. This observation does not prove device non-removability, internal placement, physical locality, virtual or remote backing absence, durability, production suitability, or any application authority.
 
-## 13. Decisions and authority classifications
+## 14. Decisions and authority classifications
 
 - Carlo-approved: permanent identifier and display name; current-account, non-elevated ordinary-use direction with a dedicated standard Windows account optional and recommended for a parish-owned shared workstation; per-user application-data direction; application-owned-directory-only operation; explicit setup-only creation; no silent startup creation; immutable random parish identifier direction; temporary Windows SQLCipher feasibility; future verified restore condition; and the bounded SQLCipher Community Edition production database, independent database-key, metadata, correspondence, freshness, opening, integrity, path/sidecar, journal/durability, migration, support, redaction, and authority-separation package.
 - Implemented foundation: all previously accepted foundations plus operating-system-backed authentication-material generation, HMAC-SHA-256 envelope authentication, current-user in-memory DPAPI protection for separate key and evidence objects, strict wrapper and key-payload codecs, native clear-before-free handling, and a typed generation-match transition before plaintext release. Protection remains separate from persistence, structural validation, database cross-checking, setup, startup, and operational evidence.
 - Historical technical experiment: `sqlcipher_windows_feasibility` and its former development-dependency state remain Windows test-only evidence of the earlier candidate evaluation.
 - Implemented and accepted production foundation: the exact Windows production `rusqlite` configuration, private raw-key application primitive, metadata-only production database-file inspection, guarded read-only connection handoff, and consuming readability-and-integrity validation transition. The repository retains distinct opaque keyed-but-unvalidated and readability-and-integrity-validated owners; neither provides startup or operational authority.
 - Approved but not fully implemented: the larger bounded architecture package. Deferred implementation includes live metadata/header observation and decoding, database/evidence correspondence, live freshness classification, metadata schema creation, portable recovery, migrations, backup/restore, setup/startup/recovery authority, replacement, destructive retention or cleanup, and release automation.
-- Separate implementation scoping is next required for live metadata/header observation. Separate later scoping remains required for correspondence/freshness composition, metadata schema creation, portable recovery envelope, migrations, backup/restore, setup/startup/recovery authority, database or anchor replacement, and destructive retention or cleanup.
+- The live metadata/header observation architecture is approved but not implemented; a separate implementation task remains required. Separate later scoping remains required for correspondence/freshness composition, metadata schema creation, portable recovery envelope, migrations, backup/restore, setup/startup/recovery authority, database or anchor replacement, and destructive retention or cleanup.
 
-## 14. Validation status
+## 15. Validation status
 
 The accepted earlier proofs remain recorded in history. Clean CI for commit `547527a6ff7332ce3256eeb28704bbdf76913f93` (`feat(database): validate SQLCipher readability and integrity`) passed frontend formatting, lint, type-check, and tests; Rust formatting and Clippy with warnings denied; and the locked Rust suite with 630 passed, 0 failed, and 1 ignored. All new tests passed, with no new test ignored or filtered out. Focused accepted totals were 29 `production_database_connection_handoff` tests, 18 `production_database_file` tests, and 7 `sqlcipher_database_key_application` tests, for 54 focused database tests. The single ignored test remains the unrelated pre-existing manually rooted USB controlled-host test. This evidence does not include a manual application or production runtime flow, live metadata/header observation, correspondence, freshness, or operational database opening. The accepted controlled-host evidence remains unchanged; the USB row remains failed and incomplete.
 
-## 15. Manual testing status
+## 16. Manual testing status
 
 The DPAPI hardening manual Windows application regression remains accepted. The current baseline observation used exactly: `Current Windows account, non-elevated session; administrator-group membership not established.` It is not evidence of dedicated-standard-account execution or administrator-group membership. Windows 10 and a successful manually selected USB flash observation remain pending. Two manually rooted USB attempts have run; the accepted diagnostic rerun stopped at unavailable directory attribute/tag information before classification, cleaned its exact root successfully, and left no entry in the manual leftover-folder check.
 
-## 16. Completed work
+## 17. Completed work
 
 All prior completed history remains accepted. The production foundation includes the guarded read-only connection handoff and its consuming readability-and-integrity transition. After the existing successful metadata-only inspection, a private `ConnectionLifetimeWriteGuard` opens the inspected database with `FILE_READ_ATTRIBUTES | FILE_READ_DATA`, `FILE_SHARE_READ`, `OPEN_EXISTING`, and `FILE_FLAG_OPEN_REPARSE_POINT`; matches its identity to the inspection proof; performs exactly one application-level `Connection::open_with_flags_and_vfs(..., "win32")` using read-only, full-mutex, private-cache, and no-follow flags; obtains SQLite's borrowed main-database Windows handle with `SQLITE_FCNTL_WIN32_GET_HANDLE`; and matches that handle to the same proof. It then applies the five-second busy timeout, disables extension loading, enables defensive mode, disables trusted schema, enables no-checkpoint-on-close, disables attach-create and attach-write, confirms the main database is read-only, applies the existing `GenerationBoundDatabaseKey` exactly once, and only then enables and verifies query-only. The keyed owner can then be consumed by the fixed cipher-integrity and quick-check sequence, which returns only an opaque readability-and-integrity-validated owner. The same `Connection`, guard, and proof remain together, including across close failure, and only consuming close or close-retry transitions are exposed. There is no operational caller, Tauri command, frontend, or IPC surface.
 
-## 17. Remaining risks
+## 18. Remaining risks
 
 The keyed handoff alone does not establish key correctness, readability, or integrity. The succeeding validated owner establishes only completion of the implemented cipher-integrity and limited SQLite quick-check contract; it does not establish metadata table existence, metadata row validity, `application_id`, `user_version`, schema-contract validity, correspondence, freshness, startup/setup authority, migration authority, recovery authority, backup/restore authority, or operational database use. The cipher operation may synchronously scan the whole file without a production size ceiling, bounded-latency guarantee, or active cancellation; that limitation is accepted only while there is no operational caller. Read-only/no-create applies to the main database file; later SQLite operations may still involve auxiliary-file behavior. `SQLITE_OPEN_NOFOLLOW` and query-only are defense in depth, not the primary Windows reparse or read-only guarantees. While the verified guard remains open, ordinary Windows filesystem opens requesting incompatible write or delete access to the guarded file object are refused under normal Windows sharing semantics; this does not protect against pre-guard mutation, kernel-mode activity, filesystem filters, raw-volume access, privileged bypass, storage or hardware faults, or operating-system/filesystem defects. First-time creation, schema, migrations, backup, restore, recovery, replacement, and frontend/Tauri exposure remain absent. The existing controlled-host risks also remain.
 
-## 18. Next smallest safe step
+## 19. Next smallest safe step
 
-After Carlo reviews this reconciliation, separately scope live metadata/header observation over `ReadabilityAndIntegrityValidatedProductionDatabaseConnection`. This documentation task does not choose its SQL, failure taxonomy, observation order, header/metadata precedence, or owner details. It must remain distinct from database/evidence correspondence, freshness, startup/setup integration, operational opening, schema creation, migrations, backup/restore, recovery, replacement, Tauri commands, IPC, and frontend exposure.
+After Carlo reviews this reconciliation, implement the approved live metadata/header observation architecture over `ReadabilityAndIntegrityValidatedProductionDatabaseConnection` as a separate task. It must remain distinct from database/evidence correspondence, freshness, startup/setup integration, operational opening, schema creation, migrations, backup/restore, recovery, replacement, Tauri commands, IPC, and frontend exposure.
 
-## 19. Links
+## 20. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)
