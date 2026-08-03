@@ -284,11 +284,13 @@ The tests assert the canonical taxonomy and exact first-failed-stage precedence:
 
 Fixture creation used synthetic encrypted schemas, rows, and header assignments before the guarded read-only transition. That test-only preparation grants no production schema creation, header mutation, migration, repair, normalization, or other mutation authority. The live stage fails closed on absence and makes no claim of physical DDL, constraints, indexes, triggers, object kind, wider product-schema correctness, correspondence, freshness, startup/setup authority, recovery, backup/restore, replacement, business-data correctness, or operational opening.
 
-## Approved identity-only correspondence verification gate (not implemented)
+## Accepted identity-only database/evidence correspondence evidence
 
-Database/evidence identity correspondence is the approved next separately scoped implementation gate. It consumes `LiveMetadataAndHeaderValidatedProductionDatabaseConnection` and exactly `TrustedCurrentInstallationEvidenceAssessment`, and success returns opaque `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection`. The implementation and the evidence below do not yet exist; there is no passing correspondence evidence and no operational caller.
+The consuming identity-only correspondence transition is implemented and accepted at commit `8b880621e9d7cf9dcff30eaab31f84958926d024` with subject `feat(database): validate evidence correspondence`. The `Bootstrap validation` workflow run `30786193482` (run number 17) completed successfully, and its workflow and job conclusions were both success. Frontend formatting, lint, type-check, and all 5 frontend tests passed; Rust formatting and Clippy with warnings denied passed; and the locked Rust suite reported 655 passed, 0 failed, and 1 ignored. All 10 new correspondence tests passed, with no correspondence test ignored or filtered out. The sole ignored test remains the unrelated pre-existing manually rooted USB controlled-host test.
 
-Pure correspondence coverage must continue to prove:
+The implemented transition consumes `LiveMetadataAndHeaderValidatedProductionDatabaseConnection` and exactly `TrustedCurrentInstallationEvidenceAssessment`, invokes the existing pure classifier exactly once, and returns opaque `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` on success. Both inputs are consumed. There is no operational caller, so this automated evidence is not manual application or production runtime validation and no manual application/runtime flow applies.
+
+Accepted pure correspondence evidence covers:
 
 - an exact full match corresponds;
 - parish mismatch is the aggregate mismatch;
@@ -303,10 +305,10 @@ Pure correspondence coverage must continue to prove:
 
 If the validated version-1 constructors make noncanonical permanent-application or database-format fixtures unreachable, source-boundary evidence may supplement those cases; validators must not be weakened to create impossible fixtures.
 
-Live composition coverage must prove:
+Accepted live composition and ownership evidence covers:
 
 - a real accepted live metadata/header owner plus matching synthetic trusted assessment succeeds;
-- the success owner is opaque, manually redacted, consumes normally, and closes normally;
+- the success owner is opaque, manually redacted, consumes normally, closes normally, and performs exact temporary-root cleanup;
 - every constructible identity mismatch yields only `DatabaseEvidenceCorrespondenceMismatch`;
 - simultaneous mismatches still yield that same category;
 - differing generations and timestamps do not fail correspondence;
@@ -319,9 +321,11 @@ Live composition coverage must prove:
 - manual `Debug` for the success owner, mismatch, initial outcome, close-failure owner, and retry outcome is exactly coarse and does not delegate to retained values; and
 - no operational caller, Tauri command, IPC, or frontend surface exists.
 
-Real SQLCipher predecessor fixtures are required for the matching composition, normal consuming close, constructible single-field mismatches, and generation/timestamp exclusions. Private injected lifetime owners may test destruction order, close failure, repeated retry, eventual close, multiple mismatches, and redaction states that cannot be reliably induced through the real engine.
+Real SQLCipher predecessor fixtures cover matching composition, normal consuming close, exact temporary-root cleanup, parish mismatch, installation mismatch, database-key-generation mismatch, setup-publication mismatch, simultaneous mismatches, differing installation generation, differing recovery/replacement generation, differing evidence timestamp, and combined generation/timestamp differences.
 
-Source-boundary checks must prove that the production correspondence adapter:
+Accepted deterministic injected-ownership evidence covers metadata and trusted-assessment destruction before mismatch close; successful mismatch close; failed mismatch close with complete lifetime ownership retention; repeated close failure; eventual successful retry returning the original mismatch; successful-owner metadata and assessment destruction before close; and successful-owner close failure retaining only lifetime ownership.
+
+Accepted source-boundary checks prove that the production correspondence adapter:
 
 - invokes `classify_database_metadata_correspondence` exactly once;
 - contains no SQL or `PRAGMA`;
@@ -334,7 +338,7 @@ Source-boundary checks must prove that the production correspondence adapter:
 - adds no Tauri command, IPC, frontend surface, unsafe block, or FFI; and
 - requires no dependency or Cargo feature change.
 
-Test construction may add only this future seam in `installation_evidence_protection/trusted_current_installation_evidence_assessment.rs`:
+Test construction uses only this `cfg(test)` seam in `installation_evidence_protection/trusted_current_installation_evidence_assessment.rs`:
 
 ```rust
 #[cfg(test)]
@@ -343,15 +347,15 @@ pub(crate) fn trusted_current_installation_evidence_assessment_for_test(
 ) -> TrustedCurrentInstallationEvidenceAssessment
 ```
 
-The helper must derive `TrustedCurrentInstallationIdentity` internally through the existing pure derivation, accept no independently supplied identity, remain absent from production compilation, perform no filesystem, DPAPI, HMAC, loading, or parsing, and confer no production authority. A `cfg(test)`-only parent reexport is permitted only if required.
+The helper derives `TrustedCurrentInstallationIdentity` internally through the existing pure derivation, accepts no independently supplied identity, remains absent from production compilation, performs no filesystem access, DPAPI, HMAC, loading, or parsing, and confers no production authority.
 
-The conceptual outcome family is `DatabaseEvidenceCorrespondenceMismatch`, `DatabaseEvidenceCorrespondenceValidationOutcome`, `DatabaseEvidenceCorrespondenceValidationCloseFailure`, `DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome`, and `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection`. Tests must prove that the first outcome distinguishes success ownership, mismatch after successful close, and mismatch with retained close-failure ownership; `CloseFailed` is not a primary category.
+The implemented outcome family is `DatabaseEvidenceCorrespondenceMismatch`, `DatabaseEvidenceCorrespondenceValidationOutcome`, `DatabaseEvidenceCorrespondenceValidationCloseFailure`, `DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome`, and `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection`. Tests prove that the first outcome distinguishes success ownership, mismatch after successful close, and mismatch with retained close-failure ownership; `CloseFailed` is not a primary category.
 
-No build, test, formatter, Clippy, database, SQLCipher, DPAPI, or runtime command has been run for this documentation approval. Passing evidence must be recorded only after separately approved implementation and validation.
+The accepted source-boundary evidence also confirms private nested placement beneath `live_metadata_and_header_validation`; no `Connection` exposure, arbitrary SQL callback, detachable proof, crate-root bridge, unsafe code, FFI, dependency, Cargo feature, schema work, migration, public API, operational caller, frontend, IPC, or Tauri command was introduced. Correspondence success establishes none of equal lineage, freshness, rollback resistance, startup authorization, operational database opening, setup completion, migration status, physical DDL, relation object kind, wider product-schema correctness, recovery fitness, backup/restore suitability, replacement authority, or business-data correctness.
 
 ## Remaining production database verification gates
 
-- Pure freshness tests must cover equal lineage, lower evidence, higher evidence, opposing movement, database/evidence/anchor mismatch, missing or unavailable anchor, ambiguity, and the documented coordinated-rollback limitation. They must not claim cryptographic monotonic rollback prevention.
+- Freshness composition is the next future verification gate. It will consume `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` and compose it with the existing local-anchor freshness foundation; its exact inputs, anchor loading, live taxonomy, success ownership, close behavior, placement, operational caller, and startup-authority integration require separate architecture review before verification criteria are defined.
 - Schema-creation tests must prove only the separately approved version-1 schema, singleton metadata row, `application_id = 0x43484150`, mirrored `user_version`, and fail-closed header/metadata disagreement. They remain separate from live read-only validation and correspondence.
 - Path/link/sidecar tests must cover the exact application-owned NTFS path and filename, reparse/symlink/junction/mount traversal, cloud placeholder, hard link, network/removable storage, stable final path and identity, race revalidation, unexpected sidecars, and initial WAL/SHM prohibition. Startup must be proven unable to delete or repair sidecars.
 - Transaction-policy tests must cover rollback-journal `DELETE`, `synchronous=FULL`, explicit transactions, `secure_delete=ON`, `auto_vacuum=NONE`, no automatic journal switch, no automatic VACUUM, and no WAL checkpoint behavior.
@@ -362,9 +366,9 @@ No build, test, formatter, Clippy, database, SQLCipher, DPAPI, or runtime comman
 
 The existing `sqlcipher_windows_temporary_encryption_feasibility` test remains historical Windows test-only experiment evidence.
 
-Carlo must manually review the approval record; the metadata-only inspector versus the separate lifetime guard; the inspected proof, guard, SQLite handle, and owner identity/lifetime chain; the exact one-open flags and `win32` VFS; pre-key policy, one key application, and post-key query-only ordering; the bounded ordinary-Windows-open guarantee and exclusions; the distinct keyed-but-unvalidated, readability-and-integrity-validated, and live-metadata-and-header-validated results; the exact cipher-then-quick-check implementation and absence of a separate readability query; the four implemented readability categories; first-cipher-row disposal and exact quick-check row shape; fail-closed incompletion without active cancellation; same-connection/no-explicit-transaction policy; primary-category preservation on close failure; synchronous whole-file workload acceptance only while no operational caller exists; the implemented live-observation order, two PRAGMAs, explicit query, `LIMIT 2` policy, storage-class adapter, canonical ten-category taxonomy and precedence, owner and close-failure model, redaction, and authority limits; accepted workflow run `30778837736` and its 645/0/1 Rust result with all 15 new live tests passing; the approved-but-unimplemented correspondence boundary; the still-later freshness and startup-authority boundaries; and confirmation that this documentation change contains no code or passing correspondence evidence.
+Carlo must manually review the approval record; the metadata-only inspector versus the separate lifetime guard; the inspected proof, guard, SQLite handle, and owner identity/lifetime chain; the exact one-open flags and `win32` VFS; pre-key policy, one key application, and post-key query-only ordering; the distinct keyed-but-unvalidated, readability-and-integrity-validated, live-metadata-and-header-validated, and correspondence-validated results; the exact cipher-then-quick-check and live-observation boundaries; the implemented consuming correspondence transition; accepted workflow run `30786193482` (run number 17) and its 655/0/1 Rust result with all 10 new correspondence tests passing; the unrelated pre-existing ignored USB test; the still-absent freshness, startup-authority, and operational-opening boundaries; and confirmation that this documentation change contains no code or runtime claim.
 
-For the correspondence approval Carlo must manually confirm the exact two consumed input types; prohibition on weaker or internally loaded evidence; exactly-once reuse of the six-field pure classifier; the single coarse mismatch category and unobservable field precedence; private retention of only lifetime owner, validated metadata, and trusted assessment; strict exclusion of generations, timestamps, and evidence-format fields from correspondence; later whole-owner freshness consumption; nested module placement without visibility widening; metadata/evidence disposal before mismatch or successful-owner close; mismatch close-failure and retry ownership; reuse of the existing general successful-owner close failure; manual redaction; the narrow `cfg(test)` trusted-assessment seam; the pure/live/source verification matrices; the absence of new dependencies, features, FFI, unsafe, filesystem, DPAPI, HMAC, SQL, schema, migration, public API, and operational caller; and the fact that architecture approval is not implementation evidence.
+For correspondence Carlo must manually confirm the exact two consumed input types; prohibition on weaker or internally loaded evidence; exactly-once reuse of the six-field pure classifier; the single coarse mismatch category and unobservable field precedence; private retention of only lifetime owner, validated metadata, and trusted assessment; strict exclusion of generations, timestamps, and evidence-format fields from correspondence; later whole-owner freshness composition; private nested module placement without visibility widening; metadata/evidence disposal before mismatch or successful-owner close; mismatch close-failure and retry ownership; reuse of the existing general successful-owner close failure; strict redaction; the narrow production-absent `cfg(test)` trusted-assessment seam; the accepted real SQLCipher, ownership, and source-boundary evidence; the absence of new dependencies, features, FFI, unsafe, filesystem, DPAPI, HMAC, SQL, schema, migration, public API, and operational caller; and the locked limitations on lineage, freshness, rollback resistance, startup, operational opening, setup, migration, DDL/object kind, wider schema, recovery, backup/restore, replacement, and business data.
 
 ## Environment-dependent and manual checks
 
