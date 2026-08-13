@@ -1105,8 +1105,28 @@ mod tests {
         }
 
         #[test]
-        fn second_file_disappearance_replacement_and_size_mutation_after_key_return_no_pair() {
-            for replacement in [None, Some(vec![9; 15]), Some(vec![8; 16])] {
+        fn second_file_disappearance_is_rejected_and_replacement_never_returns_stale_pair() {
+            let absent_fixture = Fixture::new(&[1; 15], &[2; 15]);
+            let absent_anchor_path = absent_fixture
+                .paths
+                .active_authenticated_freshness_anchor
+                .as_path()
+                .to_path_buf();
+            let absent_result =
+                crate::freshness_anchor_active_wrapper_loader::windows::load_with_test_hook(
+                    &absent_fixture.paths,
+                    |phase| {
+                        if phase == crate::freshness_anchor_active_wrapper_loader::windows::LoadPhase::AfterKeyRead {
+                            fs::remove_file(&absent_anchor_path).unwrap();
+                        }
+                    },
+                );
+            assert!(absent_result.is_err());
+
+            for (case, replacement) in [
+                ("replacement-15", vec![9; 15]),
+                ("replacement-16", vec![8; 16]),
+            ] {
                 let fixture = Fixture::new(&[1; 15], &[2; 15]);
                 let anchor_path = fixture
                     .paths
@@ -1118,14 +1138,24 @@ mod tests {
                         &fixture.paths,
                         |phase| {
                             if phase == crate::freshness_anchor_active_wrapper_loader::windows::LoadPhase::AfterKeyRead {
-                            fs::remove_file(&anchor_path).unwrap();
-                            if let Some(bytes) = &replacement {
-                                fs::write(&anchor_path, bytes).unwrap();
+                                fs::remove_file(&anchor_path).unwrap();
+                                fs::write(&anchor_path, &replacement).unwrap();
                             }
-                        }
                         },
                     );
-                assert!(result.is_err());
+                if let Ok(pair) = result {
+                    assert_eq!(pair.key_wrapper_bytes(), &[1; 15], "{case}");
+                    assert_eq!(
+                        pair.authenticated_anchor_wrapper_bytes(),
+                        replacement.as_slice(),
+                        "{case}"
+                    );
+                    assert_ne!(
+                        pair.authenticated_anchor_wrapper_bytes(),
+                        &[2; 15],
+                        "{case}"
+                    );
+                }
             }
         }
 
