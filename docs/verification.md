@@ -353,13 +353,17 @@ The implemented outcome family is `DatabaseEvidenceCorrespondenceMismatch`, `Dat
 
 The accepted source-boundary evidence also confirms private nested placement beneath `live_metadata_and_header_validation`; no `Connection` exposure, arbitrary SQL callback, detachable proof, crate-root bridge, unsafe code, FFI, dependency, Cargo feature, schema work, migration, public API, operational caller, frontend, IPC, or Tauri command was introduced. Correspondence success establishes none of equal lineage, freshness, rollback resistance, startup authorization, operational database opening, setup completion, migration status, physical DDL, relation object kind, wider product-schema correctness, recovery fitness, backup/restore suitability, replacement authority, or business-data correctness.
 
-## Approved future preloaded normalized freshness verification requirements
+## Accepted preloaded normalized freshness implementation evidence
 
-The architecture is approved but unimplemented. No test result, CI run, manual application observation, production runtime behavior, or passing live freshness evidence is claimed here. The future transition consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` and exactly `NormalizedFreshnessAnchorObservation`; all four normalized states are accepted, and no real anchor filesystem or DPAPI test is required for this preloaded adapter because loading, authentication, binding, assurance, and normalization remain upstream.
+The freshness transition was implemented in commit `8770ca7fa99adc3c8554f1d51ad310d2084d5cf0` (`feat(database): validate preloaded freshness`). `Bootstrap validation` run `30802303048` (run number 20), head SHA `8770ca7fa99adc3c8554f1d51ad310d2084d5cf0`, failed because a pre-existing environment-sensitive loader test imposed an over-strong historical-continuity expectation. That historical run remains a failure. Commit `da91011c1553cd22f8a14da7bc2db6fede9e784c` (`test: align anchor loader replacement expectation`) changed only the test expectation to match the existing production loader contract. `Bootstrap validation` run `31724049978` (run number 21), head SHA `da91011c1553cd22f8a14da7bc2db6fede9e784c`, completed successfully.
 
-### Pure regression requirements
+The accepted final evidence is: frontend 5 passed; Rust 665 passed, 0 failed, 1 ignored; freshness adapter 10/10; pure freshness 14/14; correspondence-related 20/20; loader Windows module 11/11; full loader module 17/17; Clippy passed with warnings denied; and formatting passed. The single ignored test is the unrelated pre-existing manually rooted USB controlled-host test. No manual application/runtime test applies because no operational caller exists.
 
-The existing unchanged pure suite must continue proving:
+The implemented transition consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` and exactly `NormalizedFreshnessAnchorObservation`; all four normalized states are accepted, and no real anchor filesystem or DPAPI operation occurs in this preloaded adapter because loading, authentication, binding, assurance, and normalization remain upstream.
+
+### Accepted pure regression evidence
+
+The unchanged pure suite proves:
 
 - `Fresh`, `StaleEvidence`, `StaleDatabase`, `RollbackSuspicion`, `IdentityMismatch`, `AnchorMissing`, `AnchorUnavailable`, `AnchorInvalid`, and `Ambiguous`;
 - correspondence mismatch has precedence before every anchor state;
@@ -369,11 +373,11 @@ The existing unchanged pure suite must continue proving:
 - gap magnitude, maximum, and above-anchor boundary behavior; and
 - the coordinated-rollback limitation, under which mutually consistent older database, evidence, and anchor snapshots may still classify `Fresh`.
 
-The live work must not modify the pure classifier or precedence absent a separately demonstrated defect.
+The implementation did not modify the pure classifier or precedence.
 
-### Live real-chain requirements
+### Accepted live real-chain evidence
 
-Future live tests must obtain genuine `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` values through the existing real SQLCipher predecessor chain and supply synthetic preloaded normalized observations. They must cover:
+Accepted live tests obtain genuine `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` values through the existing real SQLCipher predecessor chain and supply synthetic preloaded normalized observations. They cover:
 
 - `Fresh` success, consuming normal close, and exact temporary-root cleanup;
 - `AnchorMissing`, `AnchorUnavailable`, and `AnchorInvalid`;
@@ -383,9 +387,9 @@ Future live tests must obtain genuine `DatabaseEvidenceCorrespondenceValidatedPr
 
 No path, presence inspection, wrapper loading, DPAPI, HMAC, parsing, binding, assurance, or normalization should run inside the adapter tests. Synthetic present observations may use the existing contract, installation-bound-anchor, and production assurance transitions; non-present variants are directly constructible.
 
-### Ownership, destruction, retry, and redaction requirements
+### Accepted ownership, destruction, retry, and redaction evidence
 
-Injected close and destruction-order evidence must prove:
+Injected close and destruction-order evidence proves:
 
 - every non-Fresh classification is preserved after successful close;
 - `Fresh` never enters failure handling or appears in a failure/retry form;
@@ -398,11 +402,11 @@ Injected close and destruction-order evidence must prove:
 - successful-owner close failure reuses `ProductionDatabaseConnectionCloseFailure` and retains only lifetime ownership; and
 - manual `Debug` is exactly coarse: only payload-free non-Fresh names may appear, while owners and ownership-bearing failures remain redacted.
 
-Only narrow `cfg(test)` close-injection and destruction-order seams inside the new nested module are approved. Tests must not require a production constructor, production visibility widening, arbitrary `Connection` callback, forgeable freshness-success constructor, or classifier bypass.
+Only narrow `cfg(test)` close-injection and destruction-order seams exist inside the nested module. An implementation review caught private production-compiled injected `Connection` callbacks in the initial uncommitted draft; they were removed before commit. Accepted production code uses canonical `close_lifetime_owner` paths, and source checks prohibit a production constructor, production visibility widening, arbitrary production `Connection` callback, forgeable freshness-success constructor, or classifier bypass.
 
-### Source-boundary requirements
+### Accepted source-boundary evidence
 
-Source assertions must prove:
+Source assertions prove:
 
 - `classify_database_freshness` is invoked exactly once with `DatabaseMetadataCorrespondence::Corresponds`, `&metadata_contract`, `trusted_assessment.evidence()`, and `&anchor_observation`;
 - ephemeral `Corresponds` translation is confined to the sealed adapter, with no retained, returned, or detachable proof and no correspondence-classifier call;
@@ -414,11 +418,15 @@ Source assertions must prove:
 - `ProductionDatabaseFreshnessValidationCloseFailure` contains exactly `DatabaseFreshnessClassification` and `ConnectionLifetimeOwner`; and
 - `Fresh` is impossible in `Failed`, close-failure ownership, and close-retry outcomes.
 
-The approved nested source location is `production_database_connection_handoff/live_metadata_and_header_validation/database_evidence_correspondence_validation/database_freshness_validation.rs`, declared and narrowly reexported by the correspondence module without visibility widening or a crate-root bridge.
+The implemented nested source location is `production_database_connection_handoff/live_metadata_and_header_validation/database_evidence_correspondence_validation/database_freshness_validation.rs`, declared and narrowly reexported by the correspondence module without visibility widening or a crate-root bridge.
+
+Accepted source and behavior evidence additionally proves one real-SQLCipher predecessor-chain `Fresh` success; Fresh-only advancement; all eight non-Fresh outcomes; destruction before close; close-failure retention of exactly classification and lifetime; repeated retry and eventual success returning the original classification; successful-owner close; exactly one pure-classifier call; exactly one ephemeral `Corresponds`; and prohibited-capability assertions covering filesystem/path/presence, loading, DPAPI, HMAC, parsing, authentication, generation matching, installation binding, assurance, normalization, SQL, PRAGMA, and database reads.
+
+The corrected loader test is `second_file_disappearance_is_rejected_and_replacement_never_returns_stale_pair`. It requires disappearance without replacement to return `Err`; replacement may return `Err`, or may succeed only with the fully validated current recreated pair; stale or mixed-pair success is forbidden. The loader contract is stable current-pair selection and validation, not absolute historical continuity. The production-loader prefix was unchanged across the test-only correction, and production loader bytes did not change.
 
 ## Remaining production database verification gates
 
-- Preloaded normalized freshness composition is the next approved but unimplemented verification gate. It consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` plus exactly one `NormalizedFreshnessAnchorObservation`, invokes the unchanged pure classifier once with ephemeral `DatabaseMetadataCorrespondence::Corresponds`, advances only on `Fresh`, and otherwise explicitly closes. The complete verification requirements are recorded above. No passing live freshness evidence or operational caller exists.
+- Startup authorization after possession of `DatabaseFreshnessValidatedProductionDatabaseConnection` is the next separately scoped verification gate. This reconciliation does not decide its inputs, outcome taxonomy, operational-opening handoff, connection exposure, UI behavior, failure presentation, retry policy, or schema/migration integration.
 - Schema-creation tests must prove only the separately approved version-1 schema, singleton metadata row, `application_id = 0x43484150`, mirrored `user_version`, and fail-closed header/metadata disagreement. They remain separate from live read-only validation and correspondence.
 - Path/link/sidecar tests must cover the exact application-owned NTFS path and filename, reparse/symlink/junction/mount traversal, cloud placeholder, hard link, network/removable storage, stable final path and identity, race revalidation, unexpected sidecars, and initial WAL/SHM prohibition. Startup must be proven unable to delete or repair sidecars.
 - Transaction-policy tests must cover rollback-journal `DELETE`, `synchronous=FULL`, explicit transactions, `secure_delete=ON`, `auto_vacuum=NONE`, no automatic journal switch, no automatic VACUUM, and no WAL checkpoint behavior.
@@ -429,7 +437,7 @@ The approved nested source location is `production_database_connection_handoff/l
 
 The existing `sqlcipher_windows_temporary_encryption_feasibility` test remains historical Windows test-only experiment evidence.
 
-Carlo must manually review the approval record; the metadata-only inspector versus the separate lifetime guard; the inspected proof, guard, SQLite handle, and owner identity/lifetime chain; the exact one-open flags and `win32` VFS; pre-key policy, one key application, and post-key query-only ordering; the distinct keyed-but-unvalidated, readability-and-integrity-validated, live-metadata-and-header-validated, and correspondence-validated results; the exact cipher-then-quick-check and live-observation boundaries; the implemented consuming correspondence transition; accepted workflow run `30786193482` (run number 17) and its 655/0/1 Rust result with all 10 new correspondence tests passing; the unrelated pre-existing ignored USB test; the approved but still-unimplemented freshness boundary; the still-absent startup-authority and operational-opening boundaries; and confirmation that this documentation change contains no code, passing freshness evidence, or runtime claim.
+Carlo must manually review the complete owner chain through `DatabaseFreshnessValidatedProductionDatabaseConnection`; freshness commit `8770ca7fa99adc3c8554f1d51ad310d2084d5cf0`; historical failed run `30802303048` (run 20); loader-test correction `da91011c1553cd22f8a14da7bc2db6fede9e784c`; accepted successful run `31724049978` (run 21) and its 665/0/1 Rust result; the unrelated ignored USB test; the exact consumed freshness inputs; all four normalized observation variants; exactly one ephemeral `Corresponds` and one classifier call; Fresh-only advancement; all eight non-Fresh outcomes; owner contents and observation disposal; destruction-before-close and close-retry ownership; successful-owner close; callback-seam prohibition; prohibited-capability assertions; corrected current-pair loader semantics and unchanged production prefix; coordinated-rollback limitation; the absence of startup authorization, operational opening, and any operational caller; and confirmation that this reconciliation changes documentation only.
 
 For correspondence Carlo must manually confirm the exact two consumed input types; prohibition on weaker or internally loaded evidence; exactly-once reuse of the six-field pure classifier; the single coarse mismatch category and unobservable field precedence; private retention of only lifetime owner, validated metadata, and trusted assessment; strict exclusion of generations, timestamps, and evidence-format fields from correspondence; later whole-owner freshness composition; private nested module placement without visibility widening; metadata/evidence disposal before mismatch or successful-owner close; mismatch close-failure and retry ownership; reuse of the existing general successful-owner close failure; strict redaction; the narrow production-absent `cfg(test)` trusted-assessment seam; the accepted real SQLCipher, ownership, and source-boundary evidence; the absence of new dependencies, features, FFI, unsafe, filesystem, DPAPI, HMAC, SQL, schema, migration, public API, and operational caller; and the locked limitations on lineage, freshness, rollback resistance, startup, operational opening, setup, migration, DDL/object kind, wider schema, recovery, backup/restore, replacement, and business data.
 
