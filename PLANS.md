@@ -2,11 +2,11 @@
 
 ## 1. Initiative and status
 
-Active multi-stage initiative. Carlo has explicitly approved the bounded production database and evidence-correspondence architecture package, including the corrected `ApplicationDatabaseFormatIdentity` exactly-16-byte SQLite `BLOB` encoding. The Windows production SQLCipher dependency, private raw-key primitive, metadata-only production database-file inspection, guarded read-only SQLCipher connection handoff, consuming readability-and-integrity validation transition, consuming live metadata and SQLite-header validation transition, consuming identity-only database/evidence correspondence transition, and preloaded normalized database-freshness transition are implemented and accepted through commit `8770ca7fa99adc3c8554f1d51ad310d2084d5cf0`; the environment-sensitive loader-test correction is accepted through `da91011c1553cd22f8a14da7bc2db6fede9e784c`. The current end of the implemented database trust chain is `DatabaseFreshnessValidatedProductionDatabaseConnection`. The repository still has no startup authorization, operational production database-opening flow, setup, schema, migration, backup, restore, recovery, replacement, or frontend flow. The accepted installation-evidence, local-volume, device-property, and controlled-host evidence remains otherwise unchanged.
+Active multi-stage initiative. Carlo has explicitly approved the bounded production database and evidence-correspondence architecture package, including the corrected `ApplicationDatabaseFormatIdentity` exactly-16-byte SQLite `BLOB` encoding. The Windows production SQLCipher dependency, private raw-key primitive, metadata-only production database-file inspection, guarded read-only SQLCipher connection handoff, consuming readability-and-integrity validation transition, consuming live metadata and SQLite-header validation transition, consuming identity-only database/evidence correspondence transition, and preloaded normalized database-freshness transition are implemented and accepted through commit `8770ca7fa99adc3c8554f1d51ad310d2084d5cf0`; the environment-sensitive loader-test correction is accepted through `da91011c1553cd22f8a14da7bc2db6fede9e784c`. The current end of the implemented database trust chain remains `DatabaseFreshnessValidatedProductionDatabaseConnection`. Carlo has approved startup authorization after freshness as the next architecture boundary, producing `StartupAuthorizedProductionDatabaseConnection`, but it is not implemented. The repository still has no startup authorization implementation, operational production database-opening flow, setup, schema, migration, backup, restore, recovery, replacement, or frontend flow. The accepted installation-evidence, local-volume, device-property, and controlled-host evidence remains otherwise unchanged.
 
 ## 2. Authority and objective
 
-The active objective is to preserve the approved typed trust-chain sequence through the accepted preloaded normalized freshness composition. That implemented boundary consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` plus exactly one preloaded `NormalizedFreshnessAnchorObservation`, invokes the existing pure freshness classifier once, advances only on `Fresh`, and returns opaque `DatabaseFreshnessValidatedProductionDatabaseConnection`. Anchor loading and normalization remain upstream. Startup authorization after possession of that owner is the next separately scoped architecture boundary; operational opening, schema creation, migration, setup, backup/restore, recovery, replacement, frontend behavior, IPC, Tauri commands, and operational use remain later separate boundaries.
+The active documentation objective is to preserve the approved typed trust-chain sequence through the accepted preloaded normalized freshness composition and canonically record the next approved-but-unimplemented startup-authorization boundary. The implemented freshness boundary consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` plus exactly one preloaded `NormalizedFreshnessAnchorObservation`, invokes the existing pure freshness classifier once, advances only on `Fresh`, and returns opaque `DatabaseFreshnessValidatedProductionDatabaseConnection`. The approved next boundary consumes that whole owner plus exactly one preloaded `installation_state::InstallationEvidence` and may return opaque `StartupAuthorizedProductionDatabaseConnection`. It performs no hidden loading. Operational opening, schema creation, migration, setup, backup/restore, recovery, replacement, frontend behavior, IPC, Tauri commands, and operational use remain later separate boundaries.
 
 ## 3. Locked operational decisions relevant to the initiative
 
@@ -18,7 +18,7 @@ The active objective is to preserve the approved typed trust-chain sequence thro
 
 ## 4. Current repository baseline
 
-The repository is a Tauri 2 foundation with four unavailable React areas, one non-sensitive Rust health command, typed Rust storage, evidence, key, metadata, correspondence, and freshness foundations, a Windows production SQLCipher dependency, a private Windows-only raw-key application primitive, metadata-only production database-file inspection, a private guarded read-only connection handoff, and consuming readability/integrity, live metadata/header, correspondence, and freshness transitions. The implemented chain now ends at opaque `DatabaseFreshnessValidatedProductionDatabaseConnection`, retaining the same guarded connection lifetime, one owned `DatabaseMetadataContractV1`, and one owned `TrustedCurrentInstallationEvidenceAssessment`; it has no operational caller. The repository has no startup authorization, operational production database-opening flow, schema, authentication, recovery, backup, or parish workflow.
+The repository is a Tauri 2 foundation with four unavailable React areas, one non-sensitive Rust health command, typed Rust storage, evidence, key, metadata, correspondence, and freshness foundations, a Windows production SQLCipher dependency, a private Windows-only raw-key application primitive, metadata-only production database-file inspection, a private guarded read-only connection handoff, and consuming readability/integrity, live metadata/header, correspondence, and freshness transitions. The implemented chain now ends at opaque `DatabaseFreshnessValidatedProductionDatabaseConnection`, retaining the same guarded connection lifetime, one owned `DatabaseMetadataContractV1`, and one owned `TrustedCurrentInstallationEvidenceAssessment`; it has no operational caller. Startup authorization is approved but has no implementation. The repository has no operational production database-opening flow, schema, authentication, recovery, backup, or parish workflow.
 
 ## 5. Approved technical direction
 
@@ -26,15 +26,15 @@ Keep database-key ownership, metadata contracts, metadata decoding, corresponden
 
 ## 6. Active stage
 
-The guarded read-only SQLCipher connection handoff and its consuming readability/integrity, live metadata/header, identity-only correspondence, and preloaded normalized freshness transitions are complete and accepted. The implemented successors preserve explicit close-failure ownership and now end at `DatabaseFreshnessValidatedProductionDatabaseConnection`. Startup authorization after that owner is the next separately scoped architecture boundary. Schema creation, operational opening, migration, setup, recovery, replacement, backup/restore, frontend, IPC, and Tauri sequencing remain later stages.
+The guarded read-only SQLCipher connection handoff and its consuming readability/integrity, live metadata/header, identity-only correspondence, and preloaded normalized freshness transitions are complete and accepted. The implemented successors preserve explicit close-failure ownership and now end at `DatabaseFreshnessValidatedProductionDatabaseConnection`. Startup authorization after that owner is approved but unimplemented; its intended success owner is `StartupAuthorizedProductionDatabaseConnection`. Operational opening remains a later, separate consuming boundary and is not designed here. Schema creation, migration, setup, recovery, replacement, backup/restore, frontend, IPC, and Tauri sequencing also remain later stages.
 
 ## 7. Allowed scope
 
-Documentation-only reconciliation of the implemented and CI-accepted preloaded normalized freshness transition and accepted loader-test correction in `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Code and repository safeguards remain unchanged.
+Documentation-only recording of the Carlo-approved startup-authorization architecture after the implemented and CI-accepted preloaded normalized freshness transition, limited to `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Code and repository safeguards remain unchanged.
 
 ## 8. Prohibited scope
 
-This documentation work authorizes no code, test, dependency, schema or migration, SQL or PRAGMA execution, database opening or VFS/path adapter, freshness redesign, setup/startup/recovery integration, backup/restore, replacement, Tauri command, IPC, frontend change, generated inventory, application runtime, database creation, header mutation, or destructive operation. It records accepted implementation and CI evidence without representing startup authorization, operational opening, schema, migration, recovery, backup/restore, replacement, frontend, IPC, or Tauri behavior as implemented.
+This documentation work authorizes no code, test, dependency, configuration, workflow, schema or migration, SQL or PRAGMA execution, database opening or VFS/path adapter, freshness redesign, setup/startup/recovery integration, backup/restore, replacement, Tauri command, IPC, frontend change, generated inventory, application runtime, database creation, header mutation, or destructive operation. It records an approved architecture without representing startup authorization, operational opening, schema, migration, recovery, backup/restore, replacement, frontend, IPC, or Tauri behavior as implemented. It does not authorize `startup_authorization.rs`, installation-state changes, stale source-comment cleanup, or operational-opening design.
 
 ## 9. Dependency approvals
 
@@ -111,6 +111,7 @@ The accepted Windows production dependency is exactly `rusqlite = { version = "=
 - [x] Implement and accept the identity-only database/evidence correspondence transition over the live metadata/header owner and trusted current-installation assessment.
 - [x] Approve and canonically document the preloaded normalized database-freshness composition boundary.
 - [x] Implement and verify the preloaded normalized database-freshness composition boundary.
+- [x] Approve and canonically document, without implementing, startup authorization after freshness.
 
 ## 11. Implemented readability-and-integrity boundary
 
@@ -126,7 +127,7 @@ On validation failure, explicit close is attempted after the row stream and stat
 
 Carlo accepts that `cipher_integrity_check` may synchronously scan the whole file with work proportional to database pages. This stage introduces no production database-size ceiling and makes no bounded-latency or active-cancellation claim. That is acceptable only because the boundary has no operational caller. Operational integration must later define database-size limits, execution-time expectations, responsiveness, and cancellation policy.
 
-The succeeding live metadata/header, correspondence, and preloaded normalized freshness transitions are implemented and accepted as described below. Startup authorization after the freshness-validated owner is next; operational opening, schema creation, migrations, setup, recovery, replacement, backup/restore, frontend, IPC, and Tauri commands remain later separately approved work.
+The succeeding live metadata/header, correspondence, and preloaded normalized freshness transitions are implemented and accepted as described below. Approved but unimplemented startup authorization after the freshness-validated owner is next; operational opening, schema creation, migrations, setup, recovery, replacement, backup/restore, frontend, IPC, and Tauri commands remain later separately approved work.
 
 ## 12. Implemented live metadata and SQLite-header validation boundary
 
@@ -190,8 +191,8 @@ On the observed Windows host, the accepted `LocalFixedCandidate` prerequisite an
 - Implemented foundation: all previously accepted foundations plus operating-system-backed authentication-material generation, HMAC-SHA-256 envelope authentication, current-user in-memory DPAPI protection for separate key and evidence objects, strict wrapper and key-payload codecs, native clear-before-free handling, and a typed generation-match transition before plaintext release. Protection remains separate from persistence, structural validation, database cross-checking, setup, startup, and operational evidence.
 - Historical technical experiment: `sqlcipher_windows_feasibility` and its former development-dependency state remain Windows test-only evidence of the earlier candidate evaluation.
 - Implemented and accepted production foundation: the exact Windows production `rusqlite` configuration, private raw-key application primitive, metadata-only production database-file inspection, guarded read-only connection handoff, and consuming readability/integrity, live metadata/header, correspondence, and freshness transitions. The repository retains distinct opaque owners through `DatabaseFreshnessValidatedProductionDatabaseConnection`; none provides startup or operational authority.
-- Approved but not fully implemented: the larger bounded architecture package. Deferred implementation includes startup authorization, operational opening, metadata schema creation, portable recovery, migrations, backup/restore, setup/recovery authority, replacement, destructive retention or cleanup, and release automation.
-- The next architecture boundary is startup authorization after possession of `DatabaseFreshnessValidatedProductionDatabaseConnection`. Its signature, taxonomy, operational handoff, connection exposure, UI behavior, failure presentation, retry policy, and schema/migration integration remain undecided here.
+- Approved but not fully implemented: the larger bounded architecture package. Startup authorization now has an approved design but no implementation. Deferred implementation also includes operational opening, metadata schema creation, portable recovery, migrations, backup/restore, setup/recovery authority, replacement, destructive retention or cleanup, and release automation.
+- The next architecture boundary is startup authorization after possession of `DatabaseFreshnessValidatedProductionDatabaseConnection`, with the exact signature, taxonomy, ownership, disposal, close/retry, redaction, and private placement recorded in section 21. Operational opening remains later separate work and is not designed by this approval.
 
 ## 15. Validation status
 
@@ -268,7 +269,45 @@ Success proves only that preceding stages remain represented, correspondence had
 
 The accepted anchor loader proves bounded, stable selection and validation of the current active wrapper pair. It does not guarantee detection of every transient historical disappearance or recreation when that history is indistinguishable through existing observations. The corrected Windows test `second_file_disappearance_is_rejected_and_replacement_never_returns_stale_pair` requires disappearance without replacement to return `Err`; replacement may return `Err` or may succeed only with the fully validated current recreated pair; stale or mixed-pair success is forbidden. Production loader bytes did not change, and this is not a weakening of production security.
 
-## 21. Links
+## 21. Approved but unimplemented startup-authorization boundary
+
+The next approved database trust-chain transition is exactly:
+
+```rust
+pub(crate) fn authorize_production_database_startup(
+    database: DatabaseFreshnessValidatedProductionDatabaseConnection,
+    installation_evidence: InstallationEvidence,
+) -> ProductionDatabaseStartupAuthorizationOutcome
+```
+
+The second input is exactly one preloaded `installation_state::InstallationEvidence`. The boundary performs one fixed policy decision over that supplied observation. It performs no installation-state loading and no filesystem, path, sidecar, anchor, database, environment, current-account, administrator-group, standard-user, or elevation observation. Freshness and every earlier database trust stage have already succeeded and are not rerun.
+
+Only `InstallationEvidence::Initialized(ExpectedStorageEvidence::Present)` advances. Success returns opaque `StartupAuthorizedProductionDatabaseConnection`, privately retaining exactly `ConnectionLifetimeOwner`, `DatabaseMetadataContractV1`, and `TrustedCurrentInstallationEvidenceAssessment`. Possession of the owner is the startup-authorization proof. It retains no installation evidence, storage or setup decision, authorization Boolean or enum, freshness classification, correspondence value, normalized or assured/authenticated/bound anchor, path, or sidecar observation. It is not operational: it exposes no connection, SQL/query operation, arbitrary callback, path, metadata, trusted-assessment, or evidence accessor.
+
+The exact primary taxonomy and mapping are:
+
+- `Initialized(Present)` -> `Authorized`;
+- `NeverInitialized` -> `ProductionDatabaseStartupAuthorizationError::NeverInitialized`;
+- `Initialized(Missing)` -> `ProductionDatabaseStartupAuthorizationError::ExpectedStorageMissing`;
+- `Initialized(Unavailable)` -> `ProductionDatabaseStartupAuthorizationError::InstallationStateUnavailable`;
+- `Inconsistent` -> `ProductionDatabaseStartupAuthorizationError::InstallationStateInconsistent`;
+- `Unavailable` -> `ProductionDatabaseStartupAuthorizationError::InstallationStateUnavailable`.
+
+Both unavailable observations intentionally collapse. `NeverInitialized` fails this boundary and closes the database owner; it does not grant `FirstTimeSetupAuthorization`, become `SetupPermitted`, or branch into setup. `FutureOpenPermitted`, `StorageDecision`, and `SetupAuthorizationState` are not startup authority. Existing installation-state meanings and the separate explicit first-time-setup boundary remain unchanged.
+
+The approved family is `StartupAuthorizedProductionDatabaseConnection`, `ProductionDatabaseStartupAuthorizationError`, `ProductionDatabaseStartupAuthorizationOutcome`, `ProductionDatabaseStartupAuthorizationCloseFailure`, and `ProductionDatabaseStartupAuthorizationCloseRetryOutcome`. The initial outcome distinguishes `Authorized(success owner)`, `Failed(primary category after successful close)`, and ownership-bearing `CloseFailed`; `CloseFailed` is not a primary authorization category.
+
+On success, policy evaluation completes, requires `Initialized(Present)`, discards the installation-state observation, and moves the unchanged lifetime owner, metadata contract, and trusted assessment into the startup-authorized owner. On failure, the adapter preserves the primary category, discards `InstallationEvidence`, `DatabaseMetadataContractV1`, and `TrustedCurrentInstallationEvidenceAssessment`, then explicitly closes `ConnectionLifetimeOwner`. Successful close returns the original category. Failed close returns `ProductionDatabaseStartupAuthorizationCloseFailure`, retaining exactly the original category and complete lifetime owner. Its consuming retry performs only close; repeated failure preserves both, and eventual success returns the original category. No authorization, observation, loading, database access, recovery, or setup work occurs during retry.
+
+Closing a successful `StartupAuthorizedProductionDatabaseConnection` first discards the metadata contract and trusted assessment, then explicitly closes the lifetime owner. It reuses `ProductionDatabaseConnectionCloseOutcome` and `ProductionDatabaseConnectionCloseFailure`; a failed successful-owner close retains only lifetime ownership.
+
+The future implementation belongs privately at `production_database_connection_handoff/live_metadata_and_header_validation/database_evidence_correspondence_validation/database_freshness_validation/startup_authorization.rs`, with `database_freshness_validation.rs` declaring the private child. This permits private destructuring without visibility widening. No crate-root bridge, generic or arbitrary `Connection` callback, production success constructor, unsafe/FFI, dependency, Cargo feature, frontend, IPC, or Tauri surface is approved.
+
+Manual coarse `Debug` may reveal only the payload-free primary names `NeverInitialized`, `ExpectedStorageMissing`, `InstallationStateInconsistent`, and `InstallationStateUnavailable`. Owners and ownership-bearing failures remain redacted, and formatting must not delegate to metadata, trusted assessment, installation evidence, lifetime ownership, rusqlite, or native errors. No identifier, generation, timestamp, metadata/evidence value, trusted identity, path, sidecar, handle, SQL or PRAGMA text, native code, connection detail, or raw error chain may escape. No ordinary success or failure logging is required.
+
+This owner proves only that all preceding database trust stages remain represented, freshness already succeeded, the supplied installation evidence was `Initialized(Present)`, fixed startup policy accepted it, the same guarded connection lifetime remains owned, and metadata plus trusted assessment remain internally available for a later consuming transition. It does not grant operational database use or SQL; DDL, wider-schema, migration, setup, creation, recovery, replacement, rekey, backup/restore, cleanup, sidecar/WAL/SHM repair, business-data, account/elevation, stronger freshness/rollback, or continued-validity authority. Whether operational opening later requires fresh path or sidecar inspection remains a separate undecided question.
+
+## 22. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)

@@ -121,9 +121,9 @@ The accepted diagnostic rerun reached exact-directory open, the disk-handle fact
 
 ## Approved production database architecture, guarded handoff, and validation
 
-Carlo approved this bounded architecture package as the canonical production database foundation. The exact Windows production dependency, private raw-key application primitive, metadata-only production database-file inspection, guarded read-only SQLCipher connection handoff, consuming readability-and-integrity validation transition, consuming live metadata and SQLite-header validation transition, consuming identity-only database/evidence correspondence transition, and preloaded normalized freshness transition are implemented and accepted. Existing installation-evidence contracts and protections remain unchanged. The repository has distinct opaque keyed-but-unvalidated, readability-and-integrity-validated, live-metadata-and-header-validated, database/evidence-correspondence-validated, and freshness-validated connection owners. The current implemented endpoint is `DatabaseFreshnessValidatedProductionDatabaseConnection`. Startup authorization, operational database opening, first-time creation, schema, migration, backup/restore, recovery, replacement, and frontend/Tauri exposure remain absent, and no operational caller exists.
+Carlo approved this bounded architecture package as the canonical production database foundation. The exact Windows production dependency, private raw-key application primitive, metadata-only production database-file inspection, guarded read-only SQLCipher connection handoff, consuming readability-and-integrity validation transition, consuming live metadata and SQLite-header validation transition, consuming identity-only database/evidence correspondence transition, and preloaded normalized freshness transition are implemented and accepted. Existing installation-evidence contracts and protections remain unchanged. The repository has distinct opaque keyed-but-unvalidated, readability-and-integrity-validated, live-metadata-and-header-validated, database/evidence-correspondence-validated, and freshness-validated connection owners. The current implemented endpoint is `DatabaseFreshnessValidatedProductionDatabaseConnection`. Startup authorization is approved but unimplemented. Operational database opening, first-time creation, schema, migration, backup/restore, recovery, replacement, and frontend/Tauri exposure remain absent, and no operational caller exists.
 
-The layers remain deliberately separate: filesystem and sidecar inspection; connection-lifetime guarding; trusted key recovery; guarded connection opening; raw-key application; SQLite/SQLCipher readability and integrity validation; live metadata/header observation and decoding; correspondence; freshness; installation-state classification; startup authorization; operational opening; and separately authorized setup, migration, rekey, restore, recovery, replacement, and destructive cleanup. The implemented chain currently ends at `DatabaseFreshnessValidatedProductionDatabaseConnection`, after the preloaded normalized freshness transition and before startup authorization and operational opening. No earlier value or stage grants later authority, and the freshness-validated owner has no operational caller. Startup authorization is the next separately scoped architecture boundary.
+The layers remain deliberately separate: filesystem and sidecar inspection; connection-lifetime guarding; trusted key recovery; guarded connection opening; raw-key application; SQLite/SQLCipher readability and integrity validation; live metadata/header observation and decoding; correspondence; freshness; installation-state classification; startup authorization; operational opening; and separately authorized setup, migration, rekey, restore, recovery, replacement, and destructive cleanup. The implemented chain currently ends at `DatabaseFreshnessValidatedProductionDatabaseConnection`, after the preloaded normalized freshness transition and before startup authorization and operational opening. No earlier value or stage grants later authority, and the freshness-validated owner has no operational caller. Startup authorization is the next approved but unimplemented architecture boundary.
 
 SQLCipher Community Edition is the selected engine for production parish databases, production backups, and production recovery databases; plain SQLite is prohibited for those artifacts. Windows production depends on exactly `rusqlite = { version = "=0.39.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }` under `[target.'cfg(windows)'.dependencies]`, without a Windows `rusqlite` development dependency or direct `libsqlite3-sys` dependency. The earlier `sqlcipher_windows_feasibility` module and former development-dependency state remain historical test-only evidence. Pinned SQLCipher/OpenSSL identities and the lockfile remain release evidence.
 
@@ -176,7 +176,7 @@ The database-format identity is never UTF-8, hex, UUID text, Base64, a numeric r
 
 Exact typed equality is required across database and evidence for the permanent application identifier, `ApplicationDatabaseFormatIdentity`, parish identifier, installation identifier, database-key generation identifier, and setup-publication identifier. The identity-only correspondence boundary ignores installation generation and recovery/replacement generation; only the later freshness boundary compares those values against the local anchor. Evidence-format identity and version remain evidence-only. Timestamps are diagnostic and affect neither correspondence nor freshness authorization.
 
-The implemented freshness transition consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` plus exactly one preloaded `NormalizedFreshnessAnchorObservation`, advances only when the existing pure classifier returns `Fresh`, and otherwise explicitly closes. Anchor loading and normalization remain upstream. Startup authorization and operational opening remain absent and separately scoped.
+The implemented freshness transition consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` plus exactly one preloaded `NormalizedFreshnessAnchorObservation`, advances only when the existing pure classifier returns `Fresh`, and otherwise explicitly closes. Anchor loading and normalization remain upstream. Startup authorization is approved but unimplemented; operational opening remains absent and separately scoped.
 
 Setup is the only creation authority. Ordinary startup never creates a database, key wrapper, evidence, anchor, metadata, or sidecar. Recovery, restore, migration, rekey, anchor replacement, database replacement, and destructive cleanup require separate explicit authorization. There is no generic repair authority.
 
@@ -339,4 +339,63 @@ The correspondence module declares and narrowly reexports its child. The child c
 
 Accepted live tests obtain genuine correspondence owners through the existing SQLCipher predecessor chain and provide synthetic preloaded normalized observations through existing contract, bound-anchor, assurance, and direct non-present-state seams. Source assertions prohibit production constructors, visibility widening, arbitrary production connection callbacks, forgeable freshness-success constructors, and classifier bypasses.
 
-Success proves only that preceding guarded, keyed, readability, integrity, header, metadata, and correspondence stages remain represented; correspondence had already succeeded; the pure classifier ran once with ephemeral `Corresponds`; the supplied observation was `Present` with an assured anchor; the three-way identities passed; both lineages were `Current`; and the same guarded lifetime remains owned. It does not prove cryptographic monotonic rollback prevention, absolute newest state, coordinated-rollback detection, startup authorization, operational opening or use, setup completion, migration state, physical DDL, object kind, wider schema correctness, recovery/replacement authority, backup/restore suitability, business-data correctness, or continued validity after external changes. There is no operational caller. Startup authorization after possession of `DatabaseFreshnessValidatedProductionDatabaseConnection` is the next separately scoped boundary; this document does not decide its inputs, outcomes, operational handoff, connection exposure, UI behavior, failure presentation, retry policy, or schema/migration integration.
+Success proves only that preceding guarded, keyed, readability, integrity, header, metadata, and correspondence stages remain represented; correspondence had already succeeded; the pure classifier ran once with ephemeral `Corresponds`; the supplied observation was `Present` with an assured anchor; the three-way identities passed; both lineages were `Current`; and the same guarded lifetime remains owned. It does not prove cryptographic monotonic rollback prevention, absolute newest state, coordinated-rollback detection, startup authorization, operational opening or use, setup completion, migration state, physical DDL, object kind, wider schema correctness, recovery/replacement authority, backup/restore suitability, business-data correctness, or continued validity after external changes. There is no operational caller. Startup authorization after possession of `DatabaseFreshnessValidatedProductionDatabaseConnection` is the next approved but unimplemented boundary, recorded below; operational opening remains a later separate consuming boundary and is not designed here.
+
+### Approved but unimplemented startup authorization after freshness
+
+The exact proposed transition is:
+
+```rust
+pub(crate) fn authorize_production_database_startup(
+    database: DatabaseFreshnessValidatedProductionDatabaseConnection,
+    installation_evidence: InstallationEvidence,
+) -> ProductionDatabaseStartupAuthorizationOutcome
+```
+
+It consumes exactly the freshness-validated owner and one preloaded `installation_state::InstallationEvidence`. No hidden installation-state loading is allowed. This adapter observes no filesystem, path, sidecar, freshness anchor, database, environment, account, administrator-group, standard-user, or elevation state. Freshness has already succeeded; the adapter makes exactly one fixed decision over the supplied installation evidence and does not rerun freshness, correspondence, metadata/header validation, readability/integrity validation, database-file inspection, evidence loading, path/sidecar inspection, or anchor loading/normalization. There is no earlier-stage precedence inside it.
+
+Only `InstallationEvidence::Initialized(ExpectedStorageEvidence::Present)` advances. Success returns opaque `StartupAuthorizedProductionDatabaseConnection`, which privately retains exactly:
+
+- `ConnectionLifetimeOwner`;
+- `DatabaseMetadataContractV1`;
+- `TrustedCurrentInstallationEvidenceAssessment`.
+
+It retains no `InstallationEvidence`, `StorageDecision`, `SetupAuthorizationState`, `FirstTimeSetupAuthorization`, startup-authorized Boolean or enum, `DatabaseFreshnessClassification`, `DatabaseMetadataCorrespondence`, `NormalizedFreshnessAnchorObservation`, assured/authenticated/bound anchor, path, or sidecar observation. Possession of the owner is the authorization proof.
+
+The four coarse primary categories are exactly `ProductionDatabaseStartupAuthorizationError::NeverInitialized`, `ExpectedStorageMissing`, `InstallationStateInconsistent`, and `InstallationStateUnavailable`. The exact mapping is:
+
+| Supplied `InstallationEvidence` | Result |
+| --- | --- |
+| `Initialized(Present)` | `Authorized` |
+| `NeverInitialized` | `NeverInitialized` |
+| `Initialized(Missing)` | `ExpectedStorageMissing` |
+| `Initialized(Unavailable)` | `InstallationStateUnavailable` |
+| `Inconsistent` | `InstallationStateInconsistent` |
+| `Unavailable` | `InstallationStateUnavailable` |
+
+The two unavailable observations intentionally collapse. `NeverInitialized` is not setup permission. Neither `StorageDecision` nor `SetupAuthorizationState` is reused as the startup taxonomy.
+
+The approved conceptual family is `StartupAuthorizedProductionDatabaseConnection`, `ProductionDatabaseStartupAuthorizationError`, `ProductionDatabaseStartupAuthorizationOutcome`, `ProductionDatabaseStartupAuthorizationCloseFailure`, and `ProductionDatabaseStartupAuthorizationCloseRetryOutcome`. The initial outcome distinguishes `Authorized(success owner)`, `Failed(primary category after successful close)`, and `CloseFailed(ownership-bearing close failure)`. `CloseFailed` is not a primary authorization category.
+
+On success, the adapter evaluates the supplied evidence, requires `Initialized(Present)`, discards the installation-state observation, and moves the unchanged lifetime owner, metadata contract, and trusted assessment into the startup-authorized owner. On failure, it determines and preserves the primary category; discards `InstallationEvidence`, `DatabaseMetadataContractV1`, and `TrustedCurrentInstallationEvidenceAssessment`; and then explicitly closes `ConnectionLifetimeOwner`. Successful close returns the original primary category. Failed close returns `ProductionDatabaseStartupAuthorizationCloseFailure`, retaining exactly that category and the complete lifetime owner and no other evidence, identity, metadata, assessment, path, anchor, setup authority, or capability.
+
+The close-failure owner exposes a consuming retry returning `ProductionDatabaseStartupAuthorizationCloseRetryOutcome`: `Closed(original category)` or `Failed(close-failure owner)`. Retry performs only close. Repeated failure preserves the original category and complete lifetime owner; eventual success returns the original category. It performs no authorization, observation, loading, database access, recovery, or setup work.
+
+Closing a successful `StartupAuthorizedProductionDatabaseConnection` first discards `DatabaseMetadataContractV1` and `TrustedCurrentInstallationEvidenceAssessment`, then explicitly closes `ConnectionLifetimeOwner`. It reuses the existing `ProductionDatabaseConnectionCloseOutcome` and `ProductionDatabaseConnectionCloseFailure`; a close failure retains only lifetime ownership. No second generic successful-owner close system is approved.
+
+The approved private source placement is:
+
+```text
+production_database_connection_handoff/
+  live_metadata_and_header_validation/
+    database_evidence_correspondence_validation/
+      database_freshness_validation.rs
+      database_freshness_validation/
+        startup_authorization.rs
+```
+
+`database_freshness_validation.rs` should declare the private child. This permits private destructuring of the freshness owner and lifetime owner without production visibility widening. No crate-root bridge, generic or arbitrary `Connection` callback, operational connection exposure, or success constructor is approved.
+
+Manual `Debug` is coarse. Only the payload-free primary category names may be visible. Owners and ownership-bearing failures are redacted, and formatting does not delegate to metadata, trusted assessment, installation evidence, lifetime ownership, rusqlite, or native errors. No identifiers, generations, timestamps, metadata/evidence values, trusted identity, paths, sidecars, handles, SQL/PRAGMA text, native codes, connection detail, or raw error chains escape. No ordinary success or failure logging is required.
+
+`StartupAuthorizedProductionDatabaseConnection` is not operational. It exposes no `Connection`, SQL/query operation, arbitrary callback, path, metadata accessor, trusted-assessment accessor, or evidence accessor. It proves only that preceding stages remain represented, freshness succeeded, the supplied evidence was `Initialized(Present)`, fixed startup policy accepted it, the same guarded lifetime remains owned, and retained metadata and assessment remain internally available to a later consuming transition. It grants no operational use, read/write SQL, DDL or wider-schema correctness, migration, setup, creation, recovery, replacement, rekey, backup/restore, cleanup, sidecar/WAL/SHM repair, business-data, account/elevation, stronger rollback/freshness, or continued-validity authority. Operational opening and any decision about fresh path/sidecar inspection remain later separate work.
