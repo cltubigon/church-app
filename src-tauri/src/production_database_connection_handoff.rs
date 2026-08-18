@@ -52,6 +52,10 @@ pub(crate) use live_metadata_and_header_validation::{
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome,
+    ProductionDatabaseStartupAuthorizationCloseFailure,
+    ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
+    ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
+    StartupAuthorizedProductionDatabaseConnection, authorize_production_database_startup,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
     validate_production_database_live_metadata_and_headers,
 };

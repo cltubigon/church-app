@@ -24,7 +24,12 @@ pub(crate) use database_freshness_validation::{
     DatabaseFreshnessValidatedProductionDatabaseConnection,
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
-    ProductionDatabaseFreshnessValidationOutcome, validate_production_database_freshness,
+    ProductionDatabaseFreshnessValidationOutcome,
+    ProductionDatabaseStartupAuthorizationCloseFailure,
+    ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
+    ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
+    StartupAuthorizedProductionDatabaseConnection, authorize_production_database_startup,
+    validate_production_database_freshness,
 };
 
 pub(crate) struct DatabaseEvidenceCorrespondenceMismatch;

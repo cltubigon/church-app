@@ -16,6 +16,15 @@ use crate::{
 use super::super::super::{ConnectionLifetimeOwner, ProductionDatabaseConnectionCloseOutcome};
 use super::DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection;
 
+mod startup_authorization;
+
+pub(crate) use startup_authorization::{
+    ProductionDatabaseStartupAuthorizationCloseFailure,
+    ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
+    ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
+    StartupAuthorizedProductionDatabaseConnection, authorize_production_database_startup,
+};
+
 /// Opaque owner proving that the existing pure freshness classifier returned
 /// `Fresh` for the consumed correspondence owner and preloaded observation.
 pub(crate) struct DatabaseFreshnessValidatedProductionDatabaseConnection {
@@ -450,7 +459,7 @@ mod tests {
         publication: PUBLICATION,
     };
 
-    struct TestRoot(PathBuf);
+    pub(super) struct TestRoot(PathBuf);
 
     impl TestRoot {
         fn create() -> Self {
@@ -480,7 +489,7 @@ mod tests {
             inspected
         }
 
-        fn assert_exact_cleanup(self) {
+        pub(super) fn assert_exact_cleanup(self) {
             fs::remove_dir_all(&self.0).expect("exact synthetic root cleanup should succeed");
             assert!(!self.0.exists());
         }
@@ -636,6 +645,19 @@ mod tests {
             validate_production_database_evidence_correspondence(live, assessment)
         else {
             panic!("synthetic evidence should correspond");
+        };
+        (root, owner)
+    }
+
+    pub(super) fn fresh_owner() -> (
+        TestRoot,
+        DatabaseFreshnessValidatedProductionDatabaseConnection,
+    ) {
+        let (root, owner) = correspondence_owner(7, 11);
+        let ProductionDatabaseFreshnessValidationOutcome::Validated(owner) =
+            validate_production_database_freshness(owner, present(MATCHING_IDENTITY, 7, 11))
+        else {
+            panic!("matching current anchor should validate freshness");
         };
         (root, owner)
     }

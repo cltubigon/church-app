@@ -29,6 +29,10 @@ pub(crate) use database_evidence_correspondence_validation::{
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome,
+    ProductionDatabaseStartupAuthorizationCloseFailure,
+    ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
+    ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
+    StartupAuthorizedProductionDatabaseConnection, authorize_production_database_startup,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
 };
 
