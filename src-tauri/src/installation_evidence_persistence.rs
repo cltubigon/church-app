@@ -25,6 +25,54 @@ impl fmt::Debug for ActiveInstallationEvidenceWrapperLoadError {
     }
 }
 
+#[cfg(all(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActiveWrapperLoaderDiagnosticCategory {
+    PathUnavailable,
+    ComponentReparse,
+    WrongEntryType,
+    IdentityChanged,
+    HardLinkRejected,
+    FinalPathMismatch,
+    SameVolumeMismatch,
+    InspectionUnavailable,
+    FactsChanged,
+    ReadUnavailable,
+    WrapperInvalid,
+}
+
+#[cfg(all(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActiveWrapperLoaderDiagnosticComponent {
+    SharedTemporaryParent,
+    UniqueFixtureRoot,
+    EvidenceDirectory,
+    ActiveAuthenticationKeyWrapper,
+    ActiveAuthenticatedEvidenceWrapper,
+}
+
+#[cfg(all(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActiveWrapperLoaderChangedFact {
+    ReportedSize,
+    DeletePendingState,
+    Attributes,
+    ReparseTag,
+}
+
+#[cfg(all(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ActiveWrapperLoaderDiagnostic {
+    pub(crate) category: ActiveWrapperLoaderDiagnosticCategory,
+    pub(crate) component: Option<ActiveWrapperLoaderDiagnosticComponent>,
+    pub(crate) changed_fact: Option<ActiveWrapperLoaderChangedFact>,
+}
+
+#[cfg(all(windows, test))]
+pub(crate) fn take_active_wrapper_loader_diagnostic() -> Option<ActiveWrapperLoaderDiagnostic> {
+    windows_filesystem::take_active_wrapper_loader_diagnostic()
+}
+
 #[cfg(windows)]
 pub(crate) fn load_active_installation_evidence_wrapper_pair(
     paths: &crate::storage_foundation::InstallationEvidencePersistencePaths,

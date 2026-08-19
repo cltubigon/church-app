@@ -53,6 +53,11 @@ use super::{
     ActiveInstallationEvidenceWrapperLoadError, BoundedReadError, MAXIMUM_PROTECTED_WRAPPER_LENGTH,
     MINIMUM_PROTECTED_WRAPPER_LENGTH, ProtectedWrapperBytes, read_bounded_protected_wrapper,
 };
+#[cfg(test)]
+use super::{
+    ActiveWrapperLoaderChangedFact, ActiveWrapperLoaderDiagnostic,
+    ActiveWrapperLoaderDiagnosticCategory, ActiveWrapperLoaderDiagnosticComponent,
+};
 
 type CreateFileWBinding = unsafe extern "system" fn(
     PCWSTR,
@@ -194,6 +199,102 @@ enum HardeningError {
     FactsChanged,
     ReadUnavailable,
     WrapperInvalid,
+}
+
+#[derive(Clone, Copy)]
+enum StabilityComponent {
+    SharedTemporaryParent,
+    UniqueFixtureRoot,
+    EvidenceDirectory,
+    ActiveAuthenticationKeyWrapper,
+    ActiveAuthenticatedEvidenceWrapper,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ACTIVE_WRAPPER_LOADER_DIAGNOSTIC: std::cell::Cell<Option<ActiveWrapperLoaderDiagnostic>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn hardening_diagnostic_category(error: HardeningError) -> ActiveWrapperLoaderDiagnosticCategory {
+    match error {
+        HardeningError::PathUnavailable => ActiveWrapperLoaderDiagnosticCategory::PathUnavailable,
+        HardeningError::ComponentReparse => ActiveWrapperLoaderDiagnosticCategory::ComponentReparse,
+        HardeningError::WrongEntryType => ActiveWrapperLoaderDiagnosticCategory::WrongEntryType,
+        HardeningError::IdentityChanged => ActiveWrapperLoaderDiagnosticCategory::IdentityChanged,
+        HardeningError::HardLinkRejected => ActiveWrapperLoaderDiagnosticCategory::HardLinkRejected,
+        HardeningError::FinalPathMismatch => {
+            ActiveWrapperLoaderDiagnosticCategory::FinalPathMismatch
+        }
+        HardeningError::SameVolumeMismatch => {
+            ActiveWrapperLoaderDiagnosticCategory::SameVolumeMismatch
+        }
+        HardeningError::InspectionUnavailable => {
+            ActiveWrapperLoaderDiagnosticCategory::InspectionUnavailable
+        }
+        HardeningError::FactsChanged => ActiveWrapperLoaderDiagnosticCategory::FactsChanged,
+        HardeningError::ReadUnavailable => ActiveWrapperLoaderDiagnosticCategory::ReadUnavailable,
+        HardeningError::WrapperInvalid => ActiveWrapperLoaderDiagnosticCategory::WrapperInvalid,
+    }
+}
+
+#[cfg(test)]
+fn record_active_wrapper_loader_error(error: HardeningError) {
+    ACTIVE_WRAPPER_LOADER_DIAGNOSTIC.with(|diagnostic| {
+        let existing = diagnostic.get();
+        diagnostic.set(Some(ActiveWrapperLoaderDiagnostic {
+            category: hardening_diagnostic_category(error),
+            component: existing.and_then(|value| value.component),
+            changed_fact: existing.and_then(|value| value.changed_fact),
+        }));
+    });
+}
+
+#[cfg(test)]
+fn record_facts_changed(
+    component: StabilityComponent,
+    before: &HardeningObservation,
+    after: &HardeningObservation,
+) {
+    let component = match component {
+        StabilityComponent::SharedTemporaryParent => {
+            ActiveWrapperLoaderDiagnosticComponent::SharedTemporaryParent
+        }
+        StabilityComponent::UniqueFixtureRoot => {
+            ActiveWrapperLoaderDiagnosticComponent::UniqueFixtureRoot
+        }
+        StabilityComponent::EvidenceDirectory => {
+            ActiveWrapperLoaderDiagnosticComponent::EvidenceDirectory
+        }
+        StabilityComponent::ActiveAuthenticationKeyWrapper => {
+            ActiveWrapperLoaderDiagnosticComponent::ActiveAuthenticationKeyWrapper
+        }
+        StabilityComponent::ActiveAuthenticatedEvidenceWrapper => {
+            ActiveWrapperLoaderDiagnosticComponent::ActiveAuthenticatedEvidenceWrapper
+        }
+    };
+    let changed_fact = if before.size != after.size {
+        ActiveWrapperLoaderChangedFact::ReportedSize
+    } else if before.delete_pending != after.delete_pending {
+        ActiveWrapperLoaderChangedFact::DeletePendingState
+    } else if before.attributes != after.attributes {
+        ActiveWrapperLoaderChangedFact::Attributes
+    } else {
+        ActiveWrapperLoaderChangedFact::ReparseTag
+    };
+    ACTIVE_WRAPPER_LOADER_DIAGNOSTIC.with(|diagnostic| {
+        diagnostic.set(Some(ActiveWrapperLoaderDiagnostic {
+            category: ActiveWrapperLoaderDiagnosticCategory::FactsChanged,
+            component: Some(component),
+            changed_fact: Some(changed_fact),
+        }));
+    });
+}
+
+#[cfg(test)]
+pub(super) fn take_active_wrapper_loader_diagnostic() -> Option<ActiveWrapperLoaderDiagnostic> {
+    ACTIVE_WRAPPER_LOADER_DIAGNOSTIC.with(std::cell::Cell::take)
 }
 
 impl fmt::Debug for HardeningError {
@@ -608,6 +709,23 @@ fn validate_stable_observations(
     Ok(())
 }
 
+fn validate_component_stability(
+    component: StabilityComponent,
+    before: Option<&HardeningObservation>,
+    after: Option<&HardeningObservation>,
+) -> Result<(), HardeningError> {
+    let result = validate_stable_observations(before, after);
+    #[cfg(test)]
+    if result == Err(HardeningError::FactsChanged)
+        && let (Some(before), Some(after)) = (before, after)
+    {
+        record_facts_changed(component, before, after);
+    }
+    #[cfg(not(test))]
+    let _ = component;
+    result
+}
+
 fn inspect_hardened_authentication_key_wrapper(
     path: &Path,
     expected_name: &str,
@@ -640,6 +758,7 @@ where
         path,
         expected_name,
         retained,
+        StabilityComponent::ActiveAuthenticationKeyWrapper,
         mutation,
         reader,
         |bytes| {
@@ -662,6 +781,7 @@ fn inspect_hardened_authenticated_evidence_wrapper(
         path,
         expected_name,
         retained,
+        StabilityComponent::ActiveAuthenticatedEvidenceWrapper,
         || {},
         read_bounded_protected_wrapper,
         |bytes| {
@@ -676,6 +796,7 @@ fn inspect_hardened_wrapper_retained_with<M, R, V>(
     path: &Path,
     expected_name: &str,
     retained: &[RetainedDirectory],
+    component: StabilityComponent,
     mutation: M,
     reader: R,
     validator: V,
@@ -716,7 +837,7 @@ where
     let loaded = reader(&mut file, before.size).map_err(|_| HardeningError::ReadUnavailable)?;
     validator(loaded.as_bytes())?;
     let after = query_hardening_observation(&file)?;
-    validate_stable_observations(Some(&before), Some(&after))?;
+    validate_component_stability(component, Some(&before), Some(&after))?;
     let directory_identities_after = retained
         .iter()
         .map(|directory| query_handle_identity(&directory.handle))
@@ -774,6 +895,7 @@ fn inspect_retained_active_wrapper<V>(
     path: &Path,
     expected_name: &str,
     retained: &[RetainedDirectory],
+    component: StabilityComponent,
     validator: V,
 ) -> Result<LoadedActiveWrapper, HardeningError>
 where
@@ -783,6 +905,7 @@ where
         path,
         expected_name,
         retained,
+        component,
         || {},
         read_bounded_protected_wrapper,
         validator,
@@ -800,6 +923,7 @@ fn inspect_retained_active_authentication_key_wrapper(
         path,
         ACTIVE_AUTHENTICATION_KEY_FILENAME,
         retained,
+        StabilityComponent::ActiveAuthenticationKeyWrapper,
         |bytes| {
             EncodedProtectedWrapper::validate_authentication_key_bytes(bytes)
                 .map_err(|_| HardeningError::WrapperInvalid)
@@ -818,6 +942,7 @@ fn inspect_retained_active_authenticated_evidence_wrapper(
         path,
         ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
         retained,
+        StabilityComponent::ActiveAuthenticatedEvidenceWrapper,
         |bytes| {
             EncodedProtectedWrapper::validate_authenticated_evidence_bytes(bytes)
                 .map_err(|_| HardeningError::WrapperInvalid)
@@ -830,9 +955,10 @@ fn confirm_retained_active_wrapper(
     expected_name: &str,
     retained_directory: &RetainedDirectory,
     loaded: &LoadedActiveWrapper,
+    component: StabilityComponent,
 ) -> Result<(), HardeningError> {
     let retained_after = query_hardening_observation(&loaded.handle)?;
-    validate_stable_observations(Some(&loaded.initial), Some(&retained_after))?;
+    validate_component_stability(component, Some(&loaded.initial), Some(&retained_after))?;
 
     let encoded = encode_utf16_path(path)?;
     let reopened = open_for_read(&encoded)?;
@@ -854,16 +980,24 @@ fn confirm_retained_active_wrapper(
         &reopened_observation.final_path,
         &ascii_units(expected_name),
     )?;
-    validate_stable_observations(Some(&loaded.initial), Some(&reopened_observation))
+    validate_component_stability(
+        component,
+        Some(&loaded.initial),
+        Some(&reopened_observation),
+    )
 }
 
 fn confirm_retained_directories(
     validated: &ValidatedActiveWrapperPaths<'_>,
     retained: &[RetainedDirectory; 3],
 ) -> Result<(), HardeningError> {
-    for directory in retained {
+    for (directory, component) in retained.iter().zip([
+        StabilityComponent::SharedTemporaryParent,
+        StabilityComponent::UniqueFixtureRoot,
+        StabilityComponent::EvidenceDirectory,
+    ]) {
         let after = query_hardening_observation(&directory.handle)?;
-        validate_stable_observations(Some(&directory.initial), Some(&after))?;
+        validate_component_stability(component, Some(&directory.initial), Some(&after))?;
     }
 
     let reopened_evidence = open_hardened_directory(
@@ -873,7 +1007,11 @@ fn confirm_retained_directories(
             &ascii_units(INSTALLATION_EVIDENCE_DIRECTORY_NAME),
         )),
     )?;
-    validate_stable_observations(Some(&retained[2].initial), Some(&reopened_evidence.initial))
+    validate_component_stability(
+        StabilityComponent::EvidenceDirectory,
+        Some(&retained[2].initial),
+        Some(&reopened_evidence.initial),
+    )
 }
 
 fn validate_active_wrapper_paths(
@@ -1024,12 +1162,14 @@ where
         ACTIVE_AUTHENTICATION_KEY_FILENAME,
         &retained[2],
         &authentication_key,
+        StabilityComponent::ActiveAuthenticationKeyWrapper,
     )?;
     confirm_retained_active_wrapper(
         active_authenticated_evidence,
         ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
         &retained[2],
         &authenticated_evidence,
+        StabilityComponent::ActiveAuthenticatedEvidenceWrapper,
     )?;
     if authentication_key.initial.identity == authenticated_evidence.initial.identity {
         return Err(HardeningError::IdentityChanged);
@@ -1048,7 +1188,14 @@ where
 fn load_active_installation_evidence_wrappers(
     paths: &InstallationEvidencePersistencePaths,
 ) -> Result<(ProtectedWrapperBytes, ProtectedWrapperBytes), HardeningError> {
-    load_active_installation_evidence_wrappers_with_hook(paths, |_| {})
+    #[cfg(test)]
+    ACTIVE_WRAPPER_LOADER_DIAGNOSTIC.with(|diagnostic| diagnostic.set(None));
+    let result = load_active_installation_evidence_wrappers_with_hook(paths, |_| {});
+    #[cfg(test)]
+    if let Err(error) = &result {
+        record_active_wrapper_loader_error(*error);
+    }
+    result
 }
 
 pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(

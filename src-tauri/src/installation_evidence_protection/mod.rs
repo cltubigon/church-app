@@ -11,6 +11,8 @@ use zeroize::Zeroize;
 
 #[cfg(any(windows, test))]
 use crate::installation_evidence_persistence::ProtectedWrapperBytes;
+#[cfg(all(windows, test))]
+use crate::installation_evidence_persistence::take_active_wrapper_loader_diagnostic;
 use crate::{
     database_freshness_classification::{
         AssuredFreshnessAnchor, AssuredFreshnessAnchorConstructionToken,
@@ -2032,13 +2034,19 @@ mod tests {
 
             let error =
                 load_and_validate_active_installation_evidence(&fixture.paths).expect_err(case);
+            let loader_diagnostic = matches!(
+                &error,
+                ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed
+            )
+            .then(take_active_wrapper_loader_diagnostic)
+            .flatten();
 
             assert!(
                 matches!(
                     &error,
                     ActiveStructurallyValidatedEvidenceRecoveryError::StructuralValidationFailed
                 ),
-                "expected coarse structural-validation failure, got {error:?}"
+                "expected coarse structural-validation failure, got {error:?}; hardened loader diagnostic: {loader_diagnostic:?}"
             );
             fixture.assert_canonical_active_state();
         }
