@@ -10,8 +10,9 @@
 //! values; versions are positive `INTEGER` values; and creation time is a
 //! non-negative UTC Unix-millisecond `INTEGER` value.
 
-// The contract intentionally has no production caller until a separately
-// approved database stage exists.
+// This contract is consumed by the internal production-code validation chain
+// through startup authorization, but has no operational database-opening or
+// application-startup caller.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::{fmt, num::NonZeroU16};

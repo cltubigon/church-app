@@ -14,8 +14,9 @@
 //! grants startup, opening, recovery, replacement, destructive, or other
 //! operational authority.
 
-// This module intentionally has no production caller until a separately
-// approved integration stage exists.
+// This module is consumed by the internal production-code validation chain
+// through startup authorization, but has no operational application-startup
+// caller.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;
