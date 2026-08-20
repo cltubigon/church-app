@@ -1962,10 +1962,20 @@ mod tests {
         );
         let hmac_error = load_and_validate_active_installation_evidence(&wrong_hmac.paths)
             .expect_err("wrong HMAC must return no validated evidence");
-        assert!(matches!(
-            hmac_error,
-            ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
-        ));
+        let loader_diagnostic = matches!(
+            &hmac_error,
+            ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed
+        )
+        .then(take_active_wrapper_loader_diagnostic)
+        .flatten();
+
+        assert!(
+            matches!(
+                &hmac_error,
+                ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
+            ),
+            "expected coarse protection failure, got {hmac_error:?}; hardened loader diagnostic: {loader_diagnostic:?}"
+        );
         wrong_hmac.assert_canonical_active_state();
 
         let generation_mismatch = structurally_validated_active_evidence_composition_fixture(
@@ -2012,13 +2022,19 @@ mod tests {
 
             let error =
                 load_and_validate_active_installation_evidence(&fixture.paths).expect_err(case);
+            let loader_diagnostic = matches!(
+                &error,
+                ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed
+            )
+            .then(take_active_wrapper_loader_diagnostic)
+            .flatten();
 
             assert!(
                 matches!(
                     &error,
                     ActiveStructurallyValidatedEvidenceRecoveryError::PlaintextParseFailed
                 ),
-                "expected coarse plaintext-parse failure, got {error:?}"
+                "expected coarse plaintext-parse failure, got {error:?}; hardened loader diagnostic: {loader_diagnostic:?}"
             );
             fixture.assert_canonical_active_state();
         }
