@@ -1977,10 +1977,20 @@ mod tests {
         let generation_error =
             load_and_validate_active_installation_evidence(&generation_mismatch.paths)
                 .expect_err("generation mismatch must return no validated evidence");
-        assert!(matches!(
-            generation_error,
-            ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
-        ));
+        let loader_diagnostic = matches!(
+            &generation_error,
+            ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed
+        )
+        .then(take_active_wrapper_loader_diagnostic)
+        .flatten();
+
+        assert!(
+            matches!(
+                &generation_error,
+                ActiveStructurallyValidatedEvidenceRecoveryError::ProtectionFailed
+            ),
+            "expected coarse protection failure, got {generation_error:?}; hardened loader diagnostic: {loader_diagnostic:?}"
+        );
         generation_mismatch.assert_canonical_active_state();
     }
 
