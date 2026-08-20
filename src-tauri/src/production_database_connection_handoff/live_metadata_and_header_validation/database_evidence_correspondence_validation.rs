@@ -21,14 +21,15 @@ use super::{
 mod database_freshness_validation;
 
 pub(crate) use database_freshness_validation::{
-    DatabaseFreshnessValidatedProductionDatabaseConnection,
+    DatabaseFreshnessValidatedProductionDatabaseConnection, OperationalProductionDatabase,
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome,
     ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
-    StartupAuthorizedProductionDatabaseConnection, authorize_production_database_startup,
+    StartupAuthorizedProductionDatabaseConnection,
+    activate_production_database_for_operational_use, authorize_production_database_startup,
     validate_production_database_freshness,
 };
 

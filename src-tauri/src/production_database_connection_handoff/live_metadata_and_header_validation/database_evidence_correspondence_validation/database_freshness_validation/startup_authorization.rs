@@ -13,6 +13,12 @@ use super::{
     ProductionDatabaseConnectionCloseOutcome,
 };
 
+mod operational_activation;
+
+pub(crate) use operational_activation::{
+    OperationalProductionDatabase, activate_production_database_for_operational_use,
+};
+
 pub(crate) struct StartupAuthorizedProductionDatabaseConnection {
     owner: ConnectionLifetimeOwner,
     metadata_contract: DatabaseMetadataContractV1,

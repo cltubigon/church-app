@@ -25,14 +25,15 @@ pub(crate) use database_evidence_correspondence_validation::{
     DatabaseEvidenceCorrespondenceValidationCloseFailure,
     DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome,
     DatabaseEvidenceCorrespondenceValidationOutcome,
-    DatabaseFreshnessValidatedProductionDatabaseConnection,
+    DatabaseFreshnessValidatedProductionDatabaseConnection, OperationalProductionDatabase,
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome,
     ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
-    StartupAuthorizedProductionDatabaseConnection, authorize_production_database_startup,
+    StartupAuthorizedProductionDatabaseConnection,
+    activate_production_database_for_operational_use, authorize_production_database_startup,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
 };
 

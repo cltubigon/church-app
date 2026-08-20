@@ -19,10 +19,11 @@ use super::DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection;
 mod startup_authorization;
 
 pub(crate) use startup_authorization::{
-    ProductionDatabaseStartupAuthorizationCloseFailure,
+    OperationalProductionDatabase, ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
-    StartupAuthorizedProductionDatabaseConnection, authorize_production_database_startup,
+    StartupAuthorizedProductionDatabaseConnection,
+    activate_production_database_for_operational_use, authorize_production_database_startup,
 };
 
 /// Opaque owner proving that the existing pure freshness classifier returned
