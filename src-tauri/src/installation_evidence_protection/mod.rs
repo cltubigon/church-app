@@ -1926,8 +1926,21 @@ mod tests {
             canonical_plaintext,
         );
 
-        let validated = load_and_validate_active_installation_evidence(&fixture.paths)
-            .expect("canonical active evidence must reach structural validation");
+        let validated = match load_and_validate_active_installation_evidence(&fixture.paths) {
+            Ok(validated) => validated,
+            Err(error) => {
+                let loader_diagnostic = matches!(
+                    &error,
+                    ActiveStructurallyValidatedEvidenceRecoveryError::LoadFailed
+                )
+                .then(take_active_wrapper_loader_diagnostic)
+                .flatten();
+
+                panic!(
+                    "canonical active evidence must reach structural validation, got {error:?}; hardened loader diagnostic: {loader_diagnostic:?}"
+                );
+            }
+        };
 
         fn require_exact_result_type(_: StructurallyValidatedInstallationEvidence) {}
         require_exact_result_type(validated);
