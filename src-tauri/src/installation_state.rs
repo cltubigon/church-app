@@ -18,6 +18,31 @@ pub enum ExpectedStorageEvidence {
     Unavailable,
 }
 
+pub(crate) const fn installation_evidence_from_persisted_presence(
+    category: crate::installation_evidence_persistence::PersistedPresenceCategory,
+) -> InstallationEvidence {
+    use crate::installation_evidence_persistence::PersistedPresenceCategory;
+
+    match category {
+        PersistedPresenceCategory::CleanAbsenceCandidate => InstallationEvidence::NeverInitialized,
+        PersistedPresenceCategory::CompleteActiveSetCandidate => {
+            InstallationEvidence::Initialized(ExpectedStorageEvidence::Present)
+        }
+        PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseMissing => {
+            InstallationEvidence::Initialized(ExpectedStorageEvidence::Missing)
+        }
+        PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseUnavailable => {
+            InstallationEvidence::Initialized(ExpectedStorageEvidence::Unavailable)
+        }
+        PersistedPresenceCategory::PartialActiveSet
+        | PersistedPresenceCategory::UnexpectedStaging
+        | PersistedPresenceCategory::InconsistentPersistedState => {
+            InstallationEvidence::Inconsistent
+        }
+        PersistedPresenceCategory::UnavailableInspection => InstallationEvidence::Unavailable,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum SetupAuthorizationState {
     NotAuthorized,
@@ -151,6 +176,74 @@ pub fn decide_storage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::installation_evidence_persistence::PersistedPresenceCategory;
+
+    #[test]
+    fn every_persisted_presence_category_maps_to_exact_canonical_evidence() {
+        for (category, expected) in [
+            (
+                PersistedPresenceCategory::CleanAbsenceCandidate,
+                InstallationEvidence::NeverInitialized,
+            ),
+            (
+                PersistedPresenceCategory::CompleteActiveSetCandidate,
+                InstallationEvidence::Initialized(ExpectedStorageEvidence::Present),
+            ),
+            (
+                PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseMissing,
+                InstallationEvidence::Initialized(ExpectedStorageEvidence::Missing),
+            ),
+            (
+                PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseUnavailable,
+                InstallationEvidence::Initialized(ExpectedStorageEvidence::Unavailable),
+            ),
+            (
+                PersistedPresenceCategory::PartialActiveSet,
+                InstallationEvidence::Inconsistent,
+            ),
+            (
+                PersistedPresenceCategory::UnexpectedStaging,
+                InstallationEvidence::Inconsistent,
+            ),
+            (
+                PersistedPresenceCategory::InconsistentPersistedState,
+                InstallationEvidence::Inconsistent,
+            ),
+            (
+                PersistedPresenceCategory::UnavailableInspection,
+                InstallationEvidence::Unavailable,
+            ),
+        ] {
+            assert_eq!(
+                installation_evidence_from_persisted_presence(category),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_presence_adapter_is_path_free_io_free_and_policy_free() {
+        let source = include_str!("installation_state.rs");
+        let adapter = source
+            .split_once("pub(crate) const fn installation_evidence_from_persisted_presence")
+            .unwrap()
+            .1
+            .split_once("#[derive(Debug, Eq, PartialEq)]")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "_ =>",
+            "std::fs",
+            "Path",
+            "observe_",
+            "decide_ordinary_startup",
+            "authorize_first_time_setup",
+            "decide_storage",
+            "load_",
+        ] {
+            assert!(!adapter.contains(forbidden));
+        }
+    }
 
     #[test]
     fn ordinary_startup_does_not_authorize_uninitialized_setup() {

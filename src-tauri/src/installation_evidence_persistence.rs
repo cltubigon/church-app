@@ -1,11 +1,14 @@
 //! Primarily pure modeling for future installation-evidence persistence and
 //! bounded in-memory reading.
 //!
-//! On Windows, this module also exposes a crate-private read-only facade that
-//! delegates canonical active-wrapper loading to the hardened child filesystem
-//! boundary. The facade performs no filesystem writing and grants no setup,
-//! startup, database, installation-state, publication, replacement, cleanup,
-//! repair, or recovery authority.
+//! On Windows, this module also exposes a crate-private read-only facade for
+//! canonical active-wrapper loading and canonical installation-state observation
+//! and evidence production through the hardened child filesystem boundary. The
+//! observed evidence is an authority-relevant canonical fact consumed later by
+//! separate policy and authorization boundaries; it is not startup authority.
+//! The facade performs no filesystem writing and grants no setup, ordinary
+//! startup, database-opening, startup-authorization, publication, replacement,
+//! cleanup, repair, or recovery authority.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
@@ -33,6 +36,23 @@ pub(crate) fn load_active_installation_evidence_wrapper_pair(
     ActiveInstallationEvidenceWrapperLoadError,
 > {
     windows_filesystem::load_active_installation_evidence_wrapper_pair_coarse(paths)
+}
+
+#[cfg(windows)]
+pub(crate) fn observe_production_root_fact(
+    paths: &crate::storage_foundation::InstallationEvidencePersistencePaths,
+) -> ProductionRootFact {
+    windows_filesystem::observe_production_root_fact(paths)
+}
+
+#[cfg(windows)]
+#[allow(dead_code)]
+pub(crate) fn observe_production_installation_evidence(
+    paths: &crate::storage_foundation::InstallationEvidencePersistencePaths,
+) -> crate::installation_state::InstallationEvidence {
+    crate::installation_state::installation_evidence_from_persisted_presence(
+        classify_persisted_presence(observe_production_root_fact(paths)),
+    )
 }
 
 pub(crate) const MINIMUM_PROTECTED_WRAPPER_LENGTH: u64 = 15;
@@ -157,6 +177,7 @@ pub(crate) enum PersistedPresenceCategory {
     CleanAbsenceCandidate,
     CompleteActiveSetCandidate,
     ActiveExternalEvidenceWithDatabaseMissing,
+    ActiveExternalEvidenceWithDatabaseUnavailable,
     PartialActiveSet,
     UnexpectedStaging,
     UnavailableInspection,
@@ -176,6 +197,15 @@ pub(crate) fn classify_persisted_presence(
         ProductionRootFact::Validated(root) => root,
     };
 
+    if root.staged_database == FixedFileFact::RegularFile {
+        return PersistedPresenceCategory::UnexpectedStaging;
+    }
+    if root.active_database == FixedFileFact::UnexpectedEntryType
+        || root.staged_database == FixedFileFact::UnexpectedEntryType
+    {
+        return PersistedPresenceCategory::InconsistentPersistedState;
+    }
+
     let evidence = match root.evidence_directory {
         EvidenceDirectoryFact::Unavailable => {
             return PersistedPresenceCategory::UnavailableInspection;
@@ -187,23 +217,14 @@ pub(crate) fn classify_persisted_presence(
         EvidenceDirectoryFact::Directory(children) => children,
     };
 
-    let files = [
-        root.active_database,
+    let non_database_files = [
         root.staged_database,
         evidence.active_authentication_key,
         evidence.active_authenticated_evidence,
         evidence.staged_authentication_key,
         evidence.staged_authenticated_evidence,
     ];
-    if files.contains(&FixedFileFact::Unavailable) {
-        return PersistedPresenceCategory::UnavailableInspection;
-    }
-    if files.contains(&FixedFileFact::UnexpectedEntryType) {
-        return PersistedPresenceCategory::InconsistentPersistedState;
-    }
-
     let present = |fact| matches!(fact, FixedFileFact::RegularFile);
-    let database_present = present(root.active_database);
     let key_present = present(evidence.active_authentication_key);
     let evidence_present = present(evidence.active_authenticated_evidence);
     let stage_present = present(root.staged_database)
@@ -211,13 +232,32 @@ pub(crate) fn classify_persisted_presence(
         || present(evidence.staged_authenticated_evidence);
 
     if stage_present {
-        PersistedPresenceCategory::UnexpectedStaging
-    } else if database_present && key_present && evidence_present {
+        return PersistedPresenceCategory::UnexpectedStaging;
+    }
+    if root.active_database == FixedFileFact::UnexpectedEntryType
+        || non_database_files.contains(&FixedFileFact::UnexpectedEntryType)
+    {
+        return PersistedPresenceCategory::InconsistentPersistedState;
+    }
+    if non_database_files.contains(&FixedFileFact::Unavailable) {
+        return PersistedPresenceCategory::UnavailableInspection;
+    }
+    if key_present != evidence_present {
+        return PersistedPresenceCategory::PartialActiveSet;
+    }
+    if root.active_database == FixedFileFact::Unavailable {
+        return if key_present && evidence_present {
+            PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseUnavailable
+        } else {
+            PersistedPresenceCategory::UnavailableInspection
+        };
+    }
+
+    let database_present = present(root.active_database);
+    if database_present && key_present && evidence_present {
         PersistedPresenceCategory::CompleteActiveSetCandidate
     } else if !database_present && key_present && evidence_present {
         PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseMissing
-    } else if key_present != evidence_present {
-        PersistedPresenceCategory::PartialActiveSet
     } else if database_present {
         PersistedPresenceCategory::InconsistentPersistedState
     } else {
@@ -907,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn each_unavailable_fact_independently_has_highest_precedence() {
+    fn unavailable_facts_fail_closed_with_the_single_database_only_distinction() {
         assert_eq!(
             classify_persisted_presence(ProductionRootFact::Unavailable),
             PersistedPresenceCategory::UnavailableInspection
@@ -924,7 +964,7 @@ mod tests {
         );
 
         for index in 0..6 {
-            let mut root = match root_with_bits(0b110101) {
+            let mut root = match root_with_bits(0b001100) {
                 ProductionRootFact::Validated(root) => root,
                 _ => unreachable!(),
             };
@@ -945,13 +985,57 @@ mod tests {
             }
             assert_eq!(
                 classify_persisted_presence(ProductionRootFact::Validated(root)),
-                PersistedPresenceCategory::UnavailableInspection
+                if index == 0 {
+                    PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseUnavailable
+                } else {
+                    PersistedPresenceCategory::UnavailableInspection
+                }
             );
         }
     }
 
     #[test]
-    fn unexpected_entry_types_fail_closed_after_unavailable_precedence() {
+    fn database_unavailable_after_initialization_requires_complete_external_evidence_only() {
+        let mut complete_external = match root_with_bits(0b001100) {
+            ProductionRootFact::Validated(root) => root,
+            _ => unreachable!(),
+        };
+        complete_external.active_database = FixedFileFact::Unavailable;
+        assert_eq!(
+            classify_persisted_presence(ProductionRootFact::Validated(complete_external)),
+            PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseUnavailable
+        );
+
+        let mut no_external = match root_with_bits(0) {
+            ProductionRootFact::Validated(root) => root,
+            _ => unreachable!(),
+        };
+        no_external.active_database = FixedFileFact::Unavailable;
+        assert_eq!(
+            classify_persisted_presence(ProductionRootFact::Validated(no_external)),
+            PersistedPresenceCategory::UnavailableInspection
+        );
+
+        let mut partial_external = match root_with_bits(0b000100) {
+            ProductionRootFact::Validated(root) => root,
+            _ => unreachable!(),
+        };
+        partial_external.active_database = FixedFileFact::Unavailable;
+        assert_eq!(
+            classify_persisted_presence(ProductionRootFact::Validated(partial_external)),
+            PersistedPresenceCategory::PartialActiveSet
+        );
+
+        let mut staged = complete_external;
+        staged.staged_database = FixedFileFact::RegularFile;
+        assert_eq!(
+            classify_persisted_presence(ProductionRootFact::Validated(staged)),
+            PersistedPresenceCategory::UnexpectedStaging
+        );
+    }
+
+    #[test]
+    fn unexpected_entry_types_and_concrete_staging_fail_closed() {
         assert_eq!(
             classify_persisted_presence(ProductionRootFact::UnexpectedEntryType),
             PersistedPresenceCategory::InconsistentPersistedState
@@ -1005,14 +1089,20 @@ mod tests {
             });
         assert_eq!(
             classify_persisted_presence(unavailable_over_unexpected),
-            PersistedPresenceCategory::UnavailableInspection
+            PersistedPresenceCategory::InconsistentPersistedState
         );
     }
 
     #[test]
     fn classifier_has_no_operational_installation_state_conversion() {
         const SOURCE: &str = include_str!("installation_evidence_persistence.rs");
-        let production_source = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production_source = SOURCE
+            .split_once("pub(crate) fn classify_persisted_presence")
+            .unwrap()
+            .1
+            .split_once("impl EvidenceDirectoryChildrenFacts")
+            .unwrap()
+            .0;
         for forbidden_identifier in [
             "installation_state",
             "InstallationEvidence",
@@ -1510,6 +1600,7 @@ mod tests {
             );
             for baseline in [
                 PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseMissing,
+                PersistedPresenceCategory::ActiveExternalEvidenceWithDatabaseUnavailable,
                 PersistedPresenceCategory::PartialActiveSet,
                 PersistedPresenceCategory::UnavailableInspection,
                 PersistedPresenceCategory::InconsistentPersistedState,
@@ -1552,7 +1643,6 @@ mod tests {
             ["tauri", "::"].concat(),
             ["dp", "api"].concat(),
             ["rusq", "lite"].concat(),
-            ["installation", "_state"].concat(),
             ["serde", "::"].concat(),
             ["rollback", "("].concat(),
             ["cleanup", "("].concat(),

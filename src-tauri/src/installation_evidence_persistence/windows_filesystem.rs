@@ -1,9 +1,12 @@
 //! Windows-only installation-evidence filesystem boundary.
 //!
-//! Production compilation includes only private read-hardening primitives for
-//! already-supplied paths. They have no production caller. Filesystem mutation,
-//! publication, replacement, cleanup, and host-classification behavior remains
-//! compiler-gated to tests beneath unique test-owned temporary roots.
+//! Production compilation includes private read-hardening primitives for
+//! already-supplied paths. Through the parent facade, they serve active-wrapper
+//! loading and canonical persisted-state observation. The boundary remains
+//! read-only and does not authorize setup, startup, database opening, or
+//! operational state. Filesystem mutation, publication, replacement, cleanup,
+//! and host-classification behavior remains compiler-gated to tests beneath
+//! unique test-owned temporary roots.
 
 #![allow(dead_code)]
 
@@ -20,7 +23,8 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WIN32_ERROR,
+            ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_READ, GENERIC_WRITE, GetLastError,
+            HANDLE, INVALID_HANDLE_VALUE, WIN32_ERROR,
         },
         Security::SECURITY_ATTRIBUTES,
         Storage::FileSystem::{
@@ -45,13 +49,16 @@ use crate::{
     storage_foundation::{
         ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME, ACTIVE_AUTHENTICATION_KEY_FILENAME,
         INSTALLATION_EVIDENCE_DIRECTORY_NAME, InstallationEvidencePersistencePaths,
-        PRODUCTION_DATABASE_FILENAME,
+        PRODUCTION_DATABASE_FILENAME, PRODUCTION_DATABASE_STAGE_FILENAME,
+        STAGED_AUTHENTICATED_EVIDENCE_FILENAME, STAGED_AUTHENTICATION_KEY_FILENAME,
     },
 };
 
 use super::{
-    ActiveInstallationEvidenceWrapperLoadError, BoundedReadError, MAXIMUM_PROTECTED_WRAPPER_LENGTH,
-    MINIMUM_PROTECTED_WRAPPER_LENGTH, ProtectedWrapperBytes, read_bounded_protected_wrapper,
+    ActiveInstallationEvidenceWrapperLoadError, BoundedReadError, EvidenceDirectoryChildrenFacts,
+    EvidenceDirectoryFact, FixedFileFact, MAXIMUM_PROTECTED_WRAPPER_LENGTH,
+    MINIMUM_PROTECTED_WRAPPER_LENGTH, ProductionRootFact, ProtectedWrapperBytes,
+    ValidatedProductionRootFacts, read_bounded_protected_wrapper,
 };
 
 type CreateFileWBinding = unsafe extern "system" fn(
@@ -154,7 +161,8 @@ const STANDARD_INFORMATION_CLASS: FILE_INFO_BY_HANDLE_CLASS = FileStandardInfo;
 const ATTRIBUTE_TAG_INFORMATION_CLASS: FILE_INFO_BY_HANDLE_CLASS = FileAttributeTagInfo;
 const FILE_ID_INFORMATION_CLASS: FILE_INFO_BY_HANDLE_CLASS = FileIdInfo;
 
-// PRODUCTION READ-HARDENING CORE START: private, read-only, and currently uncalled.
+// PRODUCTION READ-HARDENING CORE START: private and read-only; serves active-wrapper
+// loading and canonical persisted-state observation through the parent facade.
 const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
 const VOLUME_GUID_PREFIX_UNITS: usize = 49;
 
@@ -183,6 +191,7 @@ struct HardeningObservation {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum HardeningError {
+    Missing,
     PathUnavailable,
     ComponentReparse,
     WrongEntryType,
@@ -199,6 +208,7 @@ enum HardeningError {
 impl fmt::Debug for HardeningError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Missing => "Missing",
             Self::PathUnavailable => "PathUnavailable",
             Self::ComponentReparse => "ComponentReparse",
             Self::WrongEntryType => "WrongEntryType",
@@ -530,9 +540,10 @@ fn validate_same_volume(
     Ok(())
 }
 
-fn open_hardened_directory(
+fn open_hardened_directory_internal(
     path: &Path,
     parent: Option<(&HardeningObservation, &[u16])>,
+    distinguish_missing: bool,
 ) -> Result<RetainedDirectory, HardeningError> {
     #[cfg(test)]
     ACTIVE_WRAPPER_LOADER_TEST_CALLS
@@ -552,7 +563,15 @@ fn open_hardened_directory(
         )
     };
     if raw == INVALID_HANDLE_VALUE {
-        return Err(HardeningError::InspectionUnavailable);
+        // SAFETY: this immediately follows the failed native call.
+        let error = unsafe { GetLastError() };
+        return if distinguish_missing
+            && matches!(error, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+        {
+            Err(HardeningError::Missing)
+        } else {
+            Err(HardeningError::InspectionUnavailable)
+        };
     }
     // SAFETY: ownership of the fresh successful handle is transferred once.
     let handle = File::from(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) });
@@ -574,6 +593,20 @@ fn open_hardened_directory(
         handle,
         initial: observation,
     })
+}
+
+fn open_hardened_directory(
+    path: &Path,
+    parent: Option<(&HardeningObservation, &[u16])>,
+) -> Result<RetainedDirectory, HardeningError> {
+    open_hardened_directory_internal(path, parent, false)
+}
+
+fn open_hardened_directory_for_observation(
+    path: &Path,
+    parent: Option<(&HardeningObservation, &[u16])>,
+) -> Result<RetainedDirectory, HardeningError> {
+    open_hardened_directory_internal(path, parent, true)
 }
 
 fn validate_stable_observations(
@@ -1049,6 +1082,496 @@ fn load_active_installation_evidence_wrappers(
     paths: &InstallationEvidencePersistencePaths,
 ) -> Result<(ProtectedWrapperBytes, ProtectedWrapperBytes), HardeningError> {
     load_active_installation_evidence_wrappers_with_hook(paths, |_| {})
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct RootNames {
+    active_database: bool,
+    staged_database: bool,
+    evidence_directory: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct EvidenceNames {
+    active_authentication_key: bool,
+    active_authenticated_evidence: bool,
+    staged_authentication_key: bool,
+    staged_authenticated_evidence: bool,
+}
+
+struct RetainedPresenceFile {
+    handle: File,
+    initial: HardeningObservation,
+    encoded_path: Vec<u16>,
+}
+
+#[derive(Clone, Copy)]
+enum ObservationPhase {
+    AfterFirstEnumeration,
+}
+
+fn exact_name(name: &OsStr, expected: &str) -> bool {
+    name.encode_wide().eq(expected.encode_utf16())
+}
+
+fn fold_ascii_name_unit(unit: u16) -> u16 {
+    if (b'A' as u16..=b'Z' as u16).contains(&unit) {
+        unit + u16::from(b'a' - b'A')
+    } else {
+        unit
+    }
+}
+
+fn ascii_case_insensitive_name(name: &OsStr, expected: &str) -> bool {
+    let actual = name.encode_wide().collect::<Vec<_>>();
+    let expected = expected.encode_utf16().collect::<Vec<_>>();
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            fold_ascii_name_unit(*actual) == fold_ascii_name_unit(expected)
+        })
+}
+
+fn enumerate_root_names(root: &Path) -> Result<RootNames, HardeningError> {
+    let mut names = RootNames {
+        active_database: false,
+        staged_database: false,
+        evidence_directory: false,
+    };
+    for entry in fs::read_dir(root).map_err(|_| HardeningError::InspectionUnavailable)? {
+        let name = entry
+            .map_err(|_| HardeningError::InspectionUnavailable)?
+            .file_name();
+        let recognized = [
+            (PRODUCTION_DATABASE_FILENAME, &mut names.active_database),
+            (
+                PRODUCTION_DATABASE_STAGE_FILENAME,
+                &mut names.staged_database,
+            ),
+            (
+                INSTALLATION_EVIDENCE_DIRECTORY_NAME,
+                &mut names.evidence_directory,
+            ),
+        ];
+        let mut matched = false;
+        for (expected, present) in recognized {
+            if exact_name(&name, expected) {
+                if *present {
+                    return Err(HardeningError::WrongEntryType);
+                }
+                *present = true;
+                matched = true;
+                break;
+            }
+            if ascii_case_insensitive_name(&name, expected) {
+                return Err(HardeningError::WrongEntryType);
+            }
+        }
+        if !matched {
+            // Unrelated production-root namespaces are deliberately ignored.
+        }
+    }
+    Ok(names)
+}
+
+fn enumerate_exact_child_name(parent: &Path, expected: &OsStr) -> Result<bool, HardeningError> {
+    let expected = expected.encode_wide().collect::<Vec<_>>();
+    let mut present = false;
+    for entry in fs::read_dir(parent).map_err(|_| HardeningError::InspectionUnavailable)? {
+        let name = entry
+            .map_err(|_| HardeningError::InspectionUnavailable)?
+            .file_name()
+            .encode_wide()
+            .collect::<Vec<_>>();
+        if name == expected {
+            if present {
+                return Err(HardeningError::WrongEntryType);
+            }
+            present = true;
+        }
+    }
+    Ok(present)
+}
+
+fn enumerate_evidence_names(directory: &Path) -> Result<EvidenceNames, HardeningError> {
+    let mut names = EvidenceNames {
+        active_authentication_key: false,
+        active_authenticated_evidence: false,
+        staged_authentication_key: false,
+        staged_authenticated_evidence: false,
+    };
+    for entry in fs::read_dir(directory).map_err(|_| HardeningError::InspectionUnavailable)? {
+        let name = entry
+            .map_err(|_| HardeningError::InspectionUnavailable)?
+            .file_name();
+        let recognized = [
+            (
+                ACTIVE_AUTHENTICATION_KEY_FILENAME,
+                &mut names.active_authentication_key,
+            ),
+            (
+                ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+                &mut names.active_authenticated_evidence,
+            ),
+            (
+                STAGED_AUTHENTICATION_KEY_FILENAME,
+                &mut names.staged_authentication_key,
+            ),
+            (
+                STAGED_AUTHENTICATED_EVIDENCE_FILENAME,
+                &mut names.staged_authenticated_evidence,
+            ),
+        ];
+        let mut matched = false;
+        for (expected, present) in recognized {
+            if exact_name(&name, expected) {
+                if *present {
+                    return Err(HardeningError::WrongEntryType);
+                }
+                *present = true;
+                matched = true;
+                break;
+            }
+            if ascii_case_insensitive_name(&name, expected) {
+                return Err(HardeningError::WrongEntryType);
+            }
+        }
+        if !matched {
+            return Err(HardeningError::WrongEntryType);
+        }
+    }
+    Ok(names)
+}
+
+fn validate_observation_paths(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<&Path, HardeningError> {
+    let root = paths
+        .active_database
+        .as_path()
+        .parent()
+        .ok_or(HardeningError::PathUnavailable)?;
+    let evidence = root.join(INSTALLATION_EVIDENCE_DIRECTORY_NAME);
+    if paths.active_database.as_path() != root.join(PRODUCTION_DATABASE_FILENAME)
+        || paths.staged_database.as_path() != root.join(PRODUCTION_DATABASE_STAGE_FILENAME)
+        || paths.evidence_directory.as_path() != evidence
+        || paths.active_authentication_key.as_path()
+            != evidence.join(ACTIVE_AUTHENTICATION_KEY_FILENAME)
+        || paths.active_authenticated_evidence.as_path()
+            != evidence.join(ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME)
+        || paths.staged_authentication_key.as_path()
+            != evidence.join(STAGED_AUTHENTICATION_KEY_FILENAME)
+        || paths.staged_authenticated_evidence.as_path()
+            != evidence.join(STAGED_AUTHENTICATED_EVIDENCE_FILENAME)
+    {
+        return Err(HardeningError::FinalPathMismatch);
+    }
+    Ok(root)
+}
+
+fn inspect_presence_file(
+    path: &Path,
+    expected_name: &str,
+    parent: &RetainedDirectory,
+) -> Result<RetainedPresenceFile, HardeningError> {
+    let encoded = encode_utf16_path(path)?;
+    let handle = open_for_read(&encoded)?;
+    let initial = query_hardening_observation(&handle)?;
+    if initial.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 || initial.delete_pending {
+        return Err(HardeningError::WrongEntryType);
+    }
+    validate_reparse_facts(initial.attributes, initial.reparse_tag)?;
+    validate_wrapper_link_count(initial.link_count)?;
+    validate_approved_wrapper_name(path, expected_name)?;
+    validate_same_volume(&parent.initial, &initial)?;
+    exact_child_final_path(
+        &parent.initial.final_path,
+        &initial.final_path,
+        &ascii_units(expected_name),
+    )?;
+    Ok(RetainedPresenceFile {
+        handle,
+        initial,
+        encoded_path: encoded,
+    })
+}
+
+fn presence_fact(
+    present: bool,
+    path: &Path,
+    expected_name: &str,
+    parent: &RetainedDirectory,
+    retained: &mut Vec<RetainedPresenceFile>,
+) -> FixedFileFact {
+    if !present {
+        return FixedFileFact::Absent;
+    }
+    match inspect_presence_file(path, expected_name, parent) {
+        Ok(file) => {
+            retained.push(file);
+            FixedFileFact::RegularFile
+        }
+        Err(
+            HardeningError::ComponentReparse
+            | HardeningError::WrongEntryType
+            | HardeningError::HardLinkRejected
+            | HardeningError::FinalPathMismatch
+            | HardeningError::SameVolumeMismatch,
+        ) => FixedFileFact::UnexpectedEntryType,
+        Err(_) => match open_hardened_directory_for_observation(
+            path,
+            Some((&parent.initial, &ascii_units(expected_name))),
+        ) {
+            Ok(_)
+            | Err(
+                HardeningError::ComponentReparse
+                | HardeningError::FinalPathMismatch
+                | HardeningError::SameVolumeMismatch,
+            ) => FixedFileFact::UnexpectedEntryType,
+            Err(_) => FixedFileFact::Unavailable,
+        },
+    }
+}
+
+fn stable_presence_file(file: &RetainedPresenceFile) -> Result<(), HardeningError> {
+    let after = query_hardening_observation(&file.handle)?;
+    validate_stable_observations(Some(&file.initial), Some(&after))?;
+    let reopened = open_for_read(&file.encoded_path)?;
+    let reopened = query_hardening_observation(&reopened)?;
+    validate_stable_observations(Some(&file.initial), Some(&reopened))
+}
+
+fn stable_directory(directory: &RetainedDirectory) -> Result<(), HardeningError> {
+    let after = query_hardening_observation(&directory.handle)?;
+    validate_stable_observations(Some(&directory.initial), Some(&after))
+}
+
+fn empty_validated_root() -> ProductionRootFact {
+    ProductionRootFact::Validated(ValidatedProductionRootFacts {
+        active_database: FixedFileFact::Absent,
+        staged_database: FixedFileFact::Absent,
+        evidence_directory: EvidenceDirectoryFact::Absent,
+    })
+}
+
+fn observation_error_fact(error: HardeningError) -> ProductionRootFact {
+    match error {
+        HardeningError::ComponentReparse
+        | HardeningError::WrongEntryType
+        | HardeningError::HardLinkRejected
+        | HardeningError::FinalPathMismatch
+        | HardeningError::SameVolumeMismatch => ProductionRootFact::UnexpectedEntryType,
+        _ => ProductionRootFact::Unavailable,
+    }
+}
+
+fn observe_production_root_fact_with_hook<F>(
+    paths: &InstallationEvidencePersistencePaths,
+    mut hook: F,
+) -> ProductionRootFact
+where
+    F: FnMut(ObservationPhase),
+{
+    let root_path = match validate_observation_paths(paths) {
+        Ok(root) => root,
+        Err(error) => return observation_error_fact(error),
+    };
+    let parent_path = match root_path.parent() {
+        Some(parent) => parent,
+        None => return ProductionRootFact::Unavailable,
+    };
+    let root_os_name = match root_path.file_name() {
+        Some(name) => name,
+        None => return ProductionRootFact::Unavailable,
+    };
+    let root_name = root_os_name.encode_wide().collect::<Vec<_>>();
+    let parent = match open_hardened_directory_for_observation(parent_path, None) {
+        Ok(parent) => parent,
+        Err(error) => return observation_error_fact(error),
+    };
+    let root = match open_hardened_directory_for_observation(
+        root_path,
+        Some((&parent.initial, &root_name)),
+    ) {
+        Ok(root) => root,
+        Err(HardeningError::Missing) => {
+            let first_name = match enumerate_exact_child_name(parent_path, root_os_name) {
+                Ok(value) => value,
+                Err(_) => return ProductionRootFact::Unavailable,
+            };
+            let second = open_hardened_directory_for_observation(
+                root_path,
+                Some((&parent.initial, &root_name)),
+            );
+            let second_name = enumerate_exact_child_name(parent_path, root_os_name);
+            return match (second, second_name) {
+                (Err(HardeningError::Missing), Ok(false))
+                    if !first_name && stable_directory(&parent).is_ok() =>
+                {
+                    empty_validated_root()
+                }
+                _ => ProductionRootFact::Unavailable,
+            };
+        }
+        Err(error) => return observation_error_fact(error),
+    };
+
+    let first_root_names = match enumerate_root_names(root_path) {
+        Ok(names) => names,
+        Err(error) => return observation_error_fact(error),
+    };
+    let (evidence, evidence_open_fact) = if first_root_names.evidence_directory {
+        match open_hardened_directory_for_observation(
+            paths.evidence_directory.as_path(),
+            Some((
+                &root.initial,
+                &ascii_units(INSTALLATION_EVIDENCE_DIRECTORY_NAME),
+            )),
+        ) {
+            Ok(directory) => (Some(directory), None),
+            Err(error) => (
+                None,
+                Some(match error {
+                    HardeningError::ComponentReparse
+                    | HardeningError::WrongEntryType
+                    | HardeningError::FinalPathMismatch
+                    | HardeningError::SameVolumeMismatch => {
+                        EvidenceDirectoryFact::UnexpectedEntryType
+                    }
+                    _ => EvidenceDirectoryFact::Unavailable,
+                }),
+            ),
+        }
+    } else {
+        (None, Some(EvidenceDirectoryFact::Absent))
+    };
+    let first_evidence_names = match evidence.as_ref() {
+        Some(_) => match enumerate_evidence_names(paths.evidence_directory.as_path()) {
+            Ok(names) => Some(names),
+            Err(error) => return observation_error_fact(error),
+        },
+        None => None,
+    };
+
+    hook(ObservationPhase::AfterFirstEnumeration);
+
+    let mut retained_files = Vec::new();
+    let active_database = presence_fact(
+        first_root_names.active_database,
+        paths.active_database.as_path(),
+        PRODUCTION_DATABASE_FILENAME,
+        &root,
+        &mut retained_files,
+    );
+    let staged_database = presence_fact(
+        first_root_names.staged_database,
+        paths.staged_database.as_path(),
+        PRODUCTION_DATABASE_STAGE_FILENAME,
+        &root,
+        &mut retained_files,
+    );
+    let evidence_directory = match (evidence.as_ref(), first_evidence_names, evidence_open_fact) {
+        (None, None, Some(fact)) => fact,
+        (Some(directory), Some(names), None) => {
+            EvidenceDirectoryFact::Directory(EvidenceDirectoryChildrenFacts {
+                active_authentication_key: presence_fact(
+                    names.active_authentication_key,
+                    paths.active_authentication_key.as_path(),
+                    ACTIVE_AUTHENTICATION_KEY_FILENAME,
+                    directory,
+                    &mut retained_files,
+                ),
+                active_authenticated_evidence: presence_fact(
+                    names.active_authenticated_evidence,
+                    paths.active_authenticated_evidence.as_path(),
+                    ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+                    directory,
+                    &mut retained_files,
+                ),
+                staged_authentication_key: presence_fact(
+                    names.staged_authentication_key,
+                    paths.staged_authentication_key.as_path(),
+                    STAGED_AUTHENTICATION_KEY_FILENAME,
+                    directory,
+                    &mut retained_files,
+                ),
+                staged_authenticated_evidence: presence_fact(
+                    names.staged_authenticated_evidence,
+                    paths.staged_authenticated_evidence.as_path(),
+                    STAGED_AUTHENTICATED_EVIDENCE_FILENAME,
+                    directory,
+                    &mut retained_files,
+                ),
+            })
+        }
+        _ => return ProductionRootFact::Unavailable,
+    };
+
+    let second_root_names = match enumerate_root_names(root_path) {
+        Ok(names) => names,
+        Err(error) => return observation_error_fact(error),
+    };
+    let second_evidence_names = match evidence.as_ref() {
+        Some(_) => match enumerate_evidence_names(paths.evidence_directory.as_path()) {
+            Ok(names) => Some(names),
+            Err(error) => return observation_error_fact(error),
+        },
+        None => None,
+    };
+    if first_root_names != second_root_names || first_evidence_names != second_evidence_names {
+        return ProductionRootFact::Unavailable;
+    }
+    if stable_directory(&parent).is_err()
+        || stable_directory(&root).is_err()
+        || evidence
+            .as_ref()
+            .is_some_and(|value| stable_directory(value).is_err())
+        || retained_files
+            .iter()
+            .any(|file| stable_presence_file(file).is_err())
+    {
+        return ProductionRootFact::Unavailable;
+    }
+    let reopened_root =
+        open_hardened_directory_for_observation(root_path, Some((&parent.initial, &root_name)));
+    if !matches!(
+        reopened_root,
+        Ok(ref reopened)
+            if validate_stable_observations(Some(&root.initial), Some(&reopened.initial)).is_ok()
+    ) {
+        return ProductionRootFact::Unavailable;
+    }
+    if let Some(directory) = evidence.as_ref() {
+        let reopened = open_hardened_directory_for_observation(
+            paths.evidence_directory.as_path(),
+            Some((
+                &root.initial,
+                &ascii_units(INSTALLATION_EVIDENCE_DIRECTORY_NAME),
+            )),
+        );
+        if !matches!(
+            reopened,
+            Ok(ref reopened)
+                if validate_stable_observations(
+                    Some(&directory.initial),
+                    Some(&reopened.initial)
+                )
+                .is_ok()
+        ) {
+            return ProductionRootFact::Unavailable;
+        }
+    }
+
+    ProductionRootFact::Validated(ValidatedProductionRootFacts {
+        active_database,
+        staged_database,
+        evidence_directory,
+    })
+}
+
+pub(super) fn observe_production_root_fact(
+    paths: &InstallationEvidencePersistencePaths,
+) -> ProductionRootFact {
+    observe_production_root_fact_with_hook(paths, |_| {})
 }
 
 pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(
@@ -8116,7 +8639,7 @@ mod tests {
             .split_once("pub(crate) fn load_active_installation_evidence_wrapper_pair(")
             .unwrap()
             .1
-            .split_once("pub(crate) const MINIMUM_PROTECTED_WRAPPER_LENGTH")
+            .split_once("pub(crate) fn observe_production_root_fact(")
             .unwrap()
             .0;
         for required in [
@@ -9750,6 +10273,346 @@ mod tests {
                 !implementation.contains(forbidden),
                 "forbidden source: {forbidden}"
             );
+        }
+    }
+
+    mod production_root_observer_tests {
+        use super::*;
+        use std::{
+            fs::OpenOptions,
+            os::windows::fs::{OpenOptionsExt, symlink_file},
+        };
+
+        use crate::{
+            installation_evidence_persistence::{
+                classify_persisted_presence, observe_production_installation_evidence,
+            },
+            installation_state::{ExpectedStorageEvidence, InstallationEvidence},
+            storage_foundation::installation_evidence_persistence_paths,
+        };
+
+        struct Fixture {
+            root: PathBuf,
+            paths: InstallationEvidencePersistencePaths,
+        }
+
+        impl Fixture {
+            fn absent() -> Self {
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let root = std::env::temp_dir().join(format!(
+                    "church-app-production-root-observer-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                assert!(!root.try_exists().unwrap());
+                let paths = installation_evidence_persistence_paths(&root);
+                Self { root, paths }
+            }
+
+            fn root() -> Self {
+                let fixture = Self::absent();
+                fs::create_dir(&fixture.root).unwrap();
+                fixture
+            }
+
+            fn evidence_directory(&self) {
+                fs::create_dir(self.paths.evidence_directory.as_path()).unwrap();
+            }
+
+            fn file(&self, path: &Path) {
+                fs::write(path, b"synthetic-non-person-presence").unwrap();
+            }
+
+            fn active_pair(&self) {
+                self.evidence_directory();
+                self.file(self.paths.active_authentication_key.as_path());
+                self.file(self.paths.active_authenticated_evidence.as_path());
+            }
+
+            fn evidence(&self) -> InstallationEvidence {
+                observe_production_installation_evidence(&self.paths)
+            }
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if self.root.try_exists().unwrap_or(false) {
+                    fs::remove_dir_all(&self.root).unwrap();
+                }
+            }
+        }
+
+        #[test]
+        fn absent_root_empty_root_and_empty_evidence_directory_are_clean_absence() {
+            let absent = Fixture::absent();
+            assert_eq!(absent.evidence(), InstallationEvidence::NeverInitialized);
+
+            let empty_root = Fixture::root();
+            assert_eq!(
+                empty_root.evidence(),
+                InstallationEvidence::NeverInitialized
+            );
+
+            let empty_evidence = Fixture::root();
+            empty_evidence.evidence_directory();
+            assert_eq!(
+                empty_evidence.evidence(),
+                InstallationEvidence::NeverInitialized
+            );
+        }
+
+        #[test]
+        fn complete_active_missing_database_database_only_and_partial_pair_are_exact() {
+            let complete = Fixture::root();
+            complete.active_pair();
+            complete.file(complete.paths.active_database.as_path());
+            assert_eq!(
+                complete.evidence(),
+                InstallationEvidence::Initialized(ExpectedStorageEvidence::Present)
+            );
+
+            let missing_database = Fixture::root();
+            missing_database.active_pair();
+            assert_eq!(
+                missing_database.evidence(),
+                InstallationEvidence::Initialized(ExpectedStorageEvidence::Missing)
+            );
+
+            let database_only = Fixture::root();
+            database_only.file(database_only.paths.active_database.as_path());
+            assert_eq!(database_only.evidence(), InstallationEvidence::Inconsistent);
+
+            for key_only in [true, false] {
+                let partial = Fixture::root();
+                partial.evidence_directory();
+                partial.file(if key_only {
+                    partial.paths.active_authentication_key.as_path()
+                } else {
+                    partial.paths.active_authenticated_evidence.as_path()
+                });
+                assert_eq!(partial.evidence(), InstallationEvidence::Inconsistent);
+            }
+        }
+
+        #[test]
+        fn unavailable_database_preserves_known_initialization() {
+            let fixture = Fixture::root();
+            fixture.active_pair();
+            fixture.file(fixture.paths.active_database.as_path());
+            let _blocker = OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(fixture.paths.active_database.as_path())
+                .unwrap();
+
+            assert_eq!(
+                fixture.evidence(),
+                InstallationEvidence::Initialized(ExpectedStorageEvidence::Unavailable)
+            );
+        }
+
+        #[test]
+        fn every_stage_slot_and_stage_combined_with_active_state_are_inconsistent() {
+            for index in 0..3 {
+                let fixture = Fixture::root();
+                if index > 0 {
+                    fixture.evidence_directory();
+                }
+                fixture.file(match index {
+                    0 => fixture.paths.staged_database.as_path(),
+                    1 => fixture.paths.staged_authentication_key.as_path(),
+                    2 => fixture.paths.staged_authenticated_evidence.as_path(),
+                    _ => unreachable!(),
+                });
+                assert_eq!(fixture.evidence(), InstallationEvidence::Inconsistent);
+            }
+
+            let combined = Fixture::root();
+            combined.active_pair();
+            combined.file(combined.paths.active_database.as_path());
+            combined.file(combined.paths.staged_database.as_path());
+            assert_eq!(combined.evidence(), InstallationEvidence::Inconsistent);
+        }
+
+        #[test]
+        fn unknown_reserved_child_is_inconsistent_but_unrelated_root_entry_is_ignored() {
+            let unknown = Fixture::root();
+            unknown.evidence_directory();
+            unknown.file(
+                &unknown
+                    .paths
+                    .evidence_directory
+                    .as_path()
+                    .join("unknown.synthetic"),
+            );
+            assert_eq!(unknown.evidence(), InstallationEvidence::Inconsistent);
+
+            let unrelated = Fixture::root();
+            unrelated.file(&unrelated.root.join("unrelated-subsystem.synthetic"));
+            assert_eq!(unrelated.evidence(), InstallationEvidence::NeverInitialized);
+        }
+
+        #[test]
+        fn wrong_types_in_root_evidence_directory_and_wrapper_slots_are_inconsistent() {
+            let database_directory = Fixture::root();
+            fs::create_dir(database_directory.paths.active_database.as_path()).unwrap();
+            assert_eq!(
+                database_directory.evidence(),
+                InstallationEvidence::Inconsistent
+            );
+
+            let staged_database_directory = Fixture::root();
+            fs::create_dir(staged_database_directory.paths.staged_database.as_path()).unwrap();
+            assert_eq!(
+                staged_database_directory.evidence(),
+                InstallationEvidence::Inconsistent
+            );
+
+            let evidence_file = Fixture::root();
+            evidence_file.file(evidence_file.paths.evidence_directory.as_path());
+            assert_eq!(evidence_file.evidence(), InstallationEvidence::Inconsistent);
+
+            for active_key in [true, false] {
+                let wrapper_directory = Fixture::root();
+                wrapper_directory.evidence_directory();
+                fs::create_dir(if active_key {
+                    wrapper_directory.paths.active_authentication_key.as_path()
+                } else {
+                    wrapper_directory
+                        .paths
+                        .active_authenticated_evidence
+                        .as_path()
+                })
+                .unwrap();
+                assert_eq!(
+                    wrapper_directory.evidence(),
+                    InstallationEvidence::Inconsistent
+                );
+            }
+        }
+
+        #[test]
+        fn case_colliding_reserved_names_are_inconsistent() {
+            let root_collision = Fixture::root();
+            root_collision.file(&root_collision.root.join("PARISH-DATA.DB"));
+            assert_eq!(
+                root_collision.evidence(),
+                InstallationEvidence::Inconsistent
+            );
+
+            let evidence_collision = Fixture::root();
+            evidence_collision.evidence_directory();
+            evidence_collision.file(
+                &evidence_collision
+                    .paths
+                    .evidence_directory
+                    .as_path()
+                    .join("AUTHENTICATION-KEY.DPAPI"),
+            );
+            assert_eq!(
+                evidence_collision.evidence(),
+                InstallationEvidence::Inconsistent
+            );
+        }
+
+        #[test]
+        fn reparse_and_hard_linked_fixed_entries_are_inconsistent() {
+            let reparse = Fixture::root();
+            let target = reparse.root.join("reparse-target.synthetic");
+            reparse.file(&target);
+            if symlink_file(&target, reparse.paths.active_database.as_path()).is_ok() {
+                assert_eq!(reparse.evidence(), InstallationEvidence::Inconsistent);
+            }
+
+            let database_link = Fixture::root();
+            database_link.file(database_link.paths.active_database.as_path());
+            fs::hard_link(
+                database_link.paths.active_database.as_path(),
+                database_link.root.join("database-alias.synthetic"),
+            )
+            .unwrap();
+            assert_eq!(database_link.evidence(), InstallationEvidence::Inconsistent);
+
+            let wrapper_link = Fixture::root();
+            wrapper_link.active_pair();
+            fs::hard_link(
+                wrapper_link.paths.active_authentication_key.as_path(),
+                wrapper_link.root.join("wrapper-alias.synthetic"),
+            )
+            .unwrap();
+            assert_eq!(wrapper_link.evidence(), InstallationEvidence::Inconsistent);
+        }
+
+        #[test]
+        fn mutation_between_enumerations_is_unavailable_and_observation_is_otherwise_read_only() {
+            let unstable = Fixture::root();
+            let fact = observe_production_root_fact_with_hook(&unstable.paths, |_| {
+                unstable.file(unstable.paths.active_database.as_path());
+            });
+            assert_eq!(
+                classify_persisted_presence(fact),
+                super::super::super::PersistedPresenceCategory::UnavailableInspection
+            );
+
+            let stable = Fixture::root();
+            stable.active_pair();
+            stable.file(stable.paths.active_database.as_path());
+            let before_key = fs::read(stable.paths.active_authentication_key.as_path()).unwrap();
+            let before_evidence =
+                fs::read(stable.paths.active_authenticated_evidence.as_path()).unwrap();
+            let before_database = fs::read(stable.paths.active_database.as_path()).unwrap();
+            assert_eq!(
+                stable.evidence(),
+                InstallationEvidence::Initialized(ExpectedStorageEvidence::Present)
+            );
+            assert_eq!(
+                fs::read(stable.paths.active_authentication_key.as_path()).unwrap(),
+                before_key
+            );
+            assert_eq!(
+                fs::read(stable.paths.active_authenticated_evidence.as_path()).unwrap(),
+                before_evidence
+            );
+            assert_eq!(
+                fs::read(stable.paths.active_database.as_path()).unwrap(),
+                before_database
+            );
+        }
+
+        #[test]
+        fn observer_source_is_presence_only_and_grants_no_later_authority() {
+            let source = include_str!("windows_filesystem.rs");
+            let observer = source
+                .split_once("struct RootNames")
+                .unwrap()
+                .1
+                .split_once("pub(super) fn load_active_installation_evidence_wrapper_pair_coarse")
+                .unwrap()
+                .0;
+            for forbidden in [
+                "read_bounded_protected_wrapper",
+                "EncodedProtectedWrapper",
+                ".read(",
+                "rusqlite",
+                "sqlite3",
+                "sqlcipher",
+                "decide_ordinary_startup",
+                "authorize_first_time_setup",
+                "decide_storage",
+                "authorize_production_database_startup",
+                "remove_file",
+                "remove_dir",
+                "write_all",
+            ] {
+                assert!(
+                    !observer.contains(forbidden),
+                    "observer contains forbidden capability: {forbidden}"
+                );
+            }
+            assert!(observer.contains("enumerate_root_names"));
+            assert!(observer.contains("enumerate_evidence_names"));
+            assert!(observer.contains("validate_stable_observations"));
+            assert!(observer.contains("open_hardened_directory"));
         }
     }
 }
