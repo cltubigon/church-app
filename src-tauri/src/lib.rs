@@ -32,6 +32,7 @@ pub mod installation_state;
 mod manual_startup_debug_support;
 #[cfg(all(test, windows))]
 mod manual_startup_fixture;
+mod parish_identifier_generation;
 #[cfg(windows)]
 mod production_database_connection_handoff;
 mod production_database_file;
