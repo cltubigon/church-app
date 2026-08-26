@@ -7,6 +7,7 @@ mod application_lifecycle;
 mod database_freshness_classification;
 mod database_key;
 mod database_key_active_wrapper_loader;
+mod database_key_generation;
 mod database_key_presence;
 mod database_key_protected_payload;
 mod database_metadata_contract;
