@@ -204,7 +204,7 @@ Accepted focused evidence covers:
 - exactly one key call after pre-key policy and only then query-only enablement and verification;
 - opaque keyed-but-unvalidated ownership with no exposed guard, file, path, identity, content-read API, raw handle, or database-content capability;
 - full `Connection`/guard/proof ownership retained after construction-time or normal close failure, with consuming close and close-retry behavior; and
-- redacted coarse failure behavior and absence of an operational caller, frontend, IPC, or Tauri command.
+- redacted coarse failure behavior and absence of a direct frontend, IPC, Tauri-command, or separate application caller in that boundary; the later lifecycle composes it through the fixed chain.
 
 All 40 focused tests across `production_database_connection_handoff`, `production_database_file`, and `sqlcipher_database_key_application` passed. The accepted workflow also passed frontend formatting, frontend lint, frontend type-check, frontend tests, Rust formatting, Rust Clippy with warnings denied, and the locked Rust test suite. Rust totals were 616 passed, 0 failed, and 1 ignored.
 
@@ -229,17 +229,17 @@ Accepted real-engine and injected evidence covers:
 - exact quick-check success and zero-row, multiple-row, non-text, non-`ok`, malformed, interrupted, stepping-error, and incomplete result shapes;
 - phase-aware classification at statement preparation, query startup, and row stepping into exactly `EncryptedDatabaseAuthenticationOrCipherIntegrityFailed`, `SQLiteReadabilityOrIntegrityFailed`, `ValidationUnavailable`, or `ValidationInterruptedOrIncomplete`;
 - release of row streams and statements before failure close; primary-category preservation on close failure; consuming repeated close retry; validated-owner close failure; and retention of the same connection, write guard, and inspection proof; and
-- redaction and authority-boundary source checks excluding raw rusqlite errors, native codes, paths, keys, identifiers or identities, SQL/PRAGMA text, result diagnostics, raw handles, unrestricted SQL, connection exposure, operational callers, frontend, IPC, and Tauri commands.
+- redaction and authority-boundary source checks excluding raw rusqlite errors, native codes, paths, keys, identifiers or identities, SQL/PRAGMA text, result diagnostics, raw handles, unrestricted SQL, connection exposure, direct frontend/IPC callers, and Tauri commands.
 
-No separate readability query, `sqlite_master` query, metadata-table read, `application_id` or `user_version` observation, product-content query, explicit SQLite transaction, active cancellation API, or rusqlite hooks feature was added. The accepted synchronous `cipher_integrity_check` workload is proportional to database pages, with no production database-size ceiling or bounded-latency claim, and remains acceptable only while there is no operational caller.
+No separate readability query, `sqlite_master` query, metadata-table read, `application_id` or `user_version` observation, product-content query, explicit SQLite transaction, active cancellation API, or rusqlite hooks feature was added. The accepted synchronous `cipher_integrity_check` workload is proportional to database pages, with no production database-size ceiling or bounded-latency claim. The later lifecycle runs it on the blocking startup worker rather than the UI/event loop.
 
-This automated evidence does not constitute manual application or production runtime validation. No operational flow invokes the owner, so no manual application/runtime flow applies to this boundary. The validated owner proves only the fixed readability-and-integrity contract; it does not establish metadata table existence, metadata row validity, SQLite `application_id`, SQLite `user_version`, schema-contract validity, database/evidence correspondence, freshness, startup authorization, setup authority, migration authority, recovery authority, backup/restore authority, or operational database use.
+This boundary's automated evidence did not by itself constitute manual application or production runtime validation. The later accepted lifecycle and manual scenarios exercise it only as part of the whole startup chain. The validated owner still proves only the fixed readability-and-integrity contract.
 
 ## Accepted live metadata and SQLite-header validation evidence
 
 The consuming live metadata and SQLite-header validation transition is implemented and accepted at commit `aa2317eddeca73d7709f84136f12067d80e0a881` with subject `feat(database): validate live metadata and headers`. The `Bootstrap validation` workflow run `30778837736` completed successfully, and its workflow and job conclusions were both success. Frontend formatting, lint, type-check, and tests passed; Rust formatting and Clippy with warnings denied passed; and the locked Rust suite reported 645 passed, 0 failed, and 1 ignored. All 15 new live metadata/header tests passed, with no new test ignored or filtered out. The single ignored test remains the unrelated pre-existing manually rooted USB controlled-host test.
 
-The accepted transition consumes `ReadabilityAndIntegrityValidatedProductionDatabaseConnection`, retains the same connection/guard/inspection lifetime unit, and returns only `LiveMetadataAndHeaderValidatedProductionDatabaseConnection` with one owned `DatabaseMetadataContractV1`. It has no operational caller. This automated evidence is not manual application or production runtime validation, and no manual application/runtime flow applies while no operational flow invokes the owner.
+The accepted transition consumes `ReadabilityAndIntegrityValidatedProductionDatabaseConnection`, retains the same connection/guard/inspection lifetime unit, and returns only `LiveMetadataAndHeaderValidatedProductionDatabaseConnection` with one owned `DatabaseMetadataContractV1`. Its focused automated evidence remains distinct from the later whole-lifecycle manual evidence.
 
 ### Accepted live metadata and header validation matrix
 
@@ -282,13 +282,13 @@ Accepted private injected seams cover states that the fixed valid statements can
 
 The tests assert the canonical taxonomy and exact first-failed-stage precedence: application-ID observation unavailable; wrong application ID; user-version observation unavailable; metadata preparation/query-startup unavailable; metadata stepping interruption or incomplete terminal state; missing row; duplicate rows; malformed storage class, UTF-8, parse, or non-version structural state; unsupported metadata contract version; unsupported database schema version; remaining structural invalidity as malformed; then user-version mismatch. They prove that defects are not collected, `CloseFailed` is ownership-bearing rather than primary, temporary observations are discarded before close, close failures retain the original category plus the full connection/guard/inspection unit, and outward formatting reveals none of the prohibited live values or diagnostics.
 
-Fixture creation used synthetic encrypted schemas, rows, and header assignments before the guarded read-only transition. That test-only preparation grants no production schema creation, header mutation, migration, repair, normalization, or other mutation authority. The live stage fails closed on absence and makes no claim of physical DDL, constraints, indexes, triggers, object kind, wider product-schema correctness, correspondence, freshness, startup/setup authority, recovery, backup/restore, replacement, business-data correctness, or operational opening.
+Fixture creation used synthetic encrypted schemas, rows, and header assignments before the guarded read-only transition. That test-only preparation grants no production schema creation, header mutation, migration, repair, normalization, or other mutation authority. The live stage fails closed on absence and makes no claim of physical DDL, constraints, indexes, triggers, object kind, wider product-schema correctness, correspondence, freshness, startup/setup authority, operational activation, recovery, backup/restore, replacement, or business-data correctness.
 
 ## Accepted identity-only database/evidence correspondence evidence
 
 The consuming identity-only correspondence transition is implemented and accepted at commit `8b880621e9d7cf9dcff30eaab31f84958926d024` with subject `feat(database): validate evidence correspondence`. The `Bootstrap validation` workflow run `30786193482` (run number 17) completed successfully, and its workflow and job conclusions were both success. Frontend formatting, lint, type-check, and all 5 frontend tests passed; Rust formatting and Clippy with warnings denied passed; and the locked Rust suite reported 655 passed, 0 failed, and 1 ignored. All 10 new correspondence tests passed, with no correspondence test ignored or filtered out. The sole ignored test remains the unrelated pre-existing manually rooted USB controlled-host test.
 
-The implemented transition consumes `LiveMetadataAndHeaderValidatedProductionDatabaseConnection` and exactly `TrustedCurrentInstallationEvidenceAssessment`, invokes the existing pure classifier exactly once, and returns opaque `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` on success. Both inputs are consumed. There is no operational caller, so this automated evidence is not manual application or production runtime validation and no manual application/runtime flow applies.
+The implemented transition consumes `LiveMetadataAndHeaderValidatedProductionDatabaseConnection` and exactly `TrustedCurrentInstallationEvidenceAssessment`, invokes the existing pure classifier exactly once, and returns opaque `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` on success. Both inputs are consumed. Its focused automated evidence remains distinct from the later whole-lifecycle manual evidence.
 
 Accepted pure correspondence evidence covers:
 
@@ -319,7 +319,7 @@ Accepted live composition and ownership evidence covers:
 - successful-owner close drops metadata and trusted assessment before close;
 - successful-owner close failure reuses the existing capability-free close failure and retains only lifetime ownership;
 - manual `Debug` for the success owner, mismatch, initial outcome, close-failure owner, and retry outcome is exactly coarse and does not delegate to retained values; and
-- no operational caller, Tauri command, IPC, or frontend surface exists.
+- the adapter itself adds no Tauri command, IPC, or frontend surface; the later Rust-owned lifecycle is its only application-level composition.
 
 Real SQLCipher predecessor fixtures cover matching composition, normal consuming close, exact temporary-root cleanup, parish mismatch, installation mismatch, database-key-generation mismatch, setup-publication mismatch, simultaneous mismatches, differing installation generation, differing recovery/replacement generation, differing evidence timestamp, and combined generation/timestamp differences.
 
@@ -357,7 +357,7 @@ The accepted source-boundary evidence also confirms private nested placement ben
 
 The freshness transition was implemented in commit `8770ca7fa99adc3c8554f1d51ad310d2084d5cf0` (`feat(database): validate preloaded freshness`). `Bootstrap validation` run `30802303048` (run number 20), head SHA `8770ca7fa99adc3c8554f1d51ad310d2084d5cf0`, failed because a pre-existing environment-sensitive loader test imposed an over-strong historical-continuity expectation. That historical run remains a failure. Commit `da91011c1553cd22f8a14da7bc2db6fede9e784c` (`test: align anchor loader replacement expectation`) changed only the test expectation to match the existing production loader contract. `Bootstrap validation` run `31724049978` (run number 21), head SHA `da91011c1553cd22f8a14da7bc2db6fede9e784c`, completed successfully.
 
-The accepted final evidence is: frontend 5 passed; Rust 665 passed, 0 failed, 1 ignored; freshness adapter 10/10; pure freshness 14/14; correspondence-related 20/20; loader Windows module 11/11; full loader module 17/17; Clippy passed with warnings denied; and formatting passed. The single ignored test is the unrelated pre-existing manually rooted USB controlled-host test. No manual application/runtime test applies because no operational caller exists.
+The accepted final evidence for this stage is: frontend 5 passed; Rust 665 passed, 0 failed, 1 ignored; freshness adapter 10/10; pure freshness 14/14; correspondence-related 20/20; loader Windows module 11/11; full loader module 17/17; Clippy passed with warnings denied; and formatting passed. The single ignored test is the unrelated pre-existing manually rooted USB controlled-host test. Later whole-lifecycle manual results are recorded separately below.
 
 The implemented transition consumes `DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection` and exactly `NormalizedFreshnessAnchorObservation`; all four normalized states are accepted, and no real anchor filesystem or DPAPI operation occurs in this preloaded adapter because loading, authentication, binding, assurance, and normalization remain upstream.
 
@@ -413,7 +413,7 @@ Source assertions prove:
 - no duplicated generation comparison, anchor-identity comparison, lineage combination, precedence, or timestamp accessor exists;
 - no SQL, PRAGMA, prepare, query, row read, database-content operation, or `Connection` exposure exists;
 - no filesystem, path, presence inspection, loading, DPAPI, HMAC, wrapper/envelope/plaintext/contract parsing, authentication, generation matching, binding, assurance, or normalization exists;
-- no schema, migration, unsafe code, FFI, dependency, feature, public API, Tauri command, IPC, frontend, or operational caller is added;
+- the freshness adapter adds no schema, migration, unsafe code, FFI, dependency, feature, public API, Tauri command, IPC, frontend, or separate application caller; the later lifecycle composes it through the fixed chain;
 - `DatabaseFreshnessValidatedProductionDatabaseConnection` contains exactly `ConnectionLifetimeOwner`, `DatabaseMetadataContractV1`, and `TrustedCurrentInstallationEvidenceAssessment`;
 - `ProductionDatabaseFreshnessValidationCloseFailure` contains exactly `DatabaseFreshnessClassification` and `ConnectionLifetimeOwner`; and
 - `Fresh` is impossible in `Failed`, close-failure ownership, and close-retry outcomes.
@@ -426,7 +426,7 @@ The corrected loader test is `second_file_disappearance_is_rejected_and_replacem
 
 ## Accepted internal startup-authorization implementation evidence
 
-The internal startup-authorization boundary after freshness is implemented at `d839686c53365711f2674c29033bc1602d4774c1`. Repository-grounded focused/local implementation verification reports passed. No manual application or runtime test applies because no operational Tauri/application-startup caller exists, and the real desktop application's visible startup has not proved that this path executes. The exact target commit did not have clean CI: an intermittent active-evidence loader test failed, and the subsequent diagnostic investigation did not establish a startup-authorization implementation defect.
+The internal startup-authorization boundary after freshness is implemented at `d839686c53365711f2674c29033bc1602d4774c1`. Repository-grounded focused/local implementation verification reports passed. At that historical boundary-only commit, the real desktop startup did not yet invoke it. The exact target commit did not have clean CI: an intermittent active-evidence loader test failed, and the subsequent diagnostic investigation did not establish a startup-authorization implementation defect. The later accepted lifecycle commit now invokes the boundary and is recorded separately below.
 
 Focused/local implementation verification covers:
 
@@ -447,32 +447,61 @@ Focused/local implementation verification covers:
 
 Source-boundary checks cover that the implementation introduces no hidden installation-state loading; filesystem, path, file-identity, or sidecar access; SQL or PRAGMA; database access; freshness, correspondence, metadata/header, readability/integrity, or database-file-inspection rerun; anchor loading or normalization; schema or migration work; setup helper use; storage creation; recovery or repair; Tauri command, IPC, or frontend surface; arbitrary `Connection` callback; production success constructor; visibility widening or crate-root bridge; unsafe/FFI; dependency; or Cargo feature. Deterministic close injection is `cfg(test)`-only.
 
-The implementation resides privately at `production_database_connection_handoff/live_metadata_and_header_validation/database_evidence_correspondence_validation/database_freshness_validation/startup_authorization.rs`, declared as a private child by `database_freshness_validation.rs`. Operational Tauri/application-startup integration and operational database opening remain later separate boundaries and are not designed or verified here. Account/elevation enforcement and any fresh path/sidecar reinspection before operational use also remain separate future decisions.
+The implementation resides privately at `production_database_connection_handoff/live_metadata_and_header_validation/database_evidence_correspondence_validation/database_freshness_validation/startup_authorization.rs`, declared as a private child by `database_freshness_validation.rs`. The later lifecycle supplies the independently re-observed installation evidence and consumes success through operational activation. Account/elevation enforcement and stronger path/sidecar reinspection policy remain separate decisions.
 
 Separate cleanup remains for stale historical source comments in `database_freshness_classification.rs` and `database_metadata_contract.rs` that reportedly state there is no production caller. This documentation task does not verify or modify those comments.
 
+## Accepted application-startup lifecycle evidence
+
+The Rust-owned lifecycle and operational activation are implemented and accepted at `44d2770786d4534ef37fb58b383e5b74ab73d04c` (`feat(app): orchestrate secure startup lifecycle`). The window begins in non-ready `Starting`; one blocking Rust worker runs the synchronous production chain; `Ready` requires installation of a real `OperationalProductionDatabase`; and read-only `startup_status` is the only lifecycle IPC addition alongside `health_check`.
+
+Accepted implementation verification establishes:
+
+- canonical installation evidence is observed early and independently re-observed immediately before final startup authorization;
+- the actual second observed `InstallationEvidence` value is passed into authorization, and startup does not construct `Initialized(Present)`;
+- operational activation is the consuming post-authorization transition, not another authorization decision;
+- no setup, migration, repair, recovery, reset, or retry fallthrough exists;
+- frontend-visible states are exactly `Starting`, `Ready`, `Unavailable`, `Stopping`, and `ShutdownIncomplete`, while internal `CloseRetryRequired` ownership remains Rust-only;
+- shutdown during startup requests drain and prevents any later `Ready` installation;
+- close failure retains ownership internally and exposes `ShutdownIncomplete`, with no retry UI, IPC command, or user action;
+- manual root/pause support is Windows plus `debug_assertions` only and not frontend/IPC authority; the fixture exporter is Windows test-only and ignored; and
+- lifecycle logs and errors remain coarse and disclose no path, key, identifier, metadata, native error, or raw backend chain.
+
+Focused and full automated validation were accepted during the lifecycle implementation review. They were not rerun during the later staging/commit tasks and are not rerun by this documentation-only reconciliation.
+
+The following manual scenarios were completed and accepted:
+
+| Scenario | Result | Establishes |
+| --- | --- | --- |
+| A: valid complete fixture | `Ready` — PASS | The exercised complete synthetic fixture can traverse the real startup chain and install the operational owner. |
+| B: active evidence, database missing | `Unavailable` — PASS | Missing expected database storage fails closed without setup or creation fallthrough. |
+| C: recognized staging at launch | `Unavailable` — PASS | Recognized staging evidence prevents readiness. |
+| D: state changed before final canonical observation | final observation vetoed `Ready` — PASS | The implemented second observation governs final authorization in this exercised mutation scenario. It is not proof against every possible TOCTOU or race condition. |
+| E: close while `Starting` | shutdown pending/drain, no `Ready` fallthrough — PASS | Shutdown intent remains responsive at the UI/event-loop level, drains the worker, and prevents late readiness. |
+
+These scenarios use debug/test-only support for controlled observation. They do not turn that support into production product behavior and do not establish full-product launch readiness.
+
 ## Remaining production database verification gates
 
-- Integrate the implemented startup-authorization boundary into Tauri/application startup only under a separately approved operational scope, without combining it with operational opening, setup, migration, recovery, or UI work.
 - Schema-creation tests must prove only the separately approved version-1 schema, singleton metadata row, `application_id = 0x43484150`, mirrored `user_version`, and fail-closed header/metadata disagreement. They remain separate from live read-only validation and correspondence.
 - Path/link/sidecar tests must cover the exact application-owned NTFS path and filename, reparse/symlink/junction/mount traversal, cloud placeholder, hard link, network/removable storage, stable final path and identity, race revalidation, unexpected sidecars, and initial WAL/SHM prohibition. Startup must be proven unable to delete or repair sidecars.
 - Transaction-policy tests must cover rollback-journal `DELETE`, `synchronous=FULL`, explicit transactions, `secure_delete=ON`, `auto_vacuum=NONE`, no automatic journal switch, no automatic VACUUM, and no WAL checkpoint behavior.
 - Interrupted setup, migration, rekey, anchor replacement, database replacement, and controlled journal recovery tests must prove fail-closed restart classification and absence of generic repair. Migration tests additionally require explicit maintenance authorization, verified recoverable backup, prior full integrity success, forward-only behavior, and no automatic downgrade.
 - Backup and staged-restore tests must prove SQLCipher-only encrypted artifacts, separate recovery-key envelopes, full integrity at acceptance, exact correspondence and lineage policy, explicit recovery authority, and no production plaintext database or fallback.
-- Authority tests must prove that persisted presence, evidence validation, path validation, key recovery, read-only opening, metadata decoding, integrity, correspondence, freshness, installation-state classification, startup authorization, operational opening, setup, migration, recovery, replacement, and destructive cleanup cannot substitute for one another.
+- Authority tests must prove that persisted presence, evidence validation, path validation, key recovery, read-only opening, metadata decoding, integrity, correspondence, freshness, installation-state classification, startup authorization, operational activation, setup, migration, recovery, replacement, and destructive cleanup cannot substitute for one another.
 - Clean-machine release verification must run separately on supported Windows 10 x64 and Windows 11 x64 local-NTFS standard-user hosts. It must record pinned `rusqlite`, SQLCipher, OpenSSL, and lockfile identity; prove no system SQLCipher/OpenSSL dependency; and reject every unsupported platform/storage category. Release automation details remain deferred.
 
 The existing `sqlcipher_windows_temporary_encryption_feasibility` test remains historical Windows test-only experiment evidence.
 
-Carlo must manually review the complete implemented owner chain through `StartupAuthorizedProductionDatabaseConnection`; freshness commit `8770ca7fa99adc3c8554f1d51ad310d2084d5cf0`; historical failed run `30802303048` (run 20); loader-test correction `da91011c1553cd22f8a14da7bc2db6fede9e784c`; accepted successful run `31724049978` (run 21) and its 665/0/1 Rust result; startup-authorization commit `d839686c53365711f2674c29033bc1602d4774c1` and its intermittent active-evidence loader CI failure without an established startup-authorization defect; the unrelated ignored USB test; the exact consumed freshness and startup-authorization inputs; all four normalized observation variants; exactly one ephemeral `Corresponds` and one classifier call; Fresh-only advancement; all eight non-Fresh outcomes; startup-authorization outcome mapping; owner contents and observation disposal; destruction-before-close and close-retry ownership; successful-owner close; callback-seam prohibition; prohibited-capability assertions; corrected current-pair loader semantics and unchanged production prefix; coordinated-rollback limitation; the absence of operational Tauri/application-startup integration, operational opening, and any operational caller; and confirmation that this reconciliation changes documentation only.
+The accepted review now includes the complete owner chain through startup authorization and operational activation; lifecycle commit `44d2770786d4534ef37fb58b383e5b74ab73d04c`; independently observed early and final installation evidence; actual second-value authorization; worker/off-UI-thread sequencing; coarse frontend status; shutdown drain and late-owner prevention; retained close-failure ownership; debug/test-only manual support; manual scenarios A-E and Scenario D's limited race claim; the historical validation evidence above; remaining coordinated-rollback and path-race limitations; and confirmation that this reconciliation changes documentation only.
 
-For correspondence Carlo must manually confirm the exact two consumed input types; prohibition on weaker or internally loaded evidence; exactly-once reuse of the six-field pure classifier; the single coarse mismatch category and unobservable field precedence; private retention of only lifetime owner, validated metadata, and trusted assessment; strict exclusion of generations, timestamps, and evidence-format fields from correspondence; later whole-owner freshness composition; private nested module placement without visibility widening; metadata/evidence disposal before mismatch or successful-owner close; mismatch close-failure and retry ownership; reuse of the existing general successful-owner close failure; strict redaction; the narrow production-absent `cfg(test)` trusted-assessment seam; the accepted real SQLCipher, ownership, and source-boundary evidence; the absence of new dependencies, features, FFI, unsafe, filesystem, DPAPI, HMAC, SQL, schema, migration, public API, and operational caller; and the locked limitations on lineage, freshness, rollback resistance, startup, operational opening, setup, migration, DDL/object kind, wider schema, recovery, backup/restore, replacement, and business data.
+For correspondence the accepted review covers the exact consumed inputs, exactly-once classifier reuse, coarse mismatch taxonomy, private ownership, disposal and close behavior, redaction, the narrow production-absent `cfg(test)` seam, absence of new dependencies or direct frontend authority in the adapter, later fixed-chain lifecycle composition, and the locked limitations on lineage, freshness, rollback resistance, startup authorization, operational activation, setup, migration, wider schema, recovery, backup/restore, replacement, and business data.
 
-For freshness Carlo must manually confirm the two consumed inputs and all four normalized observation states; prohibition on paths and weaker or earlier anchor forms; completion of loading, DPAPI, HMAC, parsing, binding, assurance, and normalization before the adapter; one ephemeral `Corresponds` argument and exactly one unchanged pure-classifier call; Fresh-only advancement and direct reuse of the pure taxonomy; disposal of the normalized observation and any assured anchor even on success; exact three-field success ownership; classification plus lifetime-only close-failure ownership; destruction before close, consuming retry, and reuse of the general successful-owner close failure; nested placement without visibility widening or callbacks; redaction; the pure, real-chain, ownership, and source-boundary requirements above; the coordinated-rollback limitation; absence of new dependencies, features, FFI, unsafe, filesystem/path, DPAPI, HMAC, parsing, SQL, database read, schema, migration, public API, operational caller, frontend, IPC, or Tauri work; and continued separation from startup authorization and operational opening.
+For freshness the accepted review covers the two consumed inputs and all four normalized states, prohibition on paths and earlier anchor forms, completion of loading and normalization upstream, exactly-once pure classification, Fresh-only advancement, disposal and close ownership, redaction, the coordinated-rollback limitation, absence of direct frontend authority in the adapter, later fixed-chain lifecycle composition, and continued separation from startup authorization and operational activation.
 
 ## Environment-dependent and manual checks
 
-`npm run tauri:dev` needs Microsoft C++ Build Tools and WebView2. It opens the real window. Local structured health events appear in its terminal; no log file or upload exists.
+`npm run tauri:dev` needs Microsoft C++ Build Tools and WebView2. It opens the real window. Local structured health and lifecycle events appear in its terminal; no log file or upload exists. Those events remain coarse and redacted.
 
 To inspect the unknown route, use webview devtools when available and run `window.history.pushState({}, "", "/not-a-route"); window.dispatchEvent(new PopStateEvent("popstate"));`. Health failure is safely covered by `npm test`, which mocks an invalid command response containing raw backend detail. There is no production crash trigger; manual visual inspection requires an uncommitted, disposable equivalent mock.
 
