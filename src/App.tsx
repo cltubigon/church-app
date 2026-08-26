@@ -1,6 +1,8 @@
+import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router";
 import styles from "./App.module.css";
 import { HealthPanel } from "./components/HealthPanel";
+import { getStartupStatus, type StartupStatus } from "./lib/startup";
 
 const areas = [
   { label: "Requests", path: "/requests" },
@@ -47,7 +49,49 @@ function UnknownRoute() {
   );
 }
 
+function StartupBoundary({ status }: { status: Exclude<StartupStatus, "ready"> }) {
+  const content = {
+    starting: "Preparing the application securely. This may take some time.",
+    unavailable: "The application is unavailable.",
+    stopping: "The application is stopping.",
+    shutdownIncomplete: "The application could not complete shutdown.",
+  }[status];
+
+  return (
+    <main className={styles.main}>
+      <section aria-live="polite" className={styles.panel}>
+        <h1>Church App</h1>
+        <p>{content}</p>
+      </section>
+    </main>
+  );
+}
+
 export function App() {
+  const [startupStatus, setStartupStatus] = useState<StartupStatus>("starting");
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const refresh = async () => {
+      const status = await getStartupStatus();
+      if (!active) return;
+      setStartupStatus(status);
+      if (status === "starting" || status === "ready" || status === "stopping") {
+        timer = setTimeout(refresh, 500);
+      }
+    };
+
+    void refresh();
+    return () => {
+      active = false;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, []);
+
+  if (startupStatus !== "ready") return <StartupBoundary status={startupStatus} />;
+
   return (
     <div className={styles.app}>
       <a className={styles.skipLink} href="#main-content">

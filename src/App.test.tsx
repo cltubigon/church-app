@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,11 +18,14 @@ function renderApp(path = "/") {
 }
 
 describe("application foundation", () => {
-  beforeEach(() => mockedInvoke.mockReset());
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+    mockedInvoke.mockResolvedValue("ready");
+  });
 
-  it("renders an accessible unfinished shell with only approved area links", () => {
+  it("renders an accessible unfinished shell with only approved area links", async () => {
     renderApp();
-    expect(screen.getByRole("banner")).toBeInTheDocument();
+    expect(await screen.findByRole("banner")).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Church App" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toBeInTheDocument();
     expect(screen.getByRole("contentinfo")).toBeInTheDocument();
@@ -37,6 +40,7 @@ describe("application foundation", () => {
   it("supports keyboard placeholder navigation", async () => {
     const user = userEvent.setup();
     renderApp();
+    await screen.findByRole("banner");
     await user.tab();
     expect(screen.getByRole("link", { name: "Skip to main content" })).toHaveFocus();
     await user.tab();
@@ -48,23 +52,26 @@ describe("application foundation", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders a safe fallback for an unknown route", () => {
+  it("renders a safe fallback for an unknown route", async () => {
     renderApp("/not-a-route");
-    expect(screen.getByRole("heading", { name: "Page unavailable" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Page unavailable" })).toBeInTheDocument();
     expect(
       screen.getByText("The requested page is not part of this application foundation."),
     ).toBeInTheDocument();
   });
 
   it("renders a successful typed health response", async () => {
-    mockedInvoke.mockResolvedValue({
-      applicationName: "Church App Foundation",
-      bootstrapStatus: "ready",
-      applicationVersion: "0.1.0",
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      return Promise.resolve({
+        applicationName: "Church App Foundation",
+        bootstrapStatus: "ready",
+        applicationVersion: "0.1.0",
+      });
     });
     const user = userEvent.setup();
     renderApp();
-    await user.click(screen.getByRole("button", { name: "Check foundation health" }));
+    await user.click(await screen.findByRole("button", { name: "Check foundation health" }));
     const status = await screen.findByRole("status");
     expect(status).toHaveTextContent("Church App Foundation");
     expect(status).toHaveTextContent("ready");
@@ -82,15 +89,36 @@ describe("application foundation", () => {
       },
       ok: false,
     });
-    mockedInvoke.mockResolvedValue({ code: "backend_debug", message: rawError });
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      return Promise.resolve({ code: "backend_debug", message: rawError });
+    });
     const user = userEvent.setup();
     renderApp();
-    await user.click(screen.getByRole("button", { name: "Check foundation health" }));
+    await user.click(await screen.findByRole("button", { name: "Check foundation health" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The application foundation could not confirm its status. Please try again.",
     );
     expect(document.body.textContent).not.toContain(rawError);
     expect(document.body.textContent).not.toContain("parish.db");
     expect(document.body.textContent).not.toContain("token=secret");
+  });
+
+  it("keeps the shell unavailable until Rust reports ready", async () => {
+    mockedInvoke.mockResolvedValue("starting");
+    renderApp();
+    expect(
+      await screen.findByText("Preparing the application securely. This may take some time."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith("startup_status"));
+  });
+
+  it("renders only a coarse unavailable state when startup status cannot be read", async () => {
+    mockedInvoke.mockResolvedValue("sensitive backend detail");
+    renderApp();
+    expect(await screen.findByText("The application is unavailable.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("sensitive backend detail");
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
   });
 });

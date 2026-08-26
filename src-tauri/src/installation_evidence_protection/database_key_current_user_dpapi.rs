@@ -66,6 +66,20 @@ fn recover_database_key_candidate_from_loaded_wrapper_with(
     Ok(candidate)
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn protect_database_key_for_manual_startup_fixture(
+    key: &crate::database_key::DatabaseKey,
+    generation_identifier: crate::installation_evidence_contract::DatabaseKeyGenerationIdentifier,
+) -> Result<super::EncodedProtectedWrapper, super::ProtectionStageError> {
+    let payload = crate::database_key_protected_payload::EncodedDatabaseKeyPayload::encode(
+        key,
+        generation_identifier,
+    );
+    let protected = InMemoryProtector::protect(&WindowsCurrentUserDpapi, payload.as_bytes())
+        .map_err(|_| super::ProtectionStageError::ProtectionUnavailable)?;
+    super::EncodedProtectedWrapper::encode(ProtectedObjectKind::DatabaseKey, protected)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -393,5 +407,19 @@ mod tests {
             .unwrap()
             .0;
         assert!(secure_drop.contains("self.0.zeroize();"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn manual_fixture_protection_round_trips_through_production_recovery() {
+        let key = DatabaseKey::from_bytes(KEY);
+        let generation = DatabaseKeyGenerationIdentifier::from_bytes(GENERATION).unwrap();
+        let wrapper = protect_database_key_for_manual_startup_fixture(&key, generation).unwrap();
+        let loaded = loaded_raw(wrapper.as_bytes().to_vec());
+
+        let candidate = recover_database_key_candidate_from_loaded_wrapper(&loaded).unwrap();
+        let (recovered_key, recovered_generation) = candidate.into_parts();
+        recovered_key.expose_bytes(|bytes| assert_eq!(bytes, &KEY));
+        assert_eq!(recovered_generation, generation);
     }
 }

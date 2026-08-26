@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use serde::Serialize;
+
+mod application_lifecycle;
 
 mod database_freshness_classification;
 mod database_key;
@@ -23,6 +27,10 @@ pub mod installation_evidence_contract;
 mod installation_evidence_persistence;
 mod installation_evidence_protection;
 pub mod installation_state;
+#[cfg(all(windows, debug_assertions))]
+mod manual_startup_debug_support;
+#[cfg(all(test, windows))]
+mod manual_startup_fixture;
 #[cfg(windows)]
 mod production_database_connection_handoff;
 mod production_database_file;
@@ -81,10 +89,40 @@ fn health_check() -> Result<HealthResponse, HealthError> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use application_lifecycle::{ApplicationLifecycle, lifecycle_from_app, startup_status};
+
+    let lifecycle = ApplicationLifecycle::new();
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![health_check])
-        .run(tauri::generate_context!())
-        .expect("the Church App foundation runtime could not start");
+        .manage(Arc::clone(&lifecycle))
+        .setup(move |app| {
+            lifecycle.start(app.handle().clone());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![health_check, startup_status])
+        .build(tauri::generate_context!())
+        .expect("the Church App foundation runtime could not start")
+        .run(|app, event| {
+            let lifecycle = lifecycle_from_app(app);
+            match event {
+                tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::CloseRequested { api, .. },
+                    ..
+                } => {
+                    if !lifecycle.may_exit() {
+                        api.prevent_close();
+                        lifecycle.request_shutdown(app.clone());
+                    }
+                }
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if !lifecycle.may_exit() {
+                        api.prevent_exit();
+                        lifecycle.request_shutdown(app.clone());
+                    }
+                }
+                tauri::RunEvent::Exit => lifecycle.join_workers(),
+                _ => {}
+            }
+        });
 }
 
 #[cfg(test)]

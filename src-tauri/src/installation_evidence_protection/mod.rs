@@ -48,9 +48,13 @@ mod windows_current_user_dpapi;
 pub(crate) use authenticated_active_freshness_anchor::AuthenticatedActiveFreshnessAnchor;
 #[allow(unused_imports)]
 pub(crate) use database_key_current_user_dpapi::DatabaseKeyCandidateRecoveryError;
+#[cfg(all(test, windows))]
+pub(crate) use database_key_current_user_dpapi::protect_database_key_for_manual_startup_fixture;
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub(crate) use database_key_current_user_dpapi::recover_database_key_candidate_from_loaded_wrapper;
+#[cfg(windows)]
+pub(crate) use freshness_anchor_observation::observe_normalized_current_freshness_anchor;
 #[allow(unused_imports)]
 pub(crate) use generation_bound_database_key::{
     DatabaseKeyGenerationBindingError, GenerationBoundDatabaseKey,
@@ -67,6 +71,26 @@ pub(crate) use trusted_current_installation_evidence_assessment::load_trusted_cu
 pub(crate) use trusted_current_installation_identity::TrustedCurrentInstallationIdentity;
 #[cfg(windows)]
 use windows_current_user_dpapi::WindowsCurrentUserDpapi;
+
+#[cfg(all(test, windows))]
+pub(crate) fn protect_anchor_authentication_material_for_manual_startup_fixture(
+    key: &crate::freshness_anchor_authentication_key::AnchorAuthenticationKey,
+    generation_identifier: crate::freshness_anchor_authenticated_envelope::AnchorAuthenticationKeyGenerationIdentifier,
+) -> Result<EncodedProtectedWrapper, ProtectionStageError> {
+    freshness_anchor_current_user_dpapi::protect_anchor_authentication_material(
+        key,
+        generation_identifier,
+    )
+    .map_err(|_| ProtectionStageError::ProtectionUnavailable)
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn protect_authenticated_freshness_anchor_for_manual_startup_fixture(
+    envelope: &crate::freshness_anchor_authenticated_envelope::EncodedAuthenticatedFreshnessAnchorV1,
+) -> Result<EncodedProtectedWrapper, ProtectionStageError> {
+    freshness_anchor_current_user_dpapi::protect_authenticated_freshness_anchor(envelope)
+        .map_err(|_| ProtectionStageError::ProtectionUnavailable)
+}
 
 const AUTHENTICATED_ENVELOPE_LENGTH: usize = 226;
 
