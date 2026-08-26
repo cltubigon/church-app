@@ -66,8 +66,8 @@ fn recover_database_key_candidate_from_loaded_wrapper_with(
     Ok(candidate)
 }
 
-#[cfg(all(test, windows))]
-pub(crate) fn protect_database_key_for_manual_startup_fixture(
+#[cfg(windows)]
+pub(crate) fn protect_database_key(
     key: &crate::database_key::DatabaseKey,
     generation_identifier: crate::installation_evidence_contract::DatabaseKeyGenerationIdentifier,
 ) -> Result<super::EncodedProtectedWrapper, super::ProtectionStageError> {
@@ -342,7 +342,13 @@ mod tests {
         const SOURCE: &str = include_str!("database_key_current_user_dpapi.rs");
         const PARENT_SOURCE: &str = include_str!("mod.rs");
         const LIB_SOURCE: &str = include_str!("../lib.rs");
+        const MANUAL_FIXTURE_SOURCE: &str = include_str!("../manual_startup_fixture.rs");
+        const WINDOWS_ADAPTER_SOURCE: &str = include_str!("windows_current_user_dpapi.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let protection_facade = production
+            .split_once("pub(crate) fn protect_database_key(")
+            .unwrap()
+            .1;
         let transition = production
             .split_once("fn recover_database_key_candidate_from_loaded_wrapper_with(")
             .unwrap()
@@ -371,6 +377,71 @@ mod tests {
         );
         assert!(!PARENT_SOURCE.contains("pub mod database_key_current_user_dpapi"));
         assert!(!LIB_SOURCE.contains("database_key_current_user_dpapi"));
+        assert!(SOURCE.contains("#[cfg(windows)]\npub(crate) fn protect_database_key("));
+        assert_eq!(
+            production
+                .matches("pub(crate) fn protect_database_key(")
+                .count(),
+            1
+        );
+        let retired_test_name = ["protect_database_key_for_manual", "_startup_fixture"].concat();
+        assert!(!production.contains(&retired_test_name));
+        assert!(protection_facade.contains(
+            "key: &crate::database_key::DatabaseKey,\n    generation_identifier: crate::installation_evidence_contract::DatabaseKeyGenerationIdentifier,\n) -> Result<super::EncodedProtectedWrapper, super::ProtectionStageError>"
+        ));
+        assert_eq!(
+            protection_facade
+                .matches("EncodedDatabaseKeyPayload::encode(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            protection_facade
+                .matches("InMemoryProtector::protect(&WindowsCurrentUserDpapi, payload.as_bytes())")
+                .count(),
+            1
+        );
+        assert_eq!(
+            protection_facade
+                .matches(
+                    "EncodedProtectedWrapper::encode(ProtectedObjectKind::DatabaseKey, protected)"
+                )
+                .count(),
+            1
+        );
+        assert!(PARENT_SOURCE.contains(
+            "#[cfg(windows)]\n#[allow(unused_imports)]\npub(crate) use database_key_current_user_dpapi::protect_database_key;"
+        ));
+        assert!(WINDOWS_ADAPTER_SOURCE.contains("pub(super) struct WindowsCurrentUserDpapi;"));
+        assert!(!WINDOWS_ADAPTER_SOURCE.contains("pub(crate) struct WindowsCurrentUserDpapi;"));
+        assert!(!WINDOWS_ADAPTER_SOURCE.contains("pub struct WindowsCurrentUserDpapi;"));
+        assert!(MANUAL_FIXTURE_SOURCE.starts_with(
+            "//! Windows-test-only exporter for one synthetic manual startup fixture.\n\n#![cfg(all(test, windows))]"
+        ));
+        assert!(MANUAL_FIXTURE_SOURCE.contains("protect_database_key("));
+
+        for forbidden in [
+            "pub fn ",
+            "tauri::command",
+            "invoke_handler",
+            "std::fs",
+            "std::path",
+            "create_dir",
+            "OpenOptions",
+            "write_all",
+            "rename",
+            "persist",
+            "publish",
+            "setup",
+            "CryptProtectData",
+            "CRYPTPROTECT_LOCAL_MACHINE",
+            "windows_sys",
+        ] {
+            assert!(
+                !protection_facade.contains(forbidden),
+                "unexpected database-key protection capability: {forbidden}"
+            );
+        }
 
         for forbidden in [
             "std::fs",
@@ -411,10 +482,10 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn manual_fixture_protection_round_trips_through_production_recovery() {
+    fn production_protection_round_trips_through_production_recovery() {
         let key = DatabaseKey::from_bytes(KEY);
         let generation = DatabaseKeyGenerationIdentifier::from_bytes(GENERATION).unwrap();
-        let wrapper = protect_database_key_for_manual_startup_fixture(&key, generation).unwrap();
+        let wrapper = protect_database_key(&key, generation).unwrap();
         let loaded = loaded_raw(wrapper.as_bytes().to_vec());
 
         let candidate = recover_database_key_candidate_from_loaded_wrapper(&loaded).unwrap();

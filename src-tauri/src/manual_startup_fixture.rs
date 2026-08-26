@@ -44,7 +44,7 @@ use crate::{
         protect_anchor_authentication_material_for_manual_startup_fixture,
         protect_authenticated_evidence,
         protect_authenticated_freshness_anchor_for_manual_startup_fixture,
-        protect_authentication_material, protect_database_key_for_manual_startup_fixture,
+        protect_authentication_material, protect_database_key,
         recover_database_key_candidate_from_loaded_wrapper,
     },
     installation_state::{ExpectedStorageEvidence, InstallationEvidence},
@@ -386,11 +386,8 @@ fn persist_installation_evidence(
 fn persist_database_key(root: &Path, package: &SyntheticIdentityPackage) -> FixtureResult<()> {
     let paths = database_key_persistence_paths(root);
     let key = DatabaseKey::from_bytes(SYNTHETIC_DATABASE_KEY);
-    let wrapper = protect_database_key_for_manual_startup_fixture(
-        &key,
-        package.database_key_generation_identifier,
-    )
-    .map_err(|_| ManualStartupFixtureError)?;
+    let wrapper = protect_database_key(&key, package.database_key_generation_identifier)
+        .map_err(|_| ManualStartupFixtureError)?;
     create_file_exact(paths.active_database_key.as_path(), wrapper.as_bytes())
 }
 
