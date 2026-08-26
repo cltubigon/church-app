@@ -27,6 +27,7 @@ mod installation_evidence_authentication_key_generation;
 pub mod installation_evidence_contract;
 mod installation_evidence_persistence;
 mod installation_evidence_protection;
+mod installation_identifier_generation;
 pub mod installation_state;
 #[cfg(all(windows, debug_assertions))]
 mod manual_startup_debug_support;
