@@ -22,6 +22,10 @@ pub(crate) struct GenerationBoundDatabaseKey {
 }
 
 impl GenerationBoundDatabaseKey {
+    pub(super) fn from_first_time_setup_generated_key(key: DatabaseKey) -> Self {
+        Self { key }
+    }
+
     pub(crate) fn expose_key<R>(&self, operation: impl FnOnce(&DatabaseKey) -> R) -> R {
         operation(&self.key)
     }

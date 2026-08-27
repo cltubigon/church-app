@@ -34,6 +34,7 @@ use crate::{
 
 mod authenticated_active_freshness_anchor;
 mod database_key_current_user_dpapi;
+mod first_time_setup_database_key_binding;
 mod freshness_anchor_current_user_dpapi;
 mod freshness_anchor_observation;
 mod generation_bound_database_key;
@@ -54,6 +55,10 @@ pub(crate) use database_key_current_user_dpapi::protect_database_key;
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub(crate) use database_key_current_user_dpapi::recover_database_key_candidate_from_loaded_wrapper;
+#[allow(unused_imports)]
+pub(crate) use first_time_setup_database_key_binding::{
+    FirstTimeSetupDatabaseKeyBinding, bind_generated_database_key_for_first_time_setup,
+};
 #[cfg(windows)]
 pub(crate) use freshness_anchor_observation::observe_normalized_current_freshness_anchor;
 #[allow(unused_imports)]
