@@ -36,7 +36,17 @@ use crate::{
     storage_foundation::ProductionDatabasePath,
 };
 
+mod create_new_database;
 mod live_metadata_and_header_validation;
+
+#[allow(unused_imports)]
+pub(crate) use create_new_database::{
+    NewProductionDatabaseConnectionCloseFailure, NewProductionDatabaseConnectionCloseOutcome,
+    NewProductionDatabaseConnectionConstructionCloseFailure,
+    NewProductionDatabaseConnectionConstructionCloseRetryOutcome,
+    NewProductionDatabaseCreationError, NewlyCreatedKeyedProductionDatabaseConnection,
+    create_new_keyed_production_database,
+};
 
 #[allow(unused_imports)]
 pub(crate) use live_metadata_and_header_validation::{
