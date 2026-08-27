@@ -13,7 +13,8 @@ use crate::{
 };
 
 use super::{
-    ConnectionLifetimeOwner, ProductionDatabaseConnectionCloseOutcome,
+    ConnectionLifetimeOwner, PRODUCTION_DATABASE_APPLICATION_ID,
+    ProductionDatabaseConnectionCloseOutcome,
     ReadabilityAndIntegrityValidatedProductionDatabaseConnection, close_lifetime_owner_using,
 };
 
@@ -37,8 +38,9 @@ pub(crate) use database_evidence_correspondence_validation::{
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
 };
 
-const EXPECTED_APPLICATION_ID: i32 = 0x4348_4150;
 const APPLICATION_ID_QUERY: &str = "PRAGMA main.application_id";
+#[cfg(test)]
+const EXPECTED_APPLICATION_ID: i32 = PRODUCTION_DATABASE_APPLICATION_ID;
 const USER_VERSION_QUERY: &str = "PRAGMA main.user_version";
 const METADATA_QUERY: &str = "SELECT
     singleton_id,
@@ -266,7 +268,7 @@ fn validate_fixed_live_metadata_and_headers(
     connection: &Connection,
 ) -> Result<DatabaseMetadataContractV1, LiveMetadataAndHeaderValidationError> {
     let application_id = observe_application_id(connection)?;
-    if application_id != EXPECTED_APPLICATION_ID {
+    if application_id != PRODUCTION_DATABASE_APPLICATION_ID {
         return Err(LiveMetadataAndHeaderValidationError::WrongApplicationId);
     }
 

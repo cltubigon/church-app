@@ -1,8 +1,11 @@
 //! Explicit-authority Windows production database create-new handoff.
 //!
-//! Success owns the exact atomically created leaf, its hardened parent, and one
-//! writable SQLCipher connection after native identity matching and one key
-//! application. It performs no database initialization or validation.
+//! The CREATE-NEW transition returns ownership of the exact atomically created
+//! leaf, its hardened parent, and a keyed-but-uninitialized writable SQLCipher
+//! connection; it performs no initialization or validation. This private module
+//! also contains a separate consuming initialization transition that establishes
+//! only the approved initial policy, headers, minimal metadata relation, and
+//! canonical row, while granting no validation authority.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
@@ -16,7 +19,7 @@ use std::{
     path::Path,
 };
 
-use rusqlite::{Connection, OpenFlags, config::DbConfig};
+use rusqlite::{Connection, OpenFlags, Transaction, config::DbConfig, params};
 use windows_sys::Win32::{
     Foundation::{
         ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
@@ -38,13 +41,19 @@ use windows_sys::Win32::{
 };
 
 use crate::{
+    database_metadata_contract::{DatabaseCreationTimestamp, DatabaseMetadataContractV1},
+    installation_evidence_contract::{
+        DatabaseKeyGenerationIdentifier, InstallationGeneration, InstallationIdentifier,
+        PermanentApplicationIdentifier, RecoveryOrReplacementGeneration,
+        SetupPublicationIdentifier,
+    },
     installation_evidence_protection::GenerationBoundDatabaseKey,
     installation_state::FirstTimeSetupAuthorization,
     sqlcipher_database_key_application::apply_generation_bound_database_key_to_handle,
-    storage_foundation::{PRODUCTION_DATABASE_FILENAME, ProductionDatabasePath},
+    storage_foundation::{PRODUCTION_DATABASE_FILENAME, ParishIdentifier, ProductionDatabasePath},
 };
 
-use super::sqlite_main_database_handle;
+use super::{PRODUCTION_DATABASE_APPLICATION_ID, sqlite_main_database_handle};
 
 const MAIN_DATABASE_NAME: &str = "main";
 const WIN32_VFS_NAME: &str = "win32";
@@ -72,6 +81,22 @@ const DISALLOWED_LEAF_ATTRIBUTES: u32 = FILE_ATTRIBUTE_REPARSE_POINT
     | FILE_ATTRIBUTE_ENCRYPTED
     | FILE_ATTRIBUTE_RECALL_ON_OPEN
     | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+const CREATE_METADATA_RELATION: &str = "CREATE TABLE church_app_database_metadata (
+    singleton_id,
+    metadata_contract_version,
+    database_schema_version,
+    permanent_application_identifier,
+    database_format_identity,
+    parish_identifier,
+    installation_identifier,
+    installation_generation,
+    recovery_replacement_generation,
+    database_key_generation_identifier,
+    setup_publication_identifier,
+    database_created_at
+)";
+const INSERT_METADATA_ROW: &str = "INSERT INTO church_app_database_metadata VALUES
+    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct FileIdentity {
@@ -112,9 +137,107 @@ pub(crate) struct NewlyCreatedKeyedProductionDatabaseConnection {
     owner: NewlyCreatedConnectionLifetimeOwner,
 }
 
+/// Opaque initialized-but-unvalidated owner of the exact newly created leaf.
+pub(crate) struct InitializedNewProductionDatabaseConnection {
+    owner: NewlyCreatedConnectionLifetimeOwner,
+}
+
 impl fmt::Debug for NewlyCreatedKeyedProductionDatabaseConnection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("NewlyCreatedKeyedProductionDatabaseConnection([REDACTED])")
+    }
+}
+
+impl fmt::Debug for InitializedNewProductionDatabaseConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InitializedNewProductionDatabaseConnection([REDACTED])")
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[allow(clippy::enum_variant_names)]
+enum NewProductionDatabaseInitializationFailure {
+    MetadataRepresentationFailed,
+    InitializationPolicyFailed,
+    InitializationTransactionStartFailed,
+    HeaderInitializationFailed,
+    MetadataSchemaCreationFailed,
+    MetadataInsertionFailed,
+    InitializationCommitFailed,
+}
+
+impl fmt::Debug for NewProductionDatabaseInitializationFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::MetadataRepresentationFailed => "MetadataRepresentationFailed",
+            Self::InitializationPolicyFailed => "InitializationPolicyFailed",
+            Self::InitializationTransactionStartFailed => "InitializationTransactionStartFailed",
+            Self::HeaderInitializationFailed => "HeaderInitializationFailed",
+            Self::MetadataSchemaCreationFailed => "MetadataSchemaCreationFailed",
+            Self::MetadataInsertionFailed => "MetadataInsertionFailed",
+            Self::InitializationCommitFailed => "InitializationCommitFailed",
+        })
+    }
+}
+
+#[must_use = "the new production database initialization result must be handled"]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum NewProductionDatabaseInitializationError {
+    MetadataRepresentationFailed,
+    InitializationPolicyFailed,
+    InitializationTransactionStartFailed,
+    HeaderInitializationFailed,
+    MetadataSchemaCreationFailed,
+    MetadataInsertionFailed,
+    InitializationCommitFailed,
+    InitializationCloseFailed(Box<NewProductionDatabaseInitializationCloseFailure>),
+}
+
+impl fmt::Debug for NewProductionDatabaseInitializationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InitializationCloseFailed(_) => {
+                formatter.write_str("InitializationCloseFailed([REDACTED])")
+            }
+            _ => formatter.write_str(match self {
+                Self::MetadataRepresentationFailed => "MetadataRepresentationFailed",
+                Self::InitializationPolicyFailed => "InitializationPolicyFailed",
+                Self::InitializationTransactionStartFailed => {
+                    "InitializationTransactionStartFailed"
+                }
+                Self::HeaderInitializationFailed => "HeaderInitializationFailed",
+                Self::MetadataSchemaCreationFailed => "MetadataSchemaCreationFailed",
+                Self::MetadataInsertionFailed => "MetadataInsertionFailed",
+                Self::InitializationCommitFailed => "InitializationCommitFailed",
+                Self::InitializationCloseFailed(_) => unreachable!(),
+            }),
+        }
+    }
+}
+
+pub(crate) struct NewProductionDatabaseInitializationCloseFailure {
+    category: NewProductionDatabaseInitializationFailure,
+    owner: NewlyCreatedConnectionLifetimeOwner,
+}
+
+impl fmt::Debug for NewProductionDatabaseInitializationCloseFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NewProductionDatabaseInitializationCloseFailure([REDACTED])")
+    }
+}
+
+#[must_use = "an initialization close retry outcome must be handled"]
+pub(crate) enum NewProductionDatabaseInitializationCloseRetryOutcome {
+    Closed(NewProductionDatabaseInitializationError),
+    Failed(NewProductionDatabaseInitializationCloseFailure),
+}
+
+impl fmt::Debug for NewProductionDatabaseInitializationCloseRetryOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed(category) => formatter.debug_tuple("Closed").field(category).finish(),
+            Self::Failed(_) => formatter.write_str("Failed([REDACTED])"),
+        }
     }
 }
 
@@ -225,6 +348,20 @@ impl NewlyCreatedKeyedProductionDatabaseConnection {
     }
 }
 
+impl InitializedNewProductionDatabaseConnection {
+    pub(crate) fn close(self) -> NewProductionDatabaseConnectionCloseOutcome {
+        close_new_lifetime_owner(self.owner)
+    }
+
+    #[cfg(test)]
+    fn close_using(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+    ) -> NewProductionDatabaseConnectionCloseOutcome {
+        close_new_lifetime_owner_using(self.owner, close)
+    }
+}
+
 impl NewProductionDatabaseConnectionCloseFailure {
     pub(crate) fn retry_close(self) -> NewProductionDatabaseConnectionCloseOutcome {
         close_new_lifetime_owner(self.owner)
@@ -259,6 +396,52 @@ impl NewProductionDatabaseConnectionConstructionCloseFailure {
     }
 }
 
+impl NewProductionDatabaseInitializationCloseFailure {
+    /// Consumes the complete retained lifetime unit and retries only close.
+    pub(crate) fn retry_close(self) -> NewProductionDatabaseInitializationCloseRetryOutcome {
+        retry_initialization_close_using(self, |connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        })
+    }
+
+    #[cfg(test)]
+    fn retry_close_using(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+    ) -> NewProductionDatabaseInitializationCloseRetryOutcome {
+        retry_initialization_close_using(self, close)
+    }
+}
+
+/// Consumes the keyed-new owner and establishes only the approved version-1
+/// policy, headers, minimal metadata relation, and one canonical metadata row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn initialize_new_production_database(
+    connection: NewlyCreatedKeyedProductionDatabaseConnection,
+    parish_identifier: ParishIdentifier,
+    installation_identifier: InstallationIdentifier,
+    database_key_generation_identifier: DatabaseKeyGenerationIdentifier,
+    setup_publication_identifier: SetupPublicationIdentifier,
+    database_created_at: DatabaseCreationTimestamp,
+) -> Result<InitializedNewProductionDatabaseConnection, NewProductionDatabaseInitializationError> {
+    initialize_new_production_database_using(
+        connection,
+        parish_identifier,
+        installation_identifier,
+        database_key_generation_identifier,
+        setup_publication_identifier,
+        database_created_at,
+        |_| Ok(()),
+        |connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        },
+    )
+}
+
 /// Consumes first-time setup authority, the canonical typed path, and one
 /// generation-bound key to create and key exactly one uninitialized database.
 pub(crate) fn create_new_keyed_production_database(
@@ -269,6 +452,269 @@ pub(crate) fn create_new_keyed_production_database(
     create_new_keyed_production_database_using(authorization, path, key, |path| {
         Connection::open_with_flags_and_vfs(path, SQLITE_FLAGS, WIN32_VFS_NAME).map_err(|_| ())
     })
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InitializationCheckpoint {
+    Policy,
+    TransactionStart,
+    ApplicationId,
+    UserVersion,
+    MetadataSchema,
+    MetadataInsert,
+    Commit,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn initialize_new_production_database_using(
+    connection: NewlyCreatedKeyedProductionDatabaseConnection,
+    parish_identifier: ParishIdentifier,
+    installation_identifier: InstallationIdentifier,
+    database_key_generation_identifier: DatabaseKeyGenerationIdentifier,
+    setup_publication_identifier: SetupPublicationIdentifier,
+    database_created_at: DatabaseCreationTimestamp,
+    mut checkpoint: impl FnMut(InitializationCheckpoint) -> Result<(), ()>,
+    close_on_failure: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> Result<InitializedNewProductionDatabaseConnection, NewProductionDatabaseInitializationError> {
+    let metadata_contract = DatabaseMetadataContractV1::new(
+        PermanentApplicationIdentifier::canonical(),
+        parish_identifier,
+        installation_identifier,
+        InstallationGeneration::INITIAL,
+        RecoveryOrReplacementGeneration::INITIAL,
+        database_key_generation_identifier,
+        setup_publication_identifier,
+        database_created_at,
+    );
+    let database_created_at = match i64::try_from(database_created_at.unix_milliseconds()) {
+        Ok(value) => value,
+        Err(_) => {
+            return finish_initialization_failure(
+                connection.owner,
+                NewProductionDatabaseInitializationFailure::MetadataRepresentationFailed,
+                close_on_failure,
+            );
+        }
+    };
+
+    let mut owner = connection.owner;
+    if checkpoint(InitializationCheckpoint::Policy).is_err()
+        || establish_and_verify_initialization_policy(&owner.connection).is_err()
+    {
+        return finish_initialization_failure(
+            owner,
+            NewProductionDatabaseInitializationFailure::InitializationPolicyFailed,
+            close_on_failure,
+        );
+    }
+
+    let initialization_result = initialize_in_one_transaction(
+        &mut owner.connection,
+        &metadata_contract,
+        database_created_at,
+        &mut checkpoint,
+    );
+    match initialization_result {
+        Ok(()) => Ok(InitializedNewProductionDatabaseConnection { owner }),
+        Err(category) => finish_initialization_failure(owner, category, close_on_failure),
+    }
+}
+
+fn establish_and_verify_initialization_policy(connection: &Connection) -> Result<(), ()> {
+    connection
+        .pragma_update(Some(MAIN_DATABASE_NAME), "journal_mode", "DELETE")
+        .map_err(|_| ())?;
+    let journal_mode: String = connection
+        .pragma_query_value(Some(MAIN_DATABASE_NAME), "journal_mode", |row| row.get(0))
+        .map_err(|_| ())?;
+    if !journal_mode.eq_ignore_ascii_case("DELETE") {
+        return Err(());
+    }
+
+    for (name, value) in [
+        ("synchronous", 2_i64),
+        ("secure_delete", 1),
+        ("auto_vacuum", 0),
+    ] {
+        connection
+            .pragma_update(Some(MAIN_DATABASE_NAME), name, value)
+            .map_err(|_| ())?;
+        let observed: i64 = connection
+            .pragma_query_value(Some(MAIN_DATABASE_NAME), name, |row| row.get(0))
+            .map_err(|_| ())?;
+        if observed != value {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn initialize_in_one_transaction(
+    connection: &mut Connection,
+    metadata_contract: &DatabaseMetadataContractV1,
+    database_created_at: i64,
+    checkpoint: &mut impl FnMut(InitializationCheckpoint) -> Result<(), ()>,
+) -> Result<(), NewProductionDatabaseInitializationFailure> {
+    checkpoint(InitializationCheckpoint::TransactionStart).map_err(|_| {
+        NewProductionDatabaseInitializationFailure::InitializationTransactionStartFailed
+    })?;
+    let transaction = connection.transaction().map_err(|_| {
+        NewProductionDatabaseInitializationFailure::InitializationTransactionStartFailed
+    })?;
+
+    checkpoint(InitializationCheckpoint::ApplicationId)
+        .map_err(|_| NewProductionDatabaseInitializationFailure::HeaderInitializationFailed)?;
+    transaction
+        .pragma_update(
+            Some(MAIN_DATABASE_NAME),
+            "application_id",
+            PRODUCTION_DATABASE_APPLICATION_ID,
+        )
+        .map_err(|_| NewProductionDatabaseInitializationFailure::HeaderInitializationFailed)?;
+
+    checkpoint(InitializationCheckpoint::UserVersion)
+        .map_err(|_| NewProductionDatabaseInitializationFailure::HeaderInitializationFailed)?;
+    transaction
+        .pragma_update(
+            Some(MAIN_DATABASE_NAME),
+            "user_version",
+            i64::from(metadata_contract.database_schema_version().get()),
+        )
+        .map_err(|_| NewProductionDatabaseInitializationFailure::HeaderInitializationFailed)?;
+
+    checkpoint(InitializationCheckpoint::MetadataSchema)
+        .map_err(|_| NewProductionDatabaseInitializationFailure::MetadataSchemaCreationFailed)?;
+    transaction
+        .execute(CREATE_METADATA_RELATION, [])
+        .map_err(|_| NewProductionDatabaseInitializationFailure::MetadataSchemaCreationFailed)?;
+
+    checkpoint(InitializationCheckpoint::MetadataInsert)
+        .map_err(|_| NewProductionDatabaseInitializationFailure::MetadataInsertionFailed)?;
+    insert_canonical_metadata_row(&transaction, metadata_contract, database_created_at)?;
+
+    checkpoint(InitializationCheckpoint::Commit)
+        .map_err(|_| NewProductionDatabaseInitializationFailure::InitializationCommitFailed)?;
+    transaction
+        .commit()
+        .map_err(|_| NewProductionDatabaseInitializationFailure::InitializationCommitFailed)
+}
+
+fn insert_canonical_metadata_row(
+    transaction: &Transaction<'_>,
+    metadata: &DatabaseMetadataContractV1,
+    database_created_at: i64,
+) -> Result<(), NewProductionDatabaseInitializationFailure> {
+    let mut installation_identifier = [0_u8; 16];
+    metadata
+        .installation_identifier()
+        .write_bytes_into(&mut installation_identifier);
+    let mut database_key_generation_identifier = [0_u8; 16];
+    metadata
+        .database_key_generation_identifier()
+        .write_bytes_into(&mut database_key_generation_identifier);
+    let mut setup_publication_identifier = [0_u8; 16];
+    metadata
+        .setup_publication_identifier()
+        .write_bytes_into(&mut setup_publication_identifier);
+    let installation_generation = metadata.installation_generation().get().to_be_bytes();
+    let recovery_replacement_generation = metadata
+        .recovery_replacement_generation()
+        .get()
+        .to_be_bytes();
+
+    let inserted = transaction
+        .execute(
+            INSERT_METADATA_ROW,
+            params![
+                i64::from(metadata.singleton_id().get()),
+                i64::from(metadata.metadata_contract_version().get()),
+                i64::from(metadata.database_schema_version().get()),
+                metadata.permanent_application_identifier().as_str(),
+                &metadata.database_format_identity().as_bytes()[..],
+                &metadata.parish_identifier().as_bytes()[..],
+                &installation_identifier[..],
+                &installation_generation[..],
+                &recovery_replacement_generation[..],
+                &database_key_generation_identifier[..],
+                &setup_publication_identifier[..],
+                database_created_at,
+            ],
+        )
+        .map_err(|_| NewProductionDatabaseInitializationFailure::MetadataInsertionFailed)?;
+    if inserted != 1 {
+        return Err(NewProductionDatabaseInitializationFailure::MetadataInsertionFailed);
+    }
+    Ok(())
+}
+
+fn primary_initialization_error(
+    category: NewProductionDatabaseInitializationFailure,
+) -> NewProductionDatabaseInitializationError {
+    match category {
+        NewProductionDatabaseInitializationFailure::MetadataRepresentationFailed => {
+            NewProductionDatabaseInitializationError::MetadataRepresentationFailed
+        }
+        NewProductionDatabaseInitializationFailure::InitializationPolicyFailed => {
+            NewProductionDatabaseInitializationError::InitializationPolicyFailed
+        }
+        NewProductionDatabaseInitializationFailure::InitializationTransactionStartFailed => {
+            NewProductionDatabaseInitializationError::InitializationTransactionStartFailed
+        }
+        NewProductionDatabaseInitializationFailure::HeaderInitializationFailed => {
+            NewProductionDatabaseInitializationError::HeaderInitializationFailed
+        }
+        NewProductionDatabaseInitializationFailure::MetadataSchemaCreationFailed => {
+            NewProductionDatabaseInitializationError::MetadataSchemaCreationFailed
+        }
+        NewProductionDatabaseInitializationFailure::MetadataInsertionFailed => {
+            NewProductionDatabaseInitializationError::MetadataInsertionFailed
+        }
+        NewProductionDatabaseInitializationFailure::InitializationCommitFailed => {
+            NewProductionDatabaseInitializationError::InitializationCommitFailed
+        }
+    }
+}
+
+fn finish_initialization_failure(
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    category: NewProductionDatabaseInitializationFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> Result<InitializedNewProductionDatabaseConnection, NewProductionDatabaseInitializationError> {
+    match close_new_lifetime_owner_using(owner, close) {
+        NewProductionDatabaseConnectionCloseOutcome::Closed => {
+            Err(primary_initialization_error(category))
+        }
+        NewProductionDatabaseConnectionCloseOutcome::Failed(failure) => Err(
+            NewProductionDatabaseInitializationError::InitializationCloseFailed(Box::new(
+                NewProductionDatabaseInitializationCloseFailure {
+                    category,
+                    owner: failure.owner,
+                },
+            )),
+        ),
+    }
+}
+
+fn retry_initialization_close_using(
+    failure: NewProductionDatabaseInitializationCloseFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> NewProductionDatabaseInitializationCloseRetryOutcome {
+    let NewProductionDatabaseInitializationCloseFailure { category, owner } = failure;
+    match close_new_lifetime_owner_using(owner, close) {
+        NewProductionDatabaseConnectionCloseOutcome::Closed => {
+            NewProductionDatabaseInitializationCloseRetryOutcome::Closed(
+                primary_initialization_error(category),
+            )
+        }
+        NewProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+            NewProductionDatabaseInitializationCloseRetryOutcome::Failed(
+                NewProductionDatabaseInitializationCloseFailure {
+                    category,
+                    owner: failure.owner,
+                },
+            )
+        }
+    }
 }
 
 fn create_new_keyed_production_database_using(
@@ -913,13 +1359,29 @@ mod tests {
 
     use super::*;
     use crate::{
+        database_key_active_wrapper_loader::LoadedActiveDatabaseKeyWrapper,
         database_key_generation::generate_database_key_material,
-        installation_evidence_protection::bind_generated_database_key_for_first_time_setup,
+        database_metadata_decoding::{RawDatabaseMetadataRow, RawDatabaseMetadataValue},
+        installation_evidence_contract::{
+            PERMANENT_APPLICATION_IDENTIFIER, StructurallyValidatedInstallationEvidence,
+            UnvalidatedInstallationEvidenceContract,
+        },
+        installation_evidence_protection::{
+            bind_database_key_candidate_to_trusted_installation_evidence,
+            bind_generated_database_key_for_first_time_setup, protect_database_key,
+            recover_database_key_candidate_from_loaded_wrapper,
+            trusted_current_installation_evidence_assessment_for_test,
+        },
         installation_identifier_generation::generate_installation_identifier,
         installation_state::{
             InstallationEvidence, SetupAuthorizationState, authorize_first_time_setup,
         },
-        storage_foundation::production_database_path,
+        parish_identifier_generation::generate_parish_identifier,
+        production_database_file::{
+            ProductionDatabaseInspection, inspect_production_database_file,
+        },
+        setup_publication_identifier_generation::generate_setup_publication_identifier,
+        storage_foundation::{APPLICATION_DATABASE_FORMAT_IDENTITY, production_database_path},
     };
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1011,6 +1473,182 @@ mod tests {
         }
     }
 
+    struct RealInitializationFixture {
+        owner: NewlyCreatedKeyedProductionDatabaseConnection,
+        parish_identifier: ParishIdentifier,
+        installation_identifier: InstallationIdentifier,
+        database_key_generation_identifier: DatabaseKeyGenerationIdentifier,
+        setup_publication_identifier: SetupPublicationIdentifier,
+        protected_database_key_wrapper: Vec<u8>,
+    }
+
+    fn real_initialization_fixture(root: &TestRoot) -> RealInitializationFixture {
+        let authorization = authorization();
+        let binding = bind_generated_database_key_for_first_time_setup(
+            &authorization,
+            generate_database_key_material().expect("OS key randomness should be available"),
+            generate_installation_identifier()
+                .expect("OS installation identifier randomness should be available"),
+        );
+        let (key, installation_identifier, database_key_generation_identifier) =
+            binding.into_parts();
+        let protected_database_key_wrapper = key
+            .expose_key(|database_key| {
+                protect_database_key(database_key, database_key_generation_identifier)
+            })
+            .expect("test-owned database key protection should succeed")
+            .as_bytes()
+            .to_vec();
+        let parish_identifier = generate_parish_identifier()
+            .expect("OS parish identifier randomness should be available")
+            .into_parish_identifier();
+        let setup_publication_identifier = generate_setup_publication_identifier()
+            .expect("OS setup publication randomness should be available")
+            .into_setup_publication_identifier();
+        let owner = create_new_keyed_production_database(authorization, root.database_path(), key)
+            .expect("real create-new handoff should succeed");
+        RealInitializationFixture {
+            owner,
+            parish_identifier,
+            installation_identifier,
+            database_key_generation_identifier,
+            setup_publication_identifier,
+            protected_database_key_wrapper,
+        }
+    }
+
+    fn initialize_fixture(
+        fixture: RealInitializationFixture,
+        timestamp: u64,
+    ) -> Result<InitializedNewProductionDatabaseConnection, NewProductionDatabaseInitializationError>
+    {
+        initialize_new_production_database(
+            fixture.owner,
+            fixture.parish_identifier,
+            fixture.installation_identifier,
+            fixture.database_key_generation_identifier,
+            fixture.setup_publication_identifier,
+            DatabaseCreationTimestamp::from_unix_milliseconds(timestamp),
+        )
+    }
+
+    fn bytes_from_installation_identifier(identifier: InstallationIdentifier) -> [u8; 16] {
+        let mut bytes = [0_u8; 16];
+        identifier.write_bytes_into(&mut bytes);
+        bytes
+    }
+
+    fn bytes_from_key_generation_identifier(
+        identifier: DatabaseKeyGenerationIdentifier,
+    ) -> [u8; 16] {
+        let mut bytes = [0_u8; 16];
+        identifier.write_bytes_into(&mut bytes);
+        bytes
+    }
+
+    fn bytes_from_setup_publication_identifier(identifier: SetupPublicationIdentifier) -> [u8; 16] {
+        let mut bytes = [0_u8; 16];
+        identifier.write_bytes_into(&mut bytes);
+        bytes
+    }
+
+    fn parish_text(identifier: ParishIdentifier) -> String {
+        identifier
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn validated_evidence_for_fixture(
+        fixture: &RealInitializationFixture,
+    ) -> StructurallyValidatedInstallationEvidence {
+        UnvalidatedInstallationEvidenceContract::new(
+            *crate::installation_evidence_contract::INSTALLATION_EVIDENCE_FORMAT_IDENTITY
+                .as_bytes(),
+            crate::installation_evidence_contract::SUPPORTED_EVIDENCE_FORMAT_VERSION,
+            PERMANENT_APPLICATION_IDENTIFIER,
+            *APPLICATION_DATABASE_FORMAT_IDENTITY.as_bytes(),
+            &parish_text(fixture.parish_identifier),
+            bytes_from_installation_identifier(fixture.installation_identifier),
+            InstallationGeneration::INITIAL.get(),
+            RecoveryOrReplacementGeneration::INITIAL.get(),
+            bytes_from_key_generation_identifier(fixture.database_key_generation_identifier),
+            bytes_from_setup_publication_identifier(fixture.setup_publication_identifier),
+            1_798_000_000,
+        )
+        .validate()
+        .expect("matching synthetic evidence should validate")
+    }
+
+    fn observed_metadata_contract(connection: &Connection) -> DatabaseMetadataContractV1 {
+        use rusqlite::types::Value;
+
+        let values: [Value; 12] = connection
+            .query_row(
+                "SELECT singleton_id, metadata_contract_version, database_schema_version, permanent_application_identifier, database_format_identity, parish_identifier, installation_identifier, installation_generation, recovery_replacement_generation, database_key_generation_identifier, setup_publication_identifier, database_created_at FROM church_app_database_metadata",
+                [],
+                |row| Ok(std::array::from_fn(|index| row.get(index).unwrap())),
+            )
+            .expect("exact metadata row should be readable in the test");
+        fn raw(value: &Value) -> RawDatabaseMetadataValue<'_> {
+            match value {
+                Value::Null => RawDatabaseMetadataValue::Null,
+                Value::Integer(value) => RawDatabaseMetadataValue::Integer(*value),
+                Value::Real(_) => panic!("canonical metadata never stores REAL values"),
+                Value::Text(value) => RawDatabaseMetadataValue::Text(value),
+                Value::Blob(value) => RawDatabaseMetadataValue::Blob(value),
+            }
+        }
+        RawDatabaseMetadataRow::new(
+            raw(&values[0]),
+            raw(&values[1]),
+            raw(&values[2]),
+            raw(&values[3]),
+            raw(&values[4]),
+            raw(&values[5]),
+            raw(&values[6]),
+            raw(&values[7]),
+            raw(&values[8]),
+            raw(&values[9]),
+            raw(&values[10]),
+            raw(&values[11]),
+        )
+        .parse()
+        .expect("stored row should use the canonical parse representation")
+        .validate_structure()
+        .expect("stored row should satisfy the existing structural validator")
+    }
+
+    fn assert_no_committed_initialization(connection: &Connection) {
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(Some(MAIN_DATABASE_NAME), "application_id", |row| {
+                    row.get(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(Some(MAIN_DATABASE_NAME), "user_version", |row| {
+                    row.get(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = 'church_app_database_metadata'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn source_and_api_surface_are_exact_typed_sealed_and_uninitialized() {
         const SOURCE: &str = include_str!("create_new_database.rs");
@@ -1041,6 +1679,24 @@ mod tests {
             "pub connection:",
             "pub(crate) connection:",
             "with_connection",
+            "cipher_integrity_check",
+            "quick_check",
+            "remove_file",
+            "rename(",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "forbidden surface: {forbidden}"
+            );
+        }
+        let create_transition = production
+            .split_once("pub(crate) fn create_new_keyed_production_database(")
+            .unwrap()
+            .1
+            .split_once("#[derive(Clone, Copy, Eq, PartialEq)]\nenum InitializationCheckpoint")
+            .unwrap()
+            .0;
+        for forbidden in [
             "application_id",
             "user_version",
             "CREATE TABLE",
@@ -1048,17 +1704,13 @@ mod tests {
             "UPDATE",
             "DELETE",
             "VACUUM",
-            "cipher_integrity_check",
-            "quick_check",
             "pragma_update",
             "pragma_query",
             "query_only",
-            "remove_file",
-            "rename(",
         ] {
             assert!(
-                !production.contains(forbidden),
-                "forbidden surface: {forbidden}"
+                !create_transition.contains(forbidden),
+                "create-new transition unexpectedly initializes: {forbidden}"
             );
         }
     }
@@ -1481,6 +2133,431 @@ mod tests {
         drop(after_handle);
         assert!(before == after);
         assert_eq!(fs::read(&database).unwrap(), b"identity-sentinel");
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn initialize_new_production_database_api_owner_and_source_scope_are_locked() {
+        const SOURCE: &str = include_str!("create_new_database.rs");
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let signature = "pub(crate) fn initialize_new_production_database(\n    connection: NewlyCreatedKeyedProductionDatabaseConnection,\n    parish_identifier: ParishIdentifier,\n    installation_identifier: InstallationIdentifier,\n    database_key_generation_identifier: DatabaseKeyGenerationIdentifier,\n    setup_publication_identifier: SetupPublicationIdentifier,\n    database_created_at: DatabaseCreationTimestamp,\n) -> Result<InitializedNewProductionDatabaseConnection, NewProductionDatabaseInitializationError>";
+        assert!(production.contains(signature));
+        assert!(needs_drop::<InitializedNewProductionDatabaseConnection>());
+        assert!(size_of::<InitializedNewProductionDatabaseConnection>() > size_of::<Connection>());
+        let owner = production
+            .split_once("pub(crate) struct InitializedNewProductionDatabaseConnection {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(owner.lines().filter(|line| line.contains(':')).count(), 1);
+        assert!(owner.contains("owner: NewlyCreatedConnectionLifetimeOwner"));
+        assert!(!owner.contains("pub"));
+        for forbidden in [
+            "impl Clone for InitializedNewProductionDatabaseConnection",
+            "impl Copy for InitializedNewProductionDatabaseConnection",
+            "Serialize",
+            "Deserialize",
+            "impl Deref",
+            "AsRef<Connection>",
+            "pub connection:",
+            "pub(crate) connection:",
+            "with_connection",
+            "unchecked_transaction",
+            "cipher_integrity_check",
+            "quick_check",
+            "remove_file",
+            "rename(",
+            "CREATE INDEX",
+            "CREATE TRIGGER",
+            "CREATE VIEW",
+            "migrations",
+            "tauri::command",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "forbidden initializer capability: {forbidden}"
+            );
+        }
+        assert_eq!(
+            production.matches("const CREATE_METADATA_RELATION").count(),
+            1
+        );
+        assert_eq!(production.matches("const INSERT_METADATA_ROW").count(), 1);
+        for forbidden in [
+            " NOT NULL",
+            " PRIMARY KEY",
+            " UNIQUE",
+            " CHECK",
+            " STRICT",
+            " WITHOUT ROWID",
+        ] {
+            assert!(!CREATE_METADATA_RELATION.contains(forbidden));
+        }
+        assert_eq!(CREATE_METADATA_RELATION.matches(',').count(), 11);
+        assert_eq!(INSERT_METADATA_ROW.matches('?').count(), 12);
+        assert_eq!(INSERT_METADATA_ROW.matches("INSERT INTO").count(), 1);
+    }
+
+    #[test]
+    fn initialize_new_production_database_timestamp_bounds_precede_sql_mutation() {
+        let root = TestRoot::create();
+        let fixture = real_initialization_fixture(&root);
+        let result = initialize_new_production_database_using(
+            fixture.owner,
+            fixture.parish_identifier,
+            fixture.installation_identifier,
+            fixture.database_key_generation_identifier,
+            fixture.setup_publication_identifier,
+            DatabaseCreationTimestamp::from_unix_milliseconds(i64::MAX as u64 + 1),
+            |_| panic!("no SQL checkpoint may run after failed representation conversion"),
+            Err,
+        );
+        let Err(NewProductionDatabaseInitializationError::InitializationCloseFailed(failure)) =
+            result
+        else {
+            panic!("injected close failure must retain the representation failure owner")
+        };
+        assert_no_committed_initialization(&failure.owner.connection);
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseInitializationCloseRetryOutcome::Closed(
+                NewProductionDatabaseInitializationError::MetadataRepresentationFailed
+            )
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+
+        let root = TestRoot::create();
+        let initialized = initialize_fixture(real_initialization_fixture(&root), i64::MAX as u64)
+            .expect("largest SQLite-compatible timestamp should initialize");
+        assert_eq!(
+            observed_metadata_contract(&initialized.owner.connection)
+                .database_created_at()
+                .unix_milliseconds(),
+            i64::MAX as u64
+        );
+        assert!(matches!(
+            initialized.close(),
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn initialize_new_production_database_policy_contract_storage_and_headers_are_exact() {
+        let root = TestRoot::create();
+        let fixture = real_initialization_fixture(&root);
+        let expected = DatabaseMetadataContractV1::new(
+            PermanentApplicationIdentifier::canonical(),
+            fixture.parish_identifier,
+            fixture.installation_identifier,
+            InstallationGeneration::INITIAL,
+            RecoveryOrReplacementGeneration::INITIAL,
+            fixture.database_key_generation_identifier,
+            fixture.setup_publication_identifier,
+            DatabaseCreationTimestamp::from_unix_milliseconds(1_798_000_000_123),
+        );
+        let initialized = initialize_fixture(fixture, 1_798_000_000_123)
+            .expect("real SQLCipher initialization should succeed");
+        let connection = &initialized.owner.connection;
+        let journal_mode: String = connection
+            .pragma_query_value(Some(MAIN_DATABASE_NAME), "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert!(journal_mode.eq_ignore_ascii_case("DELETE"));
+        for (name, expected) in [
+            ("synchronous", 2_i64),
+            ("secure_delete", 1),
+            ("auto_vacuum", 0),
+            ("query_only", 0),
+        ] {
+            assert_eq!(
+                connection
+                    .pragma_query_value::<i64, _>(Some(MAIN_DATABASE_NAME), name, |row| row.get(0))
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(Some(MAIN_DATABASE_NAME), "application_id", |row| row
+                    .get(0))
+                .unwrap(),
+            i64::from(PRODUCTION_DATABASE_APPLICATION_ID)
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(Some(MAIN_DATABASE_NAME), "user_version", |row| row
+                    .get(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(observed_metadata_contract(connection), expected);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM church_app_database_metadata",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM sqlite_master", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let storage: (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT typeof(singleton_id), typeof(permanent_application_identifier), typeof(database_format_identity), typeof(installation_generation), length(database_format_identity), length(parish_identifier), length(installation_identifier), length(installation_generation), length(recovery_replacement_generation), length(database_key_generation_identifier), length(setup_publication_identifier), database_created_at FROM church_app_database_metadata",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?)),
+            )
+            .unwrap();
+        assert_eq!(&storage.0, "integer");
+        assert_eq!(&storage.1, "text");
+        assert_eq!(&storage.2, "blob");
+        assert_eq!(&storage.3, "blob");
+        assert_eq!((storage.4, storage.5, storage.6), (16, 16, 16));
+        assert_eq!((storage.7, storage.8), (8, 8));
+        assert_eq!((storage.9, storage.10), (16, 16));
+        assert_eq!(storage.11, 1_798_000_000_123_i64);
+        let generations: (Vec<u8>, Vec<u8>) = connection
+            .query_row(
+                "SELECT installation_generation, recovery_replacement_generation FROM church_app_database_metadata",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            generations.0,
+            InstallationGeneration::INITIAL.get().to_be_bytes()
+        );
+        assert_eq!(
+            generations.1,
+            RecoveryOrReplacementGeneration::INITIAL.get().to_be_bytes()
+        );
+        assert_eq!(
+            format!("{initialized:?}"),
+            "InitializedNewProductionDatabaseConnection([REDACTED])"
+        );
+        assert!(matches!(
+            initialized.close(),
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn initialize_new_production_database_transaction_failures_roll_back_and_close() {
+        for checkpoint in [
+            InitializationCheckpoint::TransactionStart,
+            InitializationCheckpoint::ApplicationId,
+            InitializationCheckpoint::UserVersion,
+            InitializationCheckpoint::MetadataSchema,
+            InitializationCheckpoint::MetadataInsert,
+            InitializationCheckpoint::Commit,
+        ] {
+            let root = TestRoot::create();
+            let fixture = real_initialization_fixture(&root);
+            let result = initialize_new_production_database_using(
+                fixture.owner,
+                fixture.parish_identifier,
+                fixture.installation_identifier,
+                fixture.database_key_generation_identifier,
+                fixture.setup_publication_identifier,
+                DatabaseCreationTimestamp::from_unix_milliseconds(1_798_000_000_123),
+                |observed| {
+                    if observed == checkpoint {
+                        Err(())
+                    } else {
+                        Ok(())
+                    }
+                },
+                Err,
+            );
+            let Err(NewProductionDatabaseInitializationError::InitializationCloseFailed(failure)) =
+                result
+            else {
+                panic!("injected stage and close failure must retain ownership")
+            };
+            assert_no_committed_initialization(&failure.owner.connection);
+            let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
+            assert!(database.is_file());
+            assert!(fs::remove_file(&database).is_err());
+            assert!(matches!(
+                failure.retry_close(),
+                NewProductionDatabaseInitializationCloseRetryOutcome::Closed(_)
+            ));
+            assert!(database.is_file());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn initialize_new_production_database_failure_close_retry_is_close_only() {
+        let root = TestRoot::create();
+        let fixture = real_initialization_fixture(&root);
+        let checkpoint_calls = Cell::new(0);
+        let result = initialize_new_production_database_using(
+            fixture.owner,
+            fixture.parish_identifier,
+            fixture.installation_identifier,
+            fixture.database_key_generation_identifier,
+            fixture.setup_publication_identifier,
+            DatabaseCreationTimestamp::from_unix_milliseconds(1_798_000_000_123),
+            |checkpoint| {
+                checkpoint_calls.set(checkpoint_calls.get() + 1);
+                if checkpoint == InitializationCheckpoint::MetadataInsert {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            },
+            Err,
+        );
+        let Err(NewProductionDatabaseInitializationError::InitializationCloseFailed(failure)) =
+            result
+        else {
+            panic!("injected close failure should retain initialization ownership")
+        };
+        let calls_after_initialization = checkpoint_calls.get();
+        assert_eq!(
+            format!("{failure:?}"),
+            "NewProductionDatabaseInitializationCloseFailure([REDACTED])"
+        );
+        let NewProductionDatabaseInitializationCloseRetryOutcome::Failed(failure) =
+            failure.retry_close_using(Err)
+        else {
+            panic!("repeated close failure should retain ownership")
+        };
+        assert_eq!(checkpoint_calls.get(), calls_after_initialization);
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseInitializationCloseRetryOutcome::Closed(
+                NewProductionDatabaseInitializationError::MetadataInsertionFailed
+            )
+        ));
+        assert_eq!(checkpoint_calls.get(), calls_after_initialization);
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn initialize_new_production_database_success_owner_close_retry_is_close_only() {
+        let root = TestRoot::create();
+        let initialized = initialize_fixture(real_initialization_fixture(&root), 1_798_000_000_123)
+            .expect("initialization should succeed");
+        let NewProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            initialized.close_using(Err)
+        else {
+            panic!("injected success-owner close failure should retain ownership")
+        };
+        let NewProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            failure.retry_close_using(Err)
+        else {
+            panic!("repeated close failure should remain retryable")
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn initialize_new_production_database_real_reopen_wrong_key_and_encryption_regression() {
+        let root = TestRoot::create();
+        let fixture = real_initialization_fixture(&root);
+        let evidence = validated_evidence_for_fixture(&fixture);
+        let protected_wrapper = fixture.protected_database_key_wrapper.clone();
+        let initialized = initialize_new_production_database(
+            fixture.owner,
+            fixture.parish_identifier,
+            fixture.installation_identifier,
+            fixture.database_key_generation_identifier,
+            fixture.setup_publication_identifier,
+            DatabaseCreationTimestamp::from_unix_milliseconds(1_798_000_000_123),
+        )
+        .expect("create-to-initialize production transition should succeed");
+        assert!(matches!(
+            initialized.close(),
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
+        assert!(database.is_file());
+        for entry in fs::read_dir(root.path()).unwrap() {
+            let entry = entry.unwrap();
+            let bytes = fs::read(entry.path()).unwrap();
+            assert!(
+                !bytes
+                    .windows(b"SQLite format 3\0".len())
+                    .any(|window| window == b"SQLite format 3\0")
+            );
+            assert!(
+                !bytes
+                    .windows(PERMANENT_APPLICATION_IDENTIFIER.len())
+                    .any(|window| window == PERMANENT_APPLICATION_IDENTIFIER.as_bytes())
+            );
+        }
+
+        let loaded =
+            LoadedActiveDatabaseKeyWrapper::from_synthetic_wrapper_bytes(protected_wrapper);
+        let candidate = recover_database_key_candidate_from_loaded_wrapper(&loaded).unwrap();
+        let assessment = trusted_current_installation_evidence_assessment_for_test(evidence);
+        let correct_key =
+            bind_database_key_candidate_to_trusted_installation_evidence(candidate, &assessment)
+                .unwrap();
+        let inspected = match inspect_production_database_file(&root.database_path()) {
+            ProductionDatabaseInspection::Present(inspected) => inspected,
+            other => panic!("initialized test database should inspect as present: {other:?}"),
+        };
+        let read_only = super::super::open_keyed_production_database_read_only(
+            root.database_path(),
+            inspected,
+            correct_key,
+        )
+        .expect("correct-key guarded read-only open should succeed");
+        let validated =
+            match super::super::validate_production_database_readability_and_integrity(read_only) {
+                super::super::ProductionDatabaseValidationOutcome::Validated(owner) => owner,
+                other => panic!("correct key should pass readability validation: {other:?}"),
+            };
+        let live =
+            match super::super::validate_production_database_live_metadata_and_headers(validated) {
+                super::super::LiveMetadataAndHeaderValidationOutcome::Validated(owner) => owner,
+                other => panic!("initialized headers and metadata should validate: {other:?}"),
+            };
+        assert!(matches!(
+            live.close(),
+            super::super::ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+
+        let wrong_authorization = authorization();
+        let wrong_key = setup_key(&wrong_authorization);
+        let inspected = match inspect_production_database_file(&root.database_path()) {
+            ProductionDatabaseInspection::Present(inspected) => inspected,
+            other => panic!("database should remain inspectable: {other:?}"),
+        };
+        let wrong_read_only = super::super::open_keyed_production_database_read_only(
+            root.database_path(),
+            inspected,
+            wrong_key,
+        )
+        .expect("key submission alone does not validate correctness");
+        assert!(matches!(
+            super::super::validate_production_database_readability_and_integrity(wrong_read_only),
+            super::super::ProductionDatabaseValidationOutcome::Failed(
+                super::super::ProductionDatabaseValidationError::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed
+            )
+        ));
+        assert!(database.is_file());
         root.assert_exact_cleanup();
     }
 }

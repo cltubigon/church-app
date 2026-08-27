@@ -41,11 +41,14 @@ mod live_metadata_and_header_validation;
 
 #[allow(unused_imports)]
 pub(crate) use create_new_database::{
-    NewProductionDatabaseConnectionCloseFailure, NewProductionDatabaseConnectionCloseOutcome,
+    InitializedNewProductionDatabaseConnection, NewProductionDatabaseConnectionCloseFailure,
+    NewProductionDatabaseConnectionCloseOutcome,
     NewProductionDatabaseConnectionConstructionCloseFailure,
     NewProductionDatabaseConnectionConstructionCloseRetryOutcome,
-    NewProductionDatabaseCreationError, NewlyCreatedKeyedProductionDatabaseConnection,
-    create_new_keyed_production_database,
+    NewProductionDatabaseCreationError, NewProductionDatabaseInitializationCloseFailure,
+    NewProductionDatabaseInitializationCloseRetryOutcome, NewProductionDatabaseInitializationError,
+    NewlyCreatedKeyedProductionDatabaseConnection, create_new_keyed_production_database,
+    initialize_new_production_database,
 };
 
 #[allow(unused_imports)]
@@ -72,6 +75,7 @@ pub(crate) use live_metadata_and_header_validation::{
 };
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const PRODUCTION_DATABASE_APPLICATION_ID: i32 = 0x4348_4150;
 const MAIN_DATABASE_NAME: &str = "main";
 const WIN32_VFS_NAME: &str = "win32";
 const GUARD_ACCESS: u32 = FILE_READ_ATTRIBUTES | FILE_READ_DATA;
