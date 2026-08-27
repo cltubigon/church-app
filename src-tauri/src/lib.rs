@@ -37,6 +37,7 @@ mod parish_identifier_generation;
 #[cfg(windows)]
 mod production_database_connection_handoff;
 mod production_database_file;
+mod setup_publication_identifier_generation;
 #[cfg(windows)]
 mod sqlcipher_database_key_application;
 pub mod storage_foundation;
