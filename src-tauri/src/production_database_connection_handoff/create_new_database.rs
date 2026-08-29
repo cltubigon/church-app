@@ -54,7 +54,7 @@ use crate::{
 };
 
 use super::{
-    PRODUCTION_DATABASE_APPLICATION_ID,
+    PRODUCTION_DATABASE_APPLICATION_ID, ProductionDatabaseValidationError,
     fixed_metadata_and_header_observation::{
         FixedMetadataAndHeaderObservationError, observe_fixed_metadata_and_headers,
     },
@@ -155,6 +155,13 @@ pub(crate) struct ValidatedInitializedNewProductionDatabaseConnection {
     observed_metadata_contract: DatabaseMetadataContractV1,
 }
 
+/// Opaque owner proving the fixed cipher and SQLite integrity checks completed
+/// on the same immediately validated new-database connection.
+pub(crate) struct IntegrityValidatedInitializedNewProductionDatabaseConnection {
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    observed_metadata_contract: DatabaseMetadataContractV1,
+}
+
 impl fmt::Debug for NewlyCreatedKeyedProductionDatabaseConnection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("NewlyCreatedKeyedProductionDatabaseConnection([REDACTED])")
@@ -171,6 +178,70 @@ impl fmt::Debug for ValidatedInitializedNewProductionDatabaseConnection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ValidatedInitializedNewProductionDatabaseConnection([REDACTED])")
     }
+}
+
+impl fmt::Debug for IntegrityValidatedInitializedNewProductionDatabaseConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .write_str("IntegrityValidatedInitializedNewProductionDatabaseConnection([REDACTED])")
+    }
+}
+
+#[must_use = "the new production database integrity validation result must be handled"]
+pub(crate) enum NewProductionDatabaseIntegrityValidationError {
+    EncryptedDatabaseAuthenticationOrCipherIntegrityFailed,
+    SQLiteReadabilityOrIntegrityFailed,
+    ValidationUnavailable,
+    ValidationInterruptedOrIncomplete,
+    IntegrityValidationCloseFailed(Box<NewProductionDatabaseIntegrityValidationCloseFailure>),
+}
+
+impl fmt::Debug for NewProductionDatabaseIntegrityValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed => {
+                "EncryptedDatabaseAuthenticationOrCipherIntegrityFailed"
+            }
+            Self::SQLiteReadabilityOrIntegrityFailed => "SQLiteReadabilityOrIntegrityFailed",
+            Self::ValidationUnavailable => "ValidationUnavailable",
+            Self::ValidationInterruptedOrIncomplete => "ValidationInterruptedOrIncomplete",
+            Self::IntegrityValidationCloseFailed(_) => "IntegrityValidationCloseFailed([REDACTED])",
+        })
+    }
+}
+
+pub(crate) struct NewProductionDatabaseIntegrityValidationCloseFailure {
+    category: NewProductionDatabaseIntegrityValidationFailure,
+    owner: NewlyCreatedConnectionLifetimeOwner,
+}
+
+impl fmt::Debug for NewProductionDatabaseIntegrityValidationCloseFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NewProductionDatabaseIntegrityValidationCloseFailure([REDACTED])")
+    }
+}
+
+#[must_use = "an integrity validation close retry outcome must be handled"]
+pub(crate) enum NewProductionDatabaseIntegrityValidationCloseRetryOutcome {
+    Closed(NewProductionDatabaseIntegrityValidationError),
+    Failed(NewProductionDatabaseIntegrityValidationCloseFailure),
+}
+
+impl fmt::Debug for NewProductionDatabaseIntegrityValidationCloseRetryOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed(category) => formatter.debug_tuple("Closed").field(category).finish(),
+            Self::Failed(_) => formatter.write_str("Failed([REDACTED])"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NewProductionDatabaseIntegrityValidationFailure {
+    EncryptedDatabaseAuthenticationOrCipherIntegrityFailed,
+    SQLiteReadabilityOrIntegrityFailed,
+    ValidationUnavailable,
+    ValidationInterruptedOrIncomplete,
 }
 
 pub(crate) enum NewProductionDatabaseImmediateValidationError {
@@ -477,6 +548,47 @@ impl ValidatedInitializedNewProductionDatabaseConnection {
     }
 }
 
+impl IntegrityValidatedInitializedNewProductionDatabaseConnection {
+    /// Discards the retained metadata contract, then explicitly closes the
+    /// unchanged new-database lifetime owner.
+    pub(crate) fn close(self) -> NewProductionDatabaseConnectionCloseOutcome {
+        let Self {
+            owner,
+            observed_metadata_contract,
+        } = self;
+        close_integrity_validated_initialized_owner_using(
+            owner,
+            observed_metadata_contract,
+            |connection| {
+                connection
+                    .close()
+                    .map_err(|(returned_connection, _)| returned_connection)
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn close_using(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+    ) -> NewProductionDatabaseConnectionCloseOutcome {
+        let Self {
+            owner,
+            observed_metadata_contract,
+        } = self;
+        close_integrity_validated_initialized_owner_using(owner, observed_metadata_contract, close)
+    }
+}
+
+fn close_integrity_validated_initialized_owner_using<T>(
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    observed_metadata_contract: T,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> NewProductionDatabaseConnectionCloseOutcome {
+    drop(observed_metadata_contract);
+    close_new_lifetime_owner_using(owner, close)
+}
+
 fn close_validated_initialized_owner_using<T>(
     owner: NewlyCreatedConnectionLifetimeOwner,
     observed_metadata_contract: T,
@@ -558,6 +670,25 @@ impl NewProductionDatabaseImmediateValidationCloseFailure {
     }
 }
 
+impl NewProductionDatabaseIntegrityValidationCloseFailure {
+    /// Consumes the complete retained lifetime unit and retries only close.
+    pub(crate) fn retry_close(self) -> NewProductionDatabaseIntegrityValidationCloseRetryOutcome {
+        retry_integrity_validation_close_using(self, |connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        })
+    }
+
+    #[cfg(test)]
+    fn retry_close_using(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+    ) -> NewProductionDatabaseIntegrityValidationCloseRetryOutcome {
+        retry_integrity_validation_close_using(self, close)
+    }
+}
+
 /// Consumes the keyed-new owner and establishes only the approved version-1
 /// policy, headers, minimal metadata relation, and one canonical metadata row.
 #[allow(clippy::too_many_arguments)]
@@ -596,6 +727,26 @@ pub(crate) fn validate_initialized_new_production_database(
     validate_initialized_new_production_database_using(
         connection,
         |_| Ok(()),
+        |connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        },
+    )
+}
+
+/// Consumes the immediately validated owner and runs only the existing fixed
+/// cipher-integrity and SQLite quick-check helper on its same writable keyed
+/// connection, outside an explicit transaction.
+pub(crate) fn validate_initialized_new_production_database_integrity(
+    connection: ValidatedInitializedNewProductionDatabaseConnection,
+) -> Result<
+    IntegrityValidatedInitializedNewProductionDatabaseConnection,
+    NewProductionDatabaseIntegrityValidationError,
+> {
+    validate_initialized_new_production_database_integrity_using(
+        connection,
+        super::validate_fixed_readability_and_integrity,
         |connection| {
             connection
                 .close()
@@ -723,6 +874,75 @@ fn validate_initialized_new_production_database_using(
             category,
             close_on_failure,
         ),
+    }
+}
+
+fn validate_initialized_new_production_database_integrity_using(
+    connection: ValidatedInitializedNewProductionDatabaseConnection,
+    validate: impl FnOnce(&Connection) -> Result<(), ProductionDatabaseValidationError>,
+    close_on_failure: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> Result<
+    IntegrityValidatedInitializedNewProductionDatabaseConnection,
+    NewProductionDatabaseIntegrityValidationError,
+> {
+    let ValidatedInitializedNewProductionDatabaseConnection {
+        owner,
+        observed_metadata_contract,
+    } = connection;
+    match validate(&owner.connection) {
+        Ok(()) => Ok(
+            IntegrityValidatedInitializedNewProductionDatabaseConnection {
+                owner,
+                observed_metadata_contract,
+            },
+        ),
+        Err(error) => {
+            let category = map_integrity_validation_error(error);
+            finish_integrity_validation_failure_after_discard_using(
+                owner,
+                observed_metadata_contract,
+                category,
+                close_on_failure,
+            )
+        }
+    }
+}
+
+fn map_integrity_validation_error(
+    error: ProductionDatabaseValidationError,
+) -> NewProductionDatabaseIntegrityValidationFailure {
+    match error {
+        ProductionDatabaseValidationError::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed => {
+            NewProductionDatabaseIntegrityValidationFailure::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed
+        }
+        ProductionDatabaseValidationError::SQLiteReadabilityOrIntegrityFailed => {
+            NewProductionDatabaseIntegrityValidationFailure::SQLiteReadabilityOrIntegrityFailed
+        }
+        ProductionDatabaseValidationError::ValidationUnavailable => {
+            NewProductionDatabaseIntegrityValidationFailure::ValidationUnavailable
+        }
+        ProductionDatabaseValidationError::ValidationInterruptedOrIncomplete => {
+            NewProductionDatabaseIntegrityValidationFailure::ValidationInterruptedOrIncomplete
+        }
+    }
+}
+
+fn primary_integrity_validation_error(
+    category: NewProductionDatabaseIntegrityValidationFailure,
+) -> NewProductionDatabaseIntegrityValidationError {
+    match category {
+        NewProductionDatabaseIntegrityValidationFailure::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed => {
+            NewProductionDatabaseIntegrityValidationError::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed
+        }
+        NewProductionDatabaseIntegrityValidationFailure::SQLiteReadabilityOrIntegrityFailed => {
+            NewProductionDatabaseIntegrityValidationError::SQLiteReadabilityOrIntegrityFailed
+        }
+        NewProductionDatabaseIntegrityValidationFailure::ValidationUnavailable => {
+            NewProductionDatabaseIntegrityValidationError::ValidationUnavailable
+        }
+        NewProductionDatabaseIntegrityValidationFailure::ValidationInterruptedOrIncomplete => {
+            NewProductionDatabaseIntegrityValidationError::ValidationInterruptedOrIncomplete
+        }
     }
 }
 
@@ -1012,6 +1232,64 @@ fn retry_immediate_validation_close_using(
         NewProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
             NewProductionDatabaseImmediateValidationCloseRetryOutcome::Failed(
                 NewProductionDatabaseImmediateValidationCloseFailure {
+                    category,
+                    owner: failure.owner,
+                },
+            )
+        }
+    }
+}
+
+fn finish_integrity_validation_failure(
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    category: NewProductionDatabaseIntegrityValidationFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> Result<
+    IntegrityValidatedInitializedNewProductionDatabaseConnection,
+    NewProductionDatabaseIntegrityValidationError,
+> {
+    match close_new_lifetime_owner_using(owner, close) {
+        NewProductionDatabaseConnectionCloseOutcome::Closed => {
+            Err(primary_integrity_validation_error(category))
+        }
+        NewProductionDatabaseConnectionCloseOutcome::Failed(failure) => Err(
+            NewProductionDatabaseIntegrityValidationError::IntegrityValidationCloseFailed(
+                Box::new(NewProductionDatabaseIntegrityValidationCloseFailure {
+                    category,
+                    owner: failure.owner,
+                }),
+            ),
+        ),
+    }
+}
+
+fn finish_integrity_validation_failure_after_discard_using<T>(
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    observed_metadata_contract: T,
+    category: NewProductionDatabaseIntegrityValidationFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> Result<
+    IntegrityValidatedInitializedNewProductionDatabaseConnection,
+    NewProductionDatabaseIntegrityValidationError,
+> {
+    drop(observed_metadata_contract);
+    finish_integrity_validation_failure(owner, category, close)
+}
+
+fn retry_integrity_validation_close_using(
+    failure: NewProductionDatabaseIntegrityValidationCloseFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> NewProductionDatabaseIntegrityValidationCloseRetryOutcome {
+    let NewProductionDatabaseIntegrityValidationCloseFailure { category, owner } = failure;
+    match close_new_lifetime_owner_using(owner, close) {
+        NewProductionDatabaseConnectionCloseOutcome::Closed => {
+            NewProductionDatabaseIntegrityValidationCloseRetryOutcome::Closed(
+                primary_integrity_validation_error(category),
+            )
+        }
+        NewProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+            NewProductionDatabaseIntegrityValidationCloseRetryOutcome::Failed(
+                NewProductionDatabaseIntegrityValidationCloseFailure {
                     category,
                     owner: failure.owner,
                 },
@@ -1880,6 +2158,13 @@ mod tests {
     fn initialized_fixture(root: &TestRoot) -> InitializedNewProductionDatabaseConnection {
         initialize_fixture(real_initialization_fixture(root), 1_798_000_000_123)
             .expect("real initialization should succeed")
+    }
+
+    fn validated_initialized_fixture(
+        root: &TestRoot,
+    ) -> ValidatedInitializedNewProductionDatabaseConnection {
+        validate_initialized_new_production_database(initialized_fixture(root))
+            .expect("real immediate validation should succeed")
     }
 
     fn bytes_from_installation_identifier(identifier: InstallationIdentifier) -> [u8; 16] {
@@ -3328,6 +3613,340 @@ mod tests {
         assert!(close_called.get());
         assert!(matches!(
             outcome,
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn setup_integrity_api_owner_shared_helper_and_authority_surface_are_locked() {
+        const SOURCE: &str = include_str!("create_new_database.rs");
+        const PARENT: &str = include_str!("../production_database_connection_handoff.rs");
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let parent_production = PARENT.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let signature = "pub(crate) fn validate_initialized_new_production_database_integrity(\n    connection: ValidatedInitializedNewProductionDatabaseConnection,\n) -> Result<\n    IntegrityValidatedInitializedNewProductionDatabaseConnection,\n    NewProductionDatabaseIntegrityValidationError,\n>";
+        assert!(production.contains(signature));
+        assert!(needs_drop::<
+            IntegrityValidatedInitializedNewProductionDatabaseConnection,
+        >());
+
+        let owner = production
+            .split_once(
+                "pub(crate) struct IntegrityValidatedInitializedNewProductionDatabaseConnection {",
+            )
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(owner.lines().filter(|line| line.contains(':')).count(), 2);
+        assert!(owner.contains("owner: NewlyCreatedConnectionLifetimeOwner"));
+        assert!(owner.contains("observed_metadata_contract: DatabaseMetadataContractV1"));
+
+        let transition = production
+            .split_once(signature)
+            .unwrap()
+            .1
+            .split_once("/// Consumes first-time setup authority")
+            .unwrap()
+            .0;
+        assert!(transition.contains("super::validate_fixed_readability_and_integrity"));
+        assert_eq!(
+            production.matches("PRAGMA cipher_integrity_check").count(),
+            0
+        );
+        assert_eq!(production.matches("PRAGMA main.quick_check(1)").count(), 0);
+        assert_eq!(
+            parent_production
+                .matches("PRAGMA cipher_integrity_check")
+                .count(),
+            1
+        );
+        assert_eq!(
+            parent_production
+                .matches("PRAGMA main.quick_check(1)")
+                .count(),
+            1
+        );
+
+        for forbidden in [
+            "impl Clone for IntegrityValidatedInitializedNewProductionDatabaseConnection",
+            "impl Copy for IntegrityValidatedInitializedNewProductionDatabaseConnection",
+            "Serialize",
+            "Deserialize",
+            "impl Deref",
+            "AsRef<Connection>",
+            "with_connection",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "forbidden owner surface: {forbidden}"
+            );
+        }
+        for forbidden in [
+            "Connection::open",
+            "ProductionDatabasePath",
+            "GenerationBoundDatabaseKey",
+            ".transaction(",
+            "unchecked_transaction",
+            "BEGIN",
+            "COMMIT",
+            "query_only",
+            "application_id",
+            "user_version",
+            "observe_fixed_metadata_and_headers",
+            "establish_and_verify_initialization_policy",
+            "evidence",
+            "freshness",
+            "correspondence",
+            "publication",
+            "complete_setup",
+            "authorize_production_database_startup",
+            "activate_production_database_for_operational_use",
+            "recovery",
+            "cleanup",
+            "remove_file",
+            "rename(",
+        ] {
+            assert!(
+                !transition.contains(forbidden),
+                "forbidden integrity-transition capability: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_integrity_real_windows_sqlcipher_flow_preserves_owner_metadata_and_file() {
+        let root = TestRoot::create();
+        let validated = validated_initialized_fixture(&root);
+        let expected = validated.observed_metadata_contract;
+        let sqlite_handle = unsafe { validated.owner.connection.handle() };
+        let parent_handle = validated.owner.retained.parent.handle.as_raw_handle();
+        let leaf_handle = validated.owner.retained.leaf.handle.as_raw_handle();
+
+        let integrity_validated = validate_initialized_new_production_database_integrity(validated)
+            .expect("fixed setup integrity validation should succeed");
+        assert_eq!(integrity_validated.observed_metadata_contract, expected);
+        assert_eq!(
+            unsafe { integrity_validated.owner.connection.handle() },
+            sqlite_handle
+        );
+        assert_eq!(
+            integrity_validated
+                .owner
+                .retained
+                .parent
+                .handle
+                .as_raw_handle(),
+            parent_handle
+        );
+        assert_eq!(
+            integrity_validated
+                .owner
+                .retained
+                .leaf
+                .handle
+                .as_raw_handle(),
+            leaf_handle
+        );
+        assert_eq!(
+            format!("{integrity_validated:?}"),
+            "IntegrityValidatedInitializedNewProductionDatabaseConnection([REDACTED])"
+        );
+        assert!(matches!(
+            integrity_validated.close(),
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn setup_integrity_maps_all_four_parent_categories_one_to_one() {
+        for (parent, expected) in [
+            (
+                ProductionDatabaseValidationError::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed,
+                "EncryptedDatabaseAuthenticationOrCipherIntegrityFailed",
+            ),
+            (
+                ProductionDatabaseValidationError::SQLiteReadabilityOrIntegrityFailed,
+                "SQLiteReadabilityOrIntegrityFailed",
+            ),
+            (
+                ProductionDatabaseValidationError::ValidationUnavailable,
+                "ValidationUnavailable",
+            ),
+            (
+                ProductionDatabaseValidationError::ValidationInterruptedOrIncomplete,
+                "ValidationInterruptedOrIncomplete",
+            ),
+        ] {
+            let mapped = primary_integrity_validation_error(map_integrity_validation_error(parent));
+            assert_eq!(format!("{mapped:?}"), expected);
+        }
+    }
+
+    #[test]
+    fn setup_integrity_failure_close_retry_preserves_every_category_without_rerun() {
+        for parent_category in [
+            ProductionDatabaseValidationError::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed,
+            ProductionDatabaseValidationError::SQLiteReadabilityOrIntegrityFailed,
+            ProductionDatabaseValidationError::ValidationUnavailable,
+            ProductionDatabaseValidationError::ValidationInterruptedOrIncomplete,
+        ] {
+            let root = TestRoot::create();
+            let calls = Cell::new(0_u8);
+            let result = validate_initialized_new_production_database_integrity_using(
+                validated_initialized_fixture(&root),
+                |_| {
+                    calls.set(calls.get() + 1);
+                    Err(parent_category)
+                },
+                Err,
+            );
+            let Err(
+                NewProductionDatabaseIntegrityValidationError::IntegrityValidationCloseFailed(
+                    failure,
+                ),
+            ) = result
+            else {
+                panic!("injected close failure must retain integrity ownership")
+            };
+            assert_eq!(calls.get(), 1);
+            assert_eq!(
+                format!("{failure:?}"),
+                "NewProductionDatabaseIntegrityValidationCloseFailure([REDACTED])"
+            );
+            let NewProductionDatabaseIntegrityValidationCloseRetryOutcome::Failed(failure) =
+                failure.retry_close_using(Err)
+            else {
+                panic!("repeated close failure must remain retryable")
+            };
+            assert_eq!(calls.get(), 1);
+            let NewProductionDatabaseIntegrityValidationCloseRetryOutcome::Closed(error) =
+                failure.retry_close()
+            else {
+                panic!("eventual close must return the original category")
+            };
+            assert_eq!(
+                format!("{error:?}"),
+                format!(
+                    "{:?}",
+                    primary_integrity_validation_error(map_integrity_validation_error(
+                        parent_category
+                    ))
+                )
+            );
+            assert_eq!(calls.get(), 1);
+            assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn setup_integrity_every_primary_failure_closes_and_returns_original_category() {
+        for parent_category in [
+            ProductionDatabaseValidationError::EncryptedDatabaseAuthenticationOrCipherIntegrityFailed,
+            ProductionDatabaseValidationError::SQLiteReadabilityOrIntegrityFailed,
+            ProductionDatabaseValidationError::ValidationUnavailable,
+            ProductionDatabaseValidationError::ValidationInterruptedOrIncomplete,
+        ] {
+            let root = TestRoot::create();
+            let result = validate_initialized_new_production_database_integrity_using(
+                validated_initialized_fixture(&root),
+                |_| Err(parent_category),
+                |connection| {
+                    drop(connection);
+                    Ok(())
+                },
+            );
+            let error = result.expect_err("successful close must return the primary category");
+            assert_eq!(
+                format!("{error:?}"),
+                format!(
+                    "{:?}",
+                    primary_integrity_validation_error(map_integrity_validation_error(
+                        parent_category
+                    ))
+                )
+            );
+            assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn setup_integrity_success_owner_close_discards_metadata_and_retries_only_close() {
+        struct DropProbe<'a>(&'a Cell<bool>);
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let root = TestRoot::create();
+        let metadata_dropped = Cell::new(false);
+        let close_called = Cell::new(false);
+        let outcome = close_integrity_validated_initialized_owner_using(
+            unkeyed_open_owner(&root),
+            DropProbe(&metadata_dropped),
+            |connection| {
+                assert!(metadata_dropped.get());
+                close_called.set(true);
+                drop(connection);
+                Ok(())
+            },
+        );
+        assert!(metadata_dropped.get());
+        assert!(close_called.get());
+        assert!(matches!(
+            outcome,
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+
+        let root = TestRoot::create();
+        let metadata_dropped = Cell::new(false);
+        let close_called = Cell::new(false);
+        let result = finish_integrity_validation_failure_after_discard_using(
+            unkeyed_open_owner(&root),
+            DropProbe(&metadata_dropped),
+            NewProductionDatabaseIntegrityValidationFailure::ValidationUnavailable,
+            |connection| {
+                assert!(metadata_dropped.get());
+                close_called.set(true);
+                drop(connection);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(NewProductionDatabaseIntegrityValidationError::ValidationUnavailable)
+        ));
+        assert!(metadata_dropped.get());
+        assert!(close_called.get());
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+
+        let root = TestRoot::create();
+        let integrity_validated = validate_initialized_new_production_database_integrity(
+            validated_initialized_fixture(&root),
+        )
+        .expect("fixed setup integrity validation should succeed");
+        let NewProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            integrity_validated.close_using(Err)
+        else {
+            panic!("injected success-owner close failure must retain lifetime ownership")
+        };
+        let NewProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            failure.retry_close_using(Err)
+        else {
+            panic!("repeated close failure must remain retryable")
+        };
+        assert!(matches!(
+            failure.retry_close(),
             NewProductionDatabaseConnectionCloseOutcome::Closed
         ));
         assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
