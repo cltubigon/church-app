@@ -9,13 +9,14 @@
 use std::fmt;
 
 use crate::{
+    database_key::DatabaseKey,
     database_key_generation::GeneratedDatabaseKeyMaterial,
     installation_evidence_contract::{DatabaseKeyGenerationIdentifier, InstallationIdentifier},
     installation_identifier_generation::GeneratedInstallationIdentifier,
     installation_state::FirstTimeSetupAuthorization,
 };
 
-use super::GenerationBoundDatabaseKey;
+use super::{EncodedProtectedWrapper, GenerationBoundDatabaseKey, ProtectionStageError};
 
 pub(crate) struct FirstTimeSetupDatabaseKeyBinding {
     generation_bound_database_key: GenerationBoundDatabaseKey,
@@ -45,6 +46,52 @@ impl fmt::Debug for FirstTimeSetupDatabaseKeyBinding {
     }
 }
 
+/// Opaque setup-only owner proving that the exact generated database key was
+/// protected before the still-owned generation-bound key is used to create the
+/// database. This grants no persistence, publication, database, startup,
+/// setup-completion, or operational authority.
+pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyBinding {
+    generation_bound_database_key: GenerationBoundDatabaseKey,
+    installation_identifier: InstallationIdentifier,
+    database_key_generation_identifier: DatabaseKeyGenerationIdentifier,
+    protected_database_key_wrapper: EncodedProtectedWrapper,
+}
+
+impl ProtectedFirstTimeSetupDatabaseKeyBinding {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        GenerationBoundDatabaseKey,
+        InstallationIdentifier,
+        DatabaseKeyGenerationIdentifier,
+        EncodedProtectedWrapper,
+    ) {
+        (
+            self.generation_bound_database_key,
+            self.installation_identifier,
+            self.database_key_generation_identifier,
+            self.protected_database_key_wrapper,
+        )
+    }
+}
+
+impl fmt::Debug for ProtectedFirstTimeSetupDatabaseKeyBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProtectedFirstTimeSetupDatabaseKeyBinding([REDACTED])")
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum FirstTimeSetupDatabaseKeyProtectionError {
+    ProtectionUnavailable,
+}
+
+impl fmt::Debug for FirstTimeSetupDatabaseKeyProtectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProtectionUnavailable")
+    }
+}
+
 pub(crate) fn bind_generated_database_key_for_first_time_setup(
     authorization: &FirstTimeSetupAuthorization,
     material: GeneratedDatabaseKeyMaterial,
@@ -63,9 +110,51 @@ pub(crate) fn bind_generated_database_key_for_first_time_setup(
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn protect_first_time_setup_database_key_binding(
+    binding: FirstTimeSetupDatabaseKeyBinding,
+) -> Result<ProtectedFirstTimeSetupDatabaseKeyBinding, FirstTimeSetupDatabaseKeyProtectionError> {
+    protect_first_time_setup_database_key_binding_using(binding, super::protect_database_key)
+}
+
+fn protect_first_time_setup_database_key_binding_using(
+    binding: FirstTimeSetupDatabaseKeyBinding,
+    protect: impl FnOnce(
+        &DatabaseKey,
+        DatabaseKeyGenerationIdentifier,
+    ) -> Result<EncodedProtectedWrapper, ProtectionStageError>,
+) -> Result<ProtectedFirstTimeSetupDatabaseKeyBinding, FirstTimeSetupDatabaseKeyProtectionError> {
+    let FirstTimeSetupDatabaseKeyBinding {
+        generation_bound_database_key,
+        installation_identifier,
+        database_key_generation_identifier,
+    } = binding;
+    let protected_database_key_wrapper = generation_bound_database_key
+        .expose_key(|database_key| protect(database_key, database_key_generation_identifier))
+        .map_err(|_| FirstTimeSetupDatabaseKeyProtectionError::ProtectionUnavailable)?;
+
+    Ok(ProtectedFirstTimeSetupDatabaseKeyBinding {
+        generation_bound_database_key,
+        installation_identifier,
+        database_key_generation_identifier,
+        protected_database_key_wrapper,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use std::mem::{needs_drop, size_of};
+    use std::{
+        cell::Cell,
+        mem::{needs_drop, size_of},
+    };
+
+    #[cfg(windows)]
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
     use crate::{
@@ -76,6 +165,67 @@ mod tests {
         },
     };
 
+    #[cfg(windows)]
+    use crate::{
+        database_key_active_wrapper_loader::LoadedActiveDatabaseKeyWrapper,
+        database_metadata_contract::DatabaseCreationTimestamp,
+        installation_evidence_protection::recover_database_key_candidate_from_loaded_wrapper,
+        parish_identifier_generation::generate_parish_identifier,
+        production_database_connection_handoff::{
+            NewProductionDatabaseConnectionCloseOutcome, create_new_keyed_production_database,
+            initialize_new_production_database, validate_initialized_new_production_database,
+            validate_initialized_new_production_database_integrity,
+        },
+        setup_publication_identifier_generation::generate_setup_publication_identifier,
+        storage_foundation::{ProductionDatabasePath, production_database_path},
+    };
+
+    #[cfg(windows)]
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(windows)]
+    struct TestRoot(PathBuf);
+
+    #[cfg(windows)]
+    impl TestRoot {
+        fn create() -> Self {
+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock should be after the Unix epoch")
+                .as_nanos();
+            let temporary_directory = std::env::temp_dir();
+            let path = temporary_directory.join(format!(
+                "church-app-protected-setup-key-{}-{nonce}-{sequence}",
+                std::process::id()
+            ));
+            assert!(path.starts_with(&temporary_directory));
+            assert!(!path.exists());
+            fs::create_dir(&path).expect("isolated test root creation should succeed");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn database_path(&self) -> ProductionDatabasePath {
+            production_database_path(self.0.clone())
+        }
+
+        fn assert_exact_cleanup(self) {
+            fs::remove_dir_all(&self.0).expect("exact test root cleanup should succeed");
+            assert!(!self.0.exists());
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn authorization() -> FirstTimeSetupAuthorization {
         match authorize_first_time_setup(InstallationEvidence::NeverInitialized)
             .expect("never-initialized evidence should authorize first-time setup")
@@ -85,6 +235,17 @@ mod tests {
                 panic!("successful setup authorization must contain its typed proof")
             }
         }
+    }
+
+    fn binding(authorization: &FirstTimeSetupAuthorization) -> FirstTimeSetupDatabaseKeyBinding {
+        bind_generated_database_key_for_first_time_setup(
+            authorization,
+            generate_database_key_material()
+                .expect("the supported test host should provide database-key randomness"),
+            generate_installation_identifier().expect(
+                "the supported test host should provide installation-identifier randomness",
+            ),
+        )
     }
 
     #[test]
@@ -150,6 +311,13 @@ mod tests {
                 + size_of::<InstallationIdentifier>()
                 + size_of::<DatabaseKeyGenerationIdentifier>()
         );
+        let predecessor_surface = production
+            .split_once("pub(crate) struct FirstTimeSetupDatabaseKeyBinding {")
+            .unwrap()
+            .1
+            .split_once("pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyBinding {")
+            .unwrap()
+            .0;
 
         for forbidden in [
             "#[derive(",
@@ -168,7 +336,7 @@ mod tests {
             "pub fn",
         ] {
             assert!(
-                !production.contains(forbidden),
+                !predecessor_surface.contains(forbidden),
                 "handoff unexpectedly exposes forbidden surface: {forbidden}"
             );
         }
@@ -294,5 +462,231 @@ mod tests {
         ] {
             assert!(!bound_production.contains(generic));
         }
+    }
+
+    #[test]
+    fn protection_failure_is_single_attempt_coarse_and_ownerless() {
+        let authorization = authorization();
+        let calls = Cell::new(0);
+
+        let error =
+            protect_first_time_setup_database_key_binding_using(binding(&authorization), |_, _| {
+                calls.set(calls.get() + 1);
+                Err(ProtectionStageError::ProtectionUnavailable)
+            })
+            .expect_err("injected protection failure must not produce a protected handoff");
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            error,
+            FirstTimeSetupDatabaseKeyProtectionError::ProtectionUnavailable
+        );
+        assert_eq!(format!("{error:?}"), "ProtectionUnavailable");
+    }
+
+    #[test]
+    fn protected_handoff_surface_is_exact_owned_redacted_and_capability_narrow() {
+        const SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let declaration = production
+            .split_once("pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyBinding {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let fields: Vec<_> = declaration
+            .lines()
+            .filter(|line| line.contains(':'))
+            .collect();
+
+        assert_eq!(
+            fields,
+            [
+                "    generation_bound_database_key: GenerationBoundDatabaseKey,",
+                "    installation_identifier: InstallationIdentifier,",
+                "    database_key_generation_identifier: DatabaseKeyGenerationIdentifier,",
+                "    protected_database_key_wrapper: EncodedProtectedWrapper,",
+            ]
+        );
+        assert!(!declaration.contains("pub"));
+        assert!(needs_drop::<ProtectedFirstTimeSetupDatabaseKeyBinding>());
+
+        let protected_surface = production
+            .split_once("pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyBinding {")
+            .unwrap()
+            .1
+            .split_once("#[derive(Clone, Copy, Eq, PartialEq)]")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "#[derive(",
+            "impl Clone",
+            "impl Copy",
+            "Serialize",
+            "Deserialize",
+            "impl Deref",
+            "impl AsRef",
+            "raw_key",
+            "expose_key",
+            "as_bytes",
+            "into_bytes",
+            "set_",
+            "path:",
+            "PathBuf",
+            "File",
+        ] {
+            assert!(
+                !protected_surface.contains(forbidden),
+                "protected handoff unexpectedly exposes forbidden surface: {forbidden}"
+            );
+        }
+
+        let signature = "pub(crate) fn into_parts(\n        self,\n    ) -> (\n        GenerationBoundDatabaseKey,\n        InstallationIdentifier,\n        DatabaseKeyGenerationIdentifier,\n        EncodedProtectedWrapper,\n    )";
+        let decomposition = protected_surface.split_once(signature).unwrap().1;
+        for field in [
+            "self.generation_bound_database_key",
+            "self.installation_identifier",
+            "self.database_key_generation_identifier",
+            "self.protected_database_key_wrapper",
+        ] {
+            assert_eq!(
+                decomposition.matches(field).count(),
+                1,
+                "consuming decomposition must move {field} exactly once"
+            );
+        }
+        for forbidden in [".clone()", "from_bytes", "protect_database_key"] {
+            assert!(!decomposition.contains(forbidden));
+        }
+
+        assert!(production.contains(
+            "formatter.write_str(\"ProtectedFirstTimeSetupDatabaseKeyBinding([REDACTED])\")"
+        ));
+    }
+
+    #[test]
+    fn production_transition_has_exact_input_and_one_canonical_protection_call() {
+        const SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let signature = "pub(crate) fn protect_first_time_setup_database_key_binding(\n    binding: FirstTimeSetupDatabaseKeyBinding,\n) -> Result<ProtectedFirstTimeSetupDatabaseKeyBinding, FirstTimeSetupDatabaseKeyProtectionError>";
+        let transition = production.split_once(signature).unwrap().1;
+
+        assert_eq!(production.matches("super::protect_database_key").count(), 1);
+        assert!(transition.starts_with(" {\n    protect_first_time_setup_database_key_binding_using(binding, super::protect_database_key)\n}"));
+        assert_eq!(
+            production
+                .matches(".expose_key(|database_key| protect(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production
+                .matches("FirstTimeSetupDatabaseKeyProtectionError::ProtectionUnavailable")
+                .count(),
+            1
+        );
+        for forbidden in [
+            "GeneratedDatabaseKeyMaterial",
+            "GeneratedInstallationIdentifier",
+            "ProductionDatabasePath",
+            "SetupPublicationIdentifier",
+            "FirstTimeSetupAuthorization",
+        ] {
+            assert!(!signature.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_windows_protection_preserves_exact_key_and_identifiers_before_create_new() {
+        let authorization = authorization();
+        let predecessor = binding(&authorization);
+        let expected_installation_identifier = predecessor.installation_identifier;
+        let expected_generation_identifier = predecessor.database_key_generation_identifier;
+
+        let protected = protect_first_time_setup_database_key_binding(predecessor)
+            .expect("CurrentUser DPAPI protection should succeed");
+        assert_eq!(
+            format!("{protected:?}"),
+            "ProtectedFirstTimeSetupDatabaseKeyBinding([REDACTED])"
+        );
+        fn require_exact_protected_parts(
+            parts: (
+                GenerationBoundDatabaseKey,
+                InstallationIdentifier,
+                DatabaseKeyGenerationIdentifier,
+                EncodedProtectedWrapper,
+            ),
+        ) -> (
+            GenerationBoundDatabaseKey,
+            InstallationIdentifier,
+            DatabaseKeyGenerationIdentifier,
+            EncodedProtectedWrapper,
+        ) {
+            parts
+        }
+        let (
+            generation_bound_database_key,
+            installation_identifier,
+            database_key_generation_identifier,
+            protected_database_key_wrapper,
+        ) = require_exact_protected_parts(protected.into_parts());
+        let loaded_wrapper = LoadedActiveDatabaseKeyWrapper::from_synthetic_wrapper_bytes(
+            protected_database_key_wrapper.as_bytes().to_vec(),
+        );
+        let recovered = recover_database_key_candidate_from_loaded_wrapper(&loaded_wrapper)
+            .expect("the canonical database-key wrapper should recover");
+        let (recovered_key, recovered_generation_identifier) = recovered.into_parts();
+
+        assert_eq!(installation_identifier, expected_installation_identifier);
+        assert_eq!(
+            database_key_generation_identifier,
+            expected_generation_identifier
+        );
+        assert_eq!(
+            recovered_generation_identifier,
+            database_key_generation_identifier
+        );
+        generation_bound_database_key.expose_key(|retained_key| {
+            retained_key.expose_bytes(|retained_bytes| {
+                recovered_key.expose_bytes(|recovered_bytes| {
+                    assert_eq!(recovered_bytes, retained_bytes);
+                });
+            });
+        });
+
+        let root = TestRoot::create();
+        let created = create_new_keyed_production_database(
+            authorization,
+            root.database_path(),
+            generation_bound_database_key,
+        )
+        .expect("the retained generation-bound key should create the database");
+        let initialized = initialize_new_production_database(
+            created,
+            generate_parish_identifier()
+                .expect("parish identifier randomness should be available")
+                .into_parish_identifier(),
+            installation_identifier,
+            database_key_generation_identifier,
+            generate_setup_publication_identifier()
+                .expect("setup-publication identifier randomness should be available")
+                .into_setup_publication_identifier(),
+            DatabaseCreationTimestamp::from_unix_milliseconds(1_798_000_000_123),
+        )
+        .expect("real initialization should succeed");
+        let validated = validate_initialized_new_production_database(initialized)
+            .expect("immediate metadata read-back should match the retained generation");
+        let integrity = validate_initialized_new_production_database_integrity(validated)
+            .expect("fixed setup integrity validation should succeed");
+
+        assert!(matches!(
+            integrity.close(),
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join("parish-data.db").is_file());
+        drop(protected_database_key_wrapper);
+        root.assert_exact_cleanup();
     }
 }

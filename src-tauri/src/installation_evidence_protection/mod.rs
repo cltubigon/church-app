@@ -55,9 +55,13 @@ pub(crate) use database_key_current_user_dpapi::protect_database_key;
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub(crate) use database_key_current_user_dpapi::recover_database_key_candidate_from_loaded_wrapper;
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use first_time_setup_database_key_binding::protect_first_time_setup_database_key_binding;
 #[allow(unused_imports)]
 pub(crate) use first_time_setup_database_key_binding::{
-    FirstTimeSetupDatabaseKeyBinding, bind_generated_database_key_for_first_time_setup,
+    FirstTimeSetupDatabaseKeyBinding, FirstTimeSetupDatabaseKeyProtectionError,
+    ProtectedFirstTimeSetupDatabaseKeyBinding, bind_generated_database_key_for_first_time_setup,
 };
 #[cfg(windows)]
 pub(crate) use freshness_anchor_observation::observe_normalized_current_freshness_anchor;
