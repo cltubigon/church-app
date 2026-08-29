@@ -53,7 +53,13 @@ use crate::{
     storage_foundation::{PRODUCTION_DATABASE_FILENAME, ParishIdentifier, ProductionDatabasePath},
 };
 
-use super::{PRODUCTION_DATABASE_APPLICATION_ID, sqlite_main_database_handle};
+use super::{
+    PRODUCTION_DATABASE_APPLICATION_ID,
+    fixed_metadata_and_header_observation::{
+        FixedMetadataAndHeaderObservationError, observe_fixed_metadata_and_headers,
+    },
+    sqlite_main_database_handle,
+};
 
 const MAIN_DATABASE_NAME: &str = "main";
 const WIN32_VFS_NAME: &str = "win32";
@@ -140,6 +146,13 @@ pub(crate) struct NewlyCreatedKeyedProductionDatabaseConnection {
 /// Opaque initialized-but-unvalidated owner of the exact newly created leaf.
 pub(crate) struct InitializedNewProductionDatabaseConnection {
     owner: NewlyCreatedConnectionLifetimeOwner,
+    expected_metadata_contract: DatabaseMetadataContractV1,
+}
+
+/// Opaque owner proving only immediate read-back of the initialized database.
+pub(crate) struct ValidatedInitializedNewProductionDatabaseConnection {
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    observed_metadata_contract: DatabaseMetadataContractV1,
 }
 
 impl fmt::Debug for NewlyCreatedKeyedProductionDatabaseConnection {
@@ -152,6 +165,72 @@ impl fmt::Debug for InitializedNewProductionDatabaseConnection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("InitializedNewProductionDatabaseConnection([REDACTED])")
     }
+}
+
+impl fmt::Debug for ValidatedInitializedNewProductionDatabaseConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ValidatedInitializedNewProductionDatabaseConnection([REDACTED])")
+    }
+}
+
+pub(crate) enum NewProductionDatabaseImmediateValidationError {
+    ValidationTransactionFailed,
+    HeaderObservationFailed,
+    HeaderMismatch,
+    MetadataObservationFailed,
+    MetadataMalformed,
+    MetadataMismatch,
+    ValidationCloseFailed(Box<NewProductionDatabaseImmediateValidationCloseFailure>),
+}
+
+impl fmt::Debug for NewProductionDatabaseImmediateValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ValidationTransactionFailed => "ValidationTransactionFailed",
+            Self::HeaderObservationFailed => "HeaderObservationFailed",
+            Self::HeaderMismatch => "HeaderMismatch",
+            Self::MetadataObservationFailed => "MetadataObservationFailed",
+            Self::MetadataMalformed => "MetadataMalformed",
+            Self::MetadataMismatch => "MetadataMismatch",
+            Self::ValidationCloseFailed(_) => "ValidationCloseFailed([REDACTED])",
+        })
+    }
+}
+
+pub(crate) struct NewProductionDatabaseImmediateValidationCloseFailure {
+    category: NewProductionDatabaseImmediateValidationFailure,
+    owner: NewlyCreatedConnectionLifetimeOwner,
+}
+
+impl fmt::Debug for NewProductionDatabaseImmediateValidationCloseFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NewProductionDatabaseImmediateValidationCloseFailure([REDACTED])")
+    }
+}
+
+#[must_use = "an immediate validation close retry outcome must be handled"]
+pub(crate) enum NewProductionDatabaseImmediateValidationCloseRetryOutcome {
+    Closed(NewProductionDatabaseImmediateValidationError),
+    Failed(NewProductionDatabaseImmediateValidationCloseFailure),
+}
+
+impl fmt::Debug for NewProductionDatabaseImmediateValidationCloseRetryOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed(category) => formatter.debug_tuple("Closed").field(category).finish(),
+            Self::Failed(_) => formatter.write_str("Failed([REDACTED])"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NewProductionDatabaseImmediateValidationFailure {
+    ValidationTransactionFailed,
+    HeaderObservationFailed,
+    HeaderMismatch,
+    MetadataObservationFailed,
+    MetadataMalformed,
+    MetadataMismatch,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -350,7 +429,12 @@ impl NewlyCreatedKeyedProductionDatabaseConnection {
 
 impl InitializedNewProductionDatabaseConnection {
     pub(crate) fn close(self) -> NewProductionDatabaseConnectionCloseOutcome {
-        close_new_lifetime_owner(self.owner)
+        let Self {
+            owner,
+            expected_metadata_contract,
+        } = self;
+        let _ = expected_metadata_contract;
+        close_new_lifetime_owner(owner)
     }
 
     #[cfg(test)]
@@ -358,8 +442,48 @@ impl InitializedNewProductionDatabaseConnection {
         self,
         close: impl FnOnce(Connection) -> Result<(), Connection>,
     ) -> NewProductionDatabaseConnectionCloseOutcome {
-        close_new_lifetime_owner_using(self.owner, close)
+        let Self {
+            owner,
+            expected_metadata_contract,
+        } = self;
+        let _ = expected_metadata_contract;
+        close_new_lifetime_owner_using(owner, close)
     }
+}
+
+impl ValidatedInitializedNewProductionDatabaseConnection {
+    pub(crate) fn close(self) -> NewProductionDatabaseConnectionCloseOutcome {
+        let Self {
+            owner,
+            observed_metadata_contract,
+        } = self;
+        close_validated_initialized_owner_using(owner, observed_metadata_contract, |connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        })
+    }
+
+    #[cfg(test)]
+    fn close_using(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+    ) -> NewProductionDatabaseConnectionCloseOutcome {
+        let Self {
+            owner,
+            observed_metadata_contract,
+        } = self;
+        close_validated_initialized_owner_using(owner, observed_metadata_contract, close)
+    }
+}
+
+fn close_validated_initialized_owner_using<T>(
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    observed_metadata_contract: T,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> NewProductionDatabaseConnectionCloseOutcome {
+    drop(observed_metadata_contract);
+    close_new_lifetime_owner_using(owner, close)
 }
 
 impl NewProductionDatabaseConnectionCloseFailure {
@@ -415,6 +539,25 @@ impl NewProductionDatabaseInitializationCloseFailure {
     }
 }
 
+impl NewProductionDatabaseImmediateValidationCloseFailure {
+    /// Consumes the complete retained lifetime unit and retries only close.
+    pub(crate) fn retry_close(self) -> NewProductionDatabaseImmediateValidationCloseRetryOutcome {
+        retry_immediate_validation_close_using(self, |connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        })
+    }
+
+    #[cfg(test)]
+    fn retry_close_using(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+    ) -> NewProductionDatabaseImmediateValidationCloseRetryOutcome {
+        retry_immediate_validation_close_using(self, close)
+    }
+}
+
 /// Consumes the keyed-new owner and establishes only the approved version-1
 /// policy, headers, minimal metadata relation, and one canonical metadata row.
 #[allow(clippy::too_many_arguments)]
@@ -433,6 +576,25 @@ pub(crate) fn initialize_new_production_database(
         database_key_generation_identifier,
         setup_publication_identifier,
         database_created_at,
+        |_| Ok(()),
+        |connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        },
+    )
+}
+
+/// Consumes the initialized-new owner and validates only its committed headers
+/// and canonical metadata against the exact initialization expectation.
+pub(crate) fn validate_initialized_new_production_database(
+    connection: InitializedNewProductionDatabaseConnection,
+) -> Result<
+    ValidatedInitializedNewProductionDatabaseConnection,
+    NewProductionDatabaseImmediateValidationError,
+> {
+    validate_initialized_new_production_database_using(
+        connection,
         |_| Ok(()),
         |connection| {
             connection
@@ -463,6 +625,12 @@ enum InitializationCheckpoint {
     MetadataSchema,
     MetadataInsert,
     Commit,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ImmediateValidationCheckpoint {
+    TransactionStart,
+    TransactionCompletion,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -515,8 +683,102 @@ fn initialize_new_production_database_using(
         &mut checkpoint,
     );
     match initialization_result {
-        Ok(()) => Ok(InitializedNewProductionDatabaseConnection { owner }),
+        Ok(()) => Ok(InitializedNewProductionDatabaseConnection {
+            owner,
+            expected_metadata_contract: metadata_contract,
+        }),
         Err(category) => finish_initialization_failure(owner, category, close_on_failure),
+    }
+}
+
+fn validate_initialized_new_production_database_using(
+    connection: InitializedNewProductionDatabaseConnection,
+    mut checkpoint: impl FnMut(ImmediateValidationCheckpoint) -> Result<(), ()>,
+    close_on_failure: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> Result<
+    ValidatedInitializedNewProductionDatabaseConnection,
+    NewProductionDatabaseImmediateValidationError,
+> {
+    let InitializedNewProductionDatabaseConnection {
+        mut owner,
+        expected_metadata_contract,
+    } = connection;
+
+    let validation_result = validate_initialized_in_one_read_transaction(
+        &mut owner.connection,
+        &expected_metadata_contract,
+        &mut checkpoint,
+    );
+    match validation_result {
+        Ok(observed_metadata_contract) => {
+            let _ = expected_metadata_contract;
+            Ok(ValidatedInitializedNewProductionDatabaseConnection {
+                owner,
+                observed_metadata_contract,
+            })
+        }
+        Err(category) => finish_immediate_validation_failure_after_discard_using(
+            owner,
+            expected_metadata_contract,
+            category,
+            close_on_failure,
+        ),
+    }
+}
+
+fn validate_initialized_in_one_read_transaction(
+    connection: &mut Connection,
+    expected_metadata_contract: &DatabaseMetadataContractV1,
+    checkpoint: &mut impl FnMut(ImmediateValidationCheckpoint) -> Result<(), ()>,
+) -> Result<DatabaseMetadataContractV1, NewProductionDatabaseImmediateValidationFailure> {
+    checkpoint(ImmediateValidationCheckpoint::TransactionStart).map_err(|_| {
+        NewProductionDatabaseImmediateValidationFailure::ValidationTransactionFailed
+    })?;
+    let transaction = connection.transaction().map_err(|_| {
+        NewProductionDatabaseImmediateValidationFailure::ValidationTransactionFailed
+    })?;
+
+    let expected_user_version =
+        i32::from(expected_metadata_contract.database_schema_version().get());
+    let observed_metadata_contract =
+        observe_fixed_metadata_and_headers(&transaction, Some(expected_user_version))
+            .map_err(map_immediate_observation_failure)?;
+    if observed_metadata_contract != *expected_metadata_contract {
+        return Err(NewProductionDatabaseImmediateValidationFailure::MetadataMismatch);
+    }
+
+    checkpoint(ImmediateValidationCheckpoint::TransactionCompletion).map_err(|_| {
+        NewProductionDatabaseImmediateValidationFailure::ValidationTransactionFailed
+    })?;
+    transaction.commit().map_err(|_| {
+        NewProductionDatabaseImmediateValidationFailure::ValidationTransactionFailed
+    })?;
+    Ok(observed_metadata_contract)
+}
+
+fn map_immediate_observation_failure(
+    error: FixedMetadataAndHeaderObservationError,
+) -> NewProductionDatabaseImmediateValidationFailure {
+    match error {
+        FixedMetadataAndHeaderObservationError::HeaderObservationUnavailable => {
+            NewProductionDatabaseImmediateValidationFailure::HeaderObservationFailed
+        }
+        FixedMetadataAndHeaderObservationError::WrongApplicationId
+        | FixedMetadataAndHeaderObservationError::UnexpectedUserVersion
+        | FixedMetadataAndHeaderObservationError::UserVersionMismatch => {
+            NewProductionDatabaseImmediateValidationFailure::HeaderMismatch
+        }
+        FixedMetadataAndHeaderObservationError::MetadataObservationUnavailable
+        | FixedMetadataAndHeaderObservationError::MetadataObservationInterruptedOrIncomplete
+        | FixedMetadataAndHeaderObservationError::MetadataRowMissing
+        | FixedMetadataAndHeaderObservationError::DuplicateMetadataRows => {
+            NewProductionDatabaseImmediateValidationFailure::MetadataObservationFailed
+        }
+        FixedMetadataAndHeaderObservationError::MalformedMetadata
+        | FixedMetadataAndHeaderObservationError::UnsupportedMetadataContractVersion
+        | FixedMetadataAndHeaderObservationError::UnsupportedDatabaseSchemaVersion => {
+            NewProductionDatabaseImmediateValidationFailure::MetadataMalformed
+        }
     }
 }
 
@@ -671,6 +933,89 @@ fn primary_initialization_error(
         }
         NewProductionDatabaseInitializationFailure::InitializationCommitFailed => {
             NewProductionDatabaseInitializationError::InitializationCommitFailed
+        }
+    }
+}
+
+fn primary_immediate_validation_error(
+    category: NewProductionDatabaseImmediateValidationFailure,
+) -> NewProductionDatabaseImmediateValidationError {
+    match category {
+        NewProductionDatabaseImmediateValidationFailure::ValidationTransactionFailed => {
+            NewProductionDatabaseImmediateValidationError::ValidationTransactionFailed
+        }
+        NewProductionDatabaseImmediateValidationFailure::HeaderObservationFailed => {
+            NewProductionDatabaseImmediateValidationError::HeaderObservationFailed
+        }
+        NewProductionDatabaseImmediateValidationFailure::HeaderMismatch => {
+            NewProductionDatabaseImmediateValidationError::HeaderMismatch
+        }
+        NewProductionDatabaseImmediateValidationFailure::MetadataObservationFailed => {
+            NewProductionDatabaseImmediateValidationError::MetadataObservationFailed
+        }
+        NewProductionDatabaseImmediateValidationFailure::MetadataMalformed => {
+            NewProductionDatabaseImmediateValidationError::MetadataMalformed
+        }
+        NewProductionDatabaseImmediateValidationFailure::MetadataMismatch => {
+            NewProductionDatabaseImmediateValidationError::MetadataMismatch
+        }
+    }
+}
+
+fn finish_immediate_validation_failure(
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    category: NewProductionDatabaseImmediateValidationFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> Result<
+    ValidatedInitializedNewProductionDatabaseConnection,
+    NewProductionDatabaseImmediateValidationError,
+> {
+    match close_new_lifetime_owner_using(owner, close) {
+        NewProductionDatabaseConnectionCloseOutcome::Closed => {
+            Err(primary_immediate_validation_error(category))
+        }
+        NewProductionDatabaseConnectionCloseOutcome::Failed(failure) => Err(
+            NewProductionDatabaseImmediateValidationError::ValidationCloseFailed(Box::new(
+                NewProductionDatabaseImmediateValidationCloseFailure {
+                    category,
+                    owner: failure.owner,
+                },
+            )),
+        ),
+    }
+}
+
+fn finish_immediate_validation_failure_after_discard_using<T>(
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    expected_metadata_contract: T,
+    category: NewProductionDatabaseImmediateValidationFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> Result<
+    ValidatedInitializedNewProductionDatabaseConnection,
+    NewProductionDatabaseImmediateValidationError,
+> {
+    drop(expected_metadata_contract);
+    finish_immediate_validation_failure(owner, category, close)
+}
+
+fn retry_immediate_validation_close_using(
+    failure: NewProductionDatabaseImmediateValidationCloseFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> NewProductionDatabaseImmediateValidationCloseRetryOutcome {
+    let NewProductionDatabaseImmediateValidationCloseFailure { category, owner } = failure;
+    match close_new_lifetime_owner_using(owner, close) {
+        NewProductionDatabaseConnectionCloseOutcome::Closed => {
+            NewProductionDatabaseImmediateValidationCloseRetryOutcome::Closed(
+                primary_immediate_validation_error(category),
+            )
+        }
+        NewProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+            NewProductionDatabaseImmediateValidationCloseRetryOutcome::Failed(
+                NewProductionDatabaseImmediateValidationCloseFailure {
+                    category,
+                    owner: failure.owner,
+                },
+            )
         }
     }
 }
@@ -1532,6 +1877,11 @@ mod tests {
         )
     }
 
+    fn initialized_fixture(root: &TestRoot) -> InitializedNewProductionDatabaseConnection {
+        initialize_fixture(real_initialization_fixture(root), 1_798_000_000_123)
+            .expect("real initialization should succeed")
+    }
+
     fn bytes_from_installation_identifier(identifier: InstallationIdentifier) -> [u8; 16] {
         let mut bytes = [0_u8; 16];
         identifier.write_bytes_into(&mut bytes);
@@ -2151,8 +2501,9 @@ mod tests {
             .split_once("\n}")
             .unwrap()
             .0;
-        assert_eq!(owner.lines().filter(|line| line.contains(':')).count(), 1);
+        assert_eq!(owner.lines().filter(|line| line.contains(':')).count(), 2);
         assert!(owner.contains("owner: NewlyCreatedConnectionLifetimeOwner"));
+        assert!(owner.contains("expected_metadata_contract: DatabaseMetadataContractV1"));
         assert!(!owner.contains("pub"));
         for forbidden in [
             "impl Clone for InitializedNewProductionDatabaseConnection",
@@ -2558,6 +2909,428 @@ mod tests {
             )
         ));
         assert!(database.is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn immediate_validation_api_owners_authority_and_shared_observer_are_locked() {
+        const SOURCE: &str = include_str!("create_new_database.rs");
+        const OBSERVER: &str = include_str!("fixed_metadata_and_header_observation.rs");
+        const PARENT: &str = include_str!("../production_database_connection_handoff.rs");
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let signature = "pub(crate) fn validate_initialized_new_production_database(\n    connection: InitializedNewProductionDatabaseConnection,\n) -> Result<\n    ValidatedInitializedNewProductionDatabaseConnection,\n    NewProductionDatabaseImmediateValidationError,\n>";
+        assert!(production.contains(signature));
+        assert!(needs_drop::<
+            ValidatedInitializedNewProductionDatabaseConnection,
+        >());
+
+        let initialized = production
+            .split_once("pub(crate) struct InitializedNewProductionDatabaseConnection {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(
+            initialized
+                .lines()
+                .filter(|line| line.contains(':'))
+                .count(),
+            2
+        );
+        assert!(initialized.contains("owner: NewlyCreatedConnectionLifetimeOwner"));
+        assert!(initialized.contains("expected_metadata_contract: DatabaseMetadataContractV1"));
+
+        let validated = production
+            .split_once("pub(crate) struct ValidatedInitializedNewProductionDatabaseConnection {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(
+            validated.lines().filter(|line| line.contains(':')).count(),
+            2
+        );
+        assert!(validated.contains("owner: NewlyCreatedConnectionLifetimeOwner"));
+        assert!(validated.contains("observed_metadata_contract: DatabaseMetadataContractV1"));
+        assert!(PARENT.contains("mod fixed_metadata_and_header_observation;"));
+        assert!(!PARENT.contains("pub mod fixed_metadata_and_header_observation;"));
+        assert_eq!(OBSERVER.matches("LIMIT 2").count(), 1);
+        assert_eq!(OBSERVER.matches("RawDatabaseMetadataRow::new(").count(), 1);
+        assert_eq!(OBSERVER.matches(".parse()").count(), 1);
+        assert_eq!(OBSERVER.matches(".validate_structure()").count(), 1);
+
+        for forbidden in [
+            "impl Clone for ValidatedInitializedNewProductionDatabaseConnection",
+            "impl Copy for ValidatedInitializedNewProductionDatabaseConnection",
+            "Serialize",
+            "Deserialize",
+            "impl Deref",
+            "AsRef<Connection>",
+            "with_connection",
+            "unchecked_transaction",
+            "cipher_integrity_check",
+            "quick_check",
+            "ProductionDatabaseValidationOutcome",
+            "validate_production_database_readability_and_integrity",
+            "construct_database_metadata_correspondence",
+            "classify_database_freshness",
+            "publish_setup",
+            "complete_setup",
+            "authorize_production_database_startup",
+            "activate_production_database_for_operational_use",
+            "remove_file",
+            "rename(",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "forbidden setup validation capability: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn immediate_validation_real_windows_sqlcipher_flow_preserves_exact_owner_and_leaves_file() {
+        let root = TestRoot::create();
+        let initialized = initialized_fixture(&root);
+        let expected = initialized.expected_metadata_contract;
+        let sqlite_handle = unsafe { initialized.owner.connection.handle() };
+        let parent_handle = initialized.owner.retained.parent.handle.as_raw_handle();
+        let leaf_handle = initialized.owner.retained.leaf.handle.as_raw_handle();
+
+        let validated = validate_initialized_new_production_database(initialized)
+            .expect("immediate validation should succeed");
+        assert_eq!(validated.observed_metadata_contract, expected);
+        assert_eq!(
+            unsafe { validated.owner.connection.handle() },
+            sqlite_handle
+        );
+        assert_eq!(
+            validated.owner.retained.parent.handle.as_raw_handle(),
+            parent_handle
+        );
+        assert_eq!(
+            validated.owner.retained.leaf.handle.as_raw_handle(),
+            leaf_handle
+        );
+        assert_eq!(
+            format!("{validated:?}"),
+            "ValidatedInitializedNewProductionDatabaseConnection([REDACTED])"
+        );
+        assert!(matches!(
+            validated.close(),
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn immediate_validation_header_failures_are_coarse_and_leave_database() {
+        for (sql, expected) in [
+            (
+                "PRAGMA main.application_id = 1",
+                NewProductionDatabaseImmediateValidationError::HeaderMismatch,
+            ),
+            (
+                "PRAGMA main.user_version = 2",
+                NewProductionDatabaseImmediateValidationError::HeaderMismatch,
+            ),
+        ] {
+            let root = TestRoot::create();
+            let initialized = initialized_fixture(&root);
+            initialized.owner.connection.execute_batch(sql).unwrap();
+            let error = validate_initialized_new_production_database(initialized).unwrap_err();
+            assert_eq!(format!("{error:?}"), format!("{expected:?}"));
+            assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+            root.assert_exact_cleanup();
+        }
+
+        for (internal, expected) in [
+            (
+                FixedMetadataAndHeaderObservationError::HeaderObservationUnavailable,
+                NewProductionDatabaseImmediateValidationFailure::HeaderObservationFailed,
+            ),
+            (
+                FixedMetadataAndHeaderObservationError::UserVersionMismatch,
+                NewProductionDatabaseImmediateValidationFailure::HeaderMismatch,
+            ),
+        ] {
+            assert!(map_immediate_observation_failure(internal) == expected);
+        }
+    }
+
+    #[test]
+    fn immediate_validation_metadata_observation_and_malformed_families_are_coarse() {
+        for (sql, expected) in [
+            (
+                "DROP TABLE church_app_database_metadata",
+                "MetadataObservationFailed",
+            ),
+            (
+                "DELETE FROM church_app_database_metadata",
+                "MetadataObservationFailed",
+            ),
+            (
+                "INSERT INTO church_app_database_metadata SELECT * FROM church_app_database_metadata",
+                "MetadataObservationFailed",
+            ),
+            (
+                "UPDATE church_app_database_metadata SET singleton_id = 1.5",
+                "MetadataMalformed",
+            ),
+            (
+                "UPDATE church_app_database_metadata SET permanent_application_identifier = CAST(X'80' AS TEXT)",
+                "MetadataMalformed",
+            ),
+            (
+                "UPDATE church_app_database_metadata SET installation_identifier = X'01'",
+                "MetadataMalformed",
+            ),
+            (
+                "UPDATE church_app_database_metadata SET database_created_at = -1",
+                "MetadataMalformed",
+            ),
+            (
+                "UPDATE church_app_database_metadata SET metadata_contract_version = 2",
+                "MetadataMalformed",
+            ),
+            (
+                "UPDATE church_app_database_metadata SET database_schema_version = 2",
+                "MetadataMalformed",
+            ),
+            (
+                "UPDATE church_app_database_metadata SET installation_identifier = zeroblob(16)",
+                "MetadataMalformed",
+            ),
+        ] {
+            let root = TestRoot::create();
+            let initialized = initialized_fixture(&root);
+            initialized.owner.connection.execute_batch(sql).unwrap();
+            let error = validate_initialized_new_production_database(initialized).unwrap_err();
+            assert_eq!(format!("{error:?}"), expected);
+            assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn immediate_validation_valid_but_different_metadata_is_exact_mismatch() {
+        for sql in [
+            "UPDATE church_app_database_metadata SET parish_identifier = X'11111111111111111111111111111111'",
+            "UPDATE church_app_database_metadata SET installation_identifier = X'11111111111111111111111111111111'",
+            "UPDATE church_app_database_metadata SET installation_generation = X'0000000000000002'",
+            "UPDATE church_app_database_metadata SET recovery_replacement_generation = X'0000000000000002'",
+            "UPDATE church_app_database_metadata SET database_key_generation_identifier = X'22222222222222222222222222222222'",
+            "UPDATE church_app_database_metadata SET setup_publication_identifier = X'33333333333333333333333333333333'",
+            "UPDATE church_app_database_metadata SET database_created_at = database_created_at + 1",
+        ] {
+            let root = TestRoot::create();
+            let initialized = initialized_fixture(&root);
+            initialized.owner.connection.execute_batch(sql).unwrap();
+            assert!(matches!(
+                validate_initialized_new_production_database(initialized),
+                Err(NewProductionDatabaseImmediateValidationError::MetadataMismatch)
+            ));
+            assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn immediate_validation_transaction_checkpoints_fail_without_success_authority() {
+        for failed_checkpoint in [
+            ImmediateValidationCheckpoint::TransactionStart,
+            ImmediateValidationCheckpoint::TransactionCompletion,
+        ] {
+            let root = TestRoot::create();
+            let initialized = initialized_fixture(&root);
+            let checkpoints = Cell::new(0_u8);
+            let result = validate_initialized_new_production_database_using(
+                initialized,
+                |checkpoint| {
+                    checkpoints.set(checkpoints.get() + 1);
+                    if checkpoint == failed_checkpoint {
+                        Err(())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |connection| connection.close().map_err(|(connection, _)| connection),
+            );
+            assert!(matches!(
+                result,
+                Err(NewProductionDatabaseImmediateValidationError::ValidationTransactionFailed)
+            ));
+            assert_eq!(
+                checkpoints.get(),
+                if failed_checkpoint == ImmediateValidationCheckpoint::TransactionStart {
+                    1
+                } else {
+                    2
+                }
+            );
+            assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn immediate_validation_failure_close_retry_preserves_every_category_and_retries_only_close() {
+        for category in [
+            NewProductionDatabaseImmediateValidationFailure::ValidationTransactionFailed,
+            NewProductionDatabaseImmediateValidationFailure::HeaderObservationFailed,
+            NewProductionDatabaseImmediateValidationFailure::HeaderMismatch,
+            NewProductionDatabaseImmediateValidationFailure::MetadataObservationFailed,
+            NewProductionDatabaseImmediateValidationFailure::MetadataMalformed,
+            NewProductionDatabaseImmediateValidationFailure::MetadataMismatch,
+        ] {
+            let root = TestRoot::create();
+            let result =
+                finish_immediate_validation_failure(unkeyed_open_owner(&root), category, Err);
+            let Err(NewProductionDatabaseImmediateValidationError::ValidationCloseFailed(failure)) =
+                result
+            else {
+                panic!("injected close failure must retain validation ownership");
+            };
+            assert_eq!(
+                format!("{failure:?}"),
+                "NewProductionDatabaseImmediateValidationCloseFailure([REDACTED])"
+            );
+            let NewProductionDatabaseImmediateValidationCloseRetryOutcome::Failed(failure) =
+                failure.retry_close_using(Err)
+            else {
+                panic!("repeated close failure must remain retryable");
+            };
+            let NewProductionDatabaseImmediateValidationCloseRetryOutcome::Closed(error) =
+                failure.retry_close()
+            else {
+                panic!("eventual close must return the original category");
+            };
+            assert_eq!(
+                format!("{error:?}"),
+                format!("{:?}", primary_immediate_validation_error(category))
+            );
+            assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn immediate_validation_every_primary_category_closes_successfully_and_returns_it() {
+        for category in [
+            NewProductionDatabaseImmediateValidationFailure::ValidationTransactionFailed,
+            NewProductionDatabaseImmediateValidationFailure::HeaderObservationFailed,
+            NewProductionDatabaseImmediateValidationFailure::HeaderMismatch,
+            NewProductionDatabaseImmediateValidationFailure::MetadataObservationFailed,
+            NewProductionDatabaseImmediateValidationFailure::MetadataMalformed,
+            NewProductionDatabaseImmediateValidationFailure::MetadataMismatch,
+        ] {
+            let root = TestRoot::create();
+            let result = finish_immediate_validation_failure(
+                unkeyed_open_owner(&root),
+                category,
+                |connection| {
+                    drop(connection);
+                    Ok(())
+                },
+            );
+            let error = result.expect_err("successful close must return the primary category");
+            assert_eq!(
+                format!("{error:?}"),
+                format!("{:?}", primary_immediate_validation_error(category))
+            );
+            assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn immediate_validation_failure_discards_expected_contract_before_close_attempt() {
+        struct DropProbe<'a>(&'a Cell<bool>);
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let root = TestRoot::create();
+        let expected_dropped = Cell::new(false);
+        let close_called = Cell::new(false);
+        let result = finish_immediate_validation_failure_after_discard_using(
+            unkeyed_open_owner(&root),
+            DropProbe(&expected_dropped),
+            NewProductionDatabaseImmediateValidationFailure::MetadataMismatch,
+            |connection| {
+                assert!(expected_dropped.get());
+                close_called.set(true);
+                drop(connection);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(NewProductionDatabaseImmediateValidationError::MetadataMismatch)
+        ));
+        assert!(expected_dropped.get());
+        assert!(close_called.get());
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn immediate_validation_success_owner_close_failure_retains_only_lifetime_for_retry() {
+        let root = TestRoot::create();
+        let validated = validate_initialized_new_production_database(initialized_fixture(&root))
+            .expect("canonical validation should succeed");
+        let NewProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            validated.close_using(Err)
+        else {
+            panic!("injected validated-owner close must retain lifetime ownership");
+        };
+        let NewProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            failure.retry_close_using(Err)
+        else {
+            panic!("repeated close failure must remain retryable");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn immediate_validation_success_owner_discards_metadata_before_close_attempt() {
+        struct DropProbe<'a>(&'a Cell<bool>);
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let root = TestRoot::create();
+        let metadata_dropped = Cell::new(false);
+        let close_called = Cell::new(false);
+        let outcome = close_validated_initialized_owner_using(
+            unkeyed_open_owner(&root),
+            DropProbe(&metadata_dropped),
+            |connection| {
+                assert!(metadata_dropped.get());
+                close_called.set(true);
+                drop(connection);
+                Ok(())
+            },
+        );
+        assert!(metadata_dropped.get());
+        assert!(close_called.get());
+        assert!(matches!(
+            outcome,
+            NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
         root.assert_exact_cleanup();
     }
 }

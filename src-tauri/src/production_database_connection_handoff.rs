@@ -37,6 +37,7 @@ use crate::{
 };
 
 mod create_new_database;
+mod fixed_metadata_and_header_observation;
 mod live_metadata_and_header_validation;
 
 #[allow(unused_imports)]
@@ -45,10 +46,13 @@ pub(crate) use create_new_database::{
     NewProductionDatabaseConnectionCloseOutcome,
     NewProductionDatabaseConnectionConstructionCloseFailure,
     NewProductionDatabaseConnectionConstructionCloseRetryOutcome,
-    NewProductionDatabaseCreationError, NewProductionDatabaseInitializationCloseFailure,
+    NewProductionDatabaseCreationError, NewProductionDatabaseImmediateValidationCloseFailure,
+    NewProductionDatabaseImmediateValidationCloseRetryOutcome,
+    NewProductionDatabaseImmediateValidationError, NewProductionDatabaseInitializationCloseFailure,
     NewProductionDatabaseInitializationCloseRetryOutcome, NewProductionDatabaseInitializationError,
-    NewlyCreatedKeyedProductionDatabaseConnection, create_new_keyed_production_database,
-    initialize_new_production_database,
+    NewlyCreatedKeyedProductionDatabaseConnection,
+    ValidatedInitializedNewProductionDatabaseConnection, create_new_keyed_production_database,
+    initialize_new_production_database, validate_initialized_new_production_database,
 };
 
 #[allow(unused_imports)]

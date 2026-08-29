@@ -3,19 +3,16 @@
 
 use std::fmt;
 
-use rusqlite::{Connection, Statement, types::ValueRef};
+use rusqlite::Connection;
 
-use crate::{
-    database_metadata_contract::DatabaseMetadataContractV1,
-    database_metadata_decoding::{
-        MetadataValidationError, RawDatabaseMetadataRow, RawDatabaseMetadataValue,
-    },
-};
+use crate::database_metadata_contract::DatabaseMetadataContractV1;
 
 use super::{
-    ConnectionLifetimeOwner, PRODUCTION_DATABASE_APPLICATION_ID,
-    ProductionDatabaseConnectionCloseOutcome,
+    ConnectionLifetimeOwner, ProductionDatabaseConnectionCloseOutcome,
     ReadabilityAndIntegrityValidatedProductionDatabaseConnection, close_lifetime_owner_using,
+    fixed_metadata_and_header_observation::{
+        FixedMetadataAndHeaderObservationError, observe_fixed_metadata_and_headers,
+    },
 };
 
 mod database_evidence_correspondence_validation;
@@ -38,26 +35,8 @@ pub(crate) use database_evidence_correspondence_validation::{
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
 };
 
-const APPLICATION_ID_QUERY: &str = "PRAGMA main.application_id";
 #[cfg(test)]
-const EXPECTED_APPLICATION_ID: i32 = PRODUCTION_DATABASE_APPLICATION_ID;
-const USER_VERSION_QUERY: &str = "PRAGMA main.user_version";
-const METADATA_QUERY: &str = "SELECT
-    singleton_id,
-    metadata_contract_version,
-    database_schema_version,
-    permanent_application_identifier,
-    database_format_identity,
-    parish_identifier,
-    installation_identifier,
-    installation_generation,
-    recovery_replacement_generation,
-    database_key_generation_identifier,
-    setup_publication_identifier,
-    database_created_at
-FROM main.church_app_database_metadata
-LIMIT 2";
-const METADATA_COLUMN_COUNT: usize = 12;
+const EXPECTED_APPLICATION_ID: i32 = super::PRODUCTION_DATABASE_APPLICATION_ID;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum LiveMetadataAndHeaderValidationError {
@@ -267,221 +246,99 @@ fn retry_validation_close_using(
 fn validate_fixed_live_metadata_and_headers(
     connection: &Connection,
 ) -> Result<DatabaseMetadataContractV1, LiveMetadataAndHeaderValidationError> {
-    let application_id = observe_application_id(connection)?;
-    if application_id != PRODUCTION_DATABASE_APPLICATION_ID {
-        return Err(LiveMetadataAndHeaderValidationError::WrongApplicationId);
+    observe_fixed_metadata_and_headers(connection, None).map_err(map_live_observation_error)
+}
+
+fn map_live_observation_error(
+    error: FixedMetadataAndHeaderObservationError,
+) -> LiveMetadataAndHeaderValidationError {
+    match error {
+        FixedMetadataAndHeaderObservationError::HeaderObservationUnavailable => {
+            LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable
+        }
+        FixedMetadataAndHeaderObservationError::WrongApplicationId => {
+            LiveMetadataAndHeaderValidationError::WrongApplicationId
+        }
+        FixedMetadataAndHeaderObservationError::UnexpectedUserVersion => unreachable!(),
+        FixedMetadataAndHeaderObservationError::MetadataObservationUnavailable => {
+            LiveMetadataAndHeaderValidationError::MetadataObservationUnavailable
+        }
+        FixedMetadataAndHeaderObservationError::MetadataObservationInterruptedOrIncomplete => {
+            LiveMetadataAndHeaderValidationError::MetadataObservationInterruptedOrIncomplete
+        }
+        FixedMetadataAndHeaderObservationError::MetadataRowMissing => {
+            LiveMetadataAndHeaderValidationError::MetadataRowMissing
+        }
+        FixedMetadataAndHeaderObservationError::DuplicateMetadataRows => {
+            LiveMetadataAndHeaderValidationError::DuplicateMetadataRows
+        }
+        FixedMetadataAndHeaderObservationError::MalformedMetadata => {
+            LiveMetadataAndHeaderValidationError::MalformedMetadata
+        }
+        FixedMetadataAndHeaderObservationError::UnsupportedMetadataContractVersion => {
+            LiveMetadataAndHeaderValidationError::UnsupportedMetadataContractVersion
+        }
+        FixedMetadataAndHeaderObservationError::UnsupportedDatabaseSchemaVersion => {
+            LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion
+        }
+        FixedMetadataAndHeaderObservationError::UserVersionMismatch => {
+            LiveMetadataAndHeaderValidationError::UserVersionMismatch
+        }
     }
-
-    let user_version = observe_user_version(connection)?;
-    let metadata_contract = observe_and_validate_metadata(connection)?;
-    if i64::from(user_version) != i64::from(metadata_contract.database_schema_version().get()) {
-        return Err(LiveMetadataAndHeaderValidationError::UserVersionMismatch);
-    }
-    Ok(metadata_contract)
 }
 
-fn observe_application_id(
-    connection: &Connection,
+#[cfg(test)]
+use super::fixed_metadata_and_header_observation::{
+    METADATA_COLUMN_COUNT, ObservedHeaderValue, OwnedRawDatabaseMetadataValue,
+    classify_header_operation as classify_fixed_header_operation,
+    classify_metadata_observation as classify_fixed_metadata_observation,
+    classify_metadata_step as classify_fixed_metadata_step,
+    complete_header_observation as complete_fixed_header_observation,
+    observe_single_integer_header as observe_fixed_single_integer_header,
+    validate_owned_metadata_observation as validate_fixed_owned_metadata_observation,
+};
+
+#[cfg(test)]
+fn observe_single_integer_header(
+    statement: &mut rusqlite::Statement<'_>,
 ) -> Result<i32, LiveMetadataAndHeaderValidationError> {
-    let mut statement = classify_header_operation(connection.prepare(APPLICATION_ID_QUERY))?;
-    observe_single_integer_header(&mut statement)
+    observe_fixed_single_integer_header(statement).map_err(map_live_observation_error)
 }
 
-fn observe_user_version(
-    connection: &Connection,
-) -> Result<i32, LiveMetadataAndHeaderValidationError> {
-    let mut statement = classify_header_operation(connection.prepare(USER_VERSION_QUERY))?;
-    observe_single_integer_header(&mut statement)
-}
-
+#[cfg(test)]
 fn classify_header_operation<T, E>(
     result: Result<T, E>,
 ) -> Result<T, LiveMetadataAndHeaderValidationError> {
-    result.map_err(|_| LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable)
+    classify_fixed_header_operation(result).map_err(map_live_observation_error)
 }
 
-enum ObservedHeaderValue {
-    Integer(i64),
-    Other,
-}
-
+#[cfg(test)]
 fn complete_header_observation(
     first: Result<Option<ObservedHeaderValue>, ()>,
     terminal_step: impl FnOnce() -> Result<bool, ()>,
 ) -> Result<i32, LiveMetadataAndHeaderValidationError> {
-    let value = match classify_header_operation(first)?
-        .ok_or(LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable)?
-    {
-        ObservedHeaderValue::Integer(value) => i32::try_from(value)
-            .map_err(|_| LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable)?,
-        ObservedHeaderValue::Other => {
-            return Err(LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable);
-        }
-    };
-    if classify_header_operation(terminal_step())? {
-        return Err(LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable);
-    }
-    Ok(value)
+    complete_fixed_header_observation(first, terminal_step).map_err(map_live_observation_error)
 }
 
-fn observe_single_integer_header(
-    statement: &mut Statement<'_>,
-) -> Result<i32, LiveMetadataAndHeaderValidationError> {
-    if statement.column_count() != 1 {
-        return Err(LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable);
-    }
-    let mut rows = classify_header_operation(statement.query([]))?;
-    let first = match classify_header_operation(rows.next())? {
-        Some(row) => Some(match classify_header_operation(row.get_ref(0))? {
-            ValueRef::Integer(value) => ObservedHeaderValue::Integer(value),
-            _ => ObservedHeaderValue::Other,
-        }),
-        None => None,
-    };
-    complete_header_observation(Ok(first), || {
-        rows.next().map(|row| row.is_some()).map_err(|_| ())
-    })
-}
-
-enum OwnedRawDatabaseMetadataValue {
-    Null,
-    Integer(i64),
-    Real,
-    Text(Vec<u8>),
-    Blob(Vec<u8>),
-}
-
-impl fmt::Debug for OwnedRawDatabaseMetadataValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("OwnedRawDatabaseMetadataValue([REDACTED])")
-    }
-}
-
-fn observe_and_validate_metadata(
-    connection: &Connection,
-) -> Result<DatabaseMetadataContractV1, LiveMetadataAndHeaderValidationError> {
-    let mut statement = classify_metadata_observation(connection.prepare(METADATA_QUERY))?;
-    if statement.column_count() != METADATA_COLUMN_COUNT {
-        return Err(LiveMetadataAndHeaderValidationError::MetadataObservationUnavailable);
-    }
-    let mut rows = classify_metadata_observation(statement.query([]))?;
-    let first_row = classify_metadata_step(rows.next())?
-        .ok_or(LiveMetadataAndHeaderValidationError::MetadataRowMissing)?;
-
-    let mut observation = Vec::with_capacity(METADATA_COLUMN_COUNT);
-    for index in 0..METADATA_COLUMN_COUNT {
-        let value = classify_metadata_observation(first_row.get_ref(index))?;
-        observation.push(match value {
-            ValueRef::Null => OwnedRawDatabaseMetadataValue::Null,
-            ValueRef::Integer(value) => OwnedRawDatabaseMetadataValue::Integer(value),
-            ValueRef::Real(_) => OwnedRawDatabaseMetadataValue::Real,
-            ValueRef::Text(value) => OwnedRawDatabaseMetadataValue::Text(value.to_vec()),
-            ValueRef::Blob(value) => OwnedRawDatabaseMetadataValue::Blob(value.to_vec()),
-        });
-    }
-
-    if classify_metadata_step(rows.next())?.is_some() {
-        return Err(LiveMetadataAndHeaderValidationError::DuplicateMetadataRows);
-    }
-    drop(rows);
-    drop(statement);
-
-    validate_owned_metadata_observation(&observation)
-}
-
+#[cfg(test)]
 fn classify_metadata_observation<T, E>(
     result: Result<T, E>,
 ) -> Result<T, LiveMetadataAndHeaderValidationError> {
-    result.map_err(|_| LiveMetadataAndHeaderValidationError::MetadataObservationUnavailable)
+    classify_fixed_metadata_observation(result).map_err(map_live_observation_error)
 }
 
+#[cfg(test)]
 fn classify_metadata_step<T, E>(
     result: Result<T, E>,
 ) -> Result<T, LiveMetadataAndHeaderValidationError> {
-    result.map_err(|_| {
-        LiveMetadataAndHeaderValidationError::MetadataObservationInterruptedOrIncomplete
-    })
+    classify_fixed_metadata_step(result).map_err(map_live_observation_error)
 }
 
-fn adapt_owned_value(
-    value: &OwnedRawDatabaseMetadataValue,
-) -> Result<RawDatabaseMetadataValue<'_>, LiveMetadataAndHeaderValidationError> {
-    match value {
-        OwnedRawDatabaseMetadataValue::Null => Ok(RawDatabaseMetadataValue::Null),
-        OwnedRawDatabaseMetadataValue::Integer(value) => {
-            Ok(RawDatabaseMetadataValue::Integer(*value))
-        }
-        OwnedRawDatabaseMetadataValue::Real => {
-            Err(LiveMetadataAndHeaderValidationError::MalformedMetadata)
-        }
-        OwnedRawDatabaseMetadataValue::Text(value) => std::str::from_utf8(value)
-            .map(RawDatabaseMetadataValue::Text)
-            .map_err(|_| LiveMetadataAndHeaderValidationError::MalformedMetadata),
-        OwnedRawDatabaseMetadataValue::Blob(value) => Ok(RawDatabaseMetadataValue::Blob(value)),
-    }
-}
-
+#[cfg(test)]
 fn validate_owned_metadata_observation(
     observation: &[OwnedRawDatabaseMetadataValue],
 ) -> Result<DatabaseMetadataContractV1, LiveMetadataAndHeaderValidationError> {
-    let values: Vec<_> = observation
-        .iter()
-        .map(adapt_owned_value)
-        .collect::<Result<_, _>>()?;
-    let values: [RawDatabaseMetadataValue<'_>; METADATA_COLUMN_COUNT] = values
-        .try_into()
-        .map_err(|_| LiveMetadataAndHeaderValidationError::MetadataObservationUnavailable)?;
-    let [
-        singleton_id,
-        metadata_contract_version,
-        database_schema_version,
-        permanent_application_identifier,
-        database_format_identity,
-        parish_identifier,
-        installation_identifier,
-        installation_generation,
-        recovery_replacement_generation,
-        database_key_generation_identifier,
-        setup_publication_identifier,
-        database_created_at,
-    ] = values;
-
-    let parsed = RawDatabaseMetadataRow::new(
-        singleton_id,
-        metadata_contract_version,
-        database_schema_version,
-        permanent_application_identifier,
-        database_format_identity,
-        parish_identifier,
-        installation_identifier,
-        installation_generation,
-        recovery_replacement_generation,
-        database_key_generation_identifier,
-        setup_publication_identifier,
-        database_created_at,
-    )
-    .parse()
-    .map_err(|_| LiveMetadataAndHeaderValidationError::MalformedMetadata)?;
-
-    parsed.validate_structure().map_err(|error| match error {
-        MetadataValidationError::UnsupportedMetadataVersion => {
-            LiveMetadataAndHeaderValidationError::UnsupportedMetadataContractVersion
-        }
-        MetadataValidationError::UnsupportedSchemaVersion => {
-            LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion
-        }
-        MetadataValidationError::WrongSingleton
-        | MetadataValidationError::WrongApplicationIdentifier
-        | MetadataValidationError::WrongDatabaseFormatIdentity
-        | MetadataValidationError::InvalidParishIdentifier
-        | MetadataValidationError::InvalidInstallationIdentifier
-        | MetadataValidationError::InvalidInstallationGeneration
-        | MetadataValidationError::InvalidRecoveryReplacementGeneration
-        | MetadataValidationError::InvalidDatabaseKeyGenerationIdentifier
-        | MetadataValidationError::InvalidSetupPublicationIdentifier => {
-            LiveMetadataAndHeaderValidationError::MalformedMetadata
-        }
-    })
+    validate_fixed_owned_metadata_observation(observation).map_err(map_live_observation_error)
 }
 
 #[cfg(test)]
@@ -1443,30 +1300,29 @@ mod tests {
     #[test]
     fn debug_and_source_boundaries_are_coarse_fixed_and_sealed() {
         const SOURCE: &str = include_str!("live_metadata_and_header_validation.rs");
+        const OBSERVER: &str = include_str!("fixed_metadata_and_header_observation.rs");
         const PARENT: &str = include_str!("../production_database_connection_handoff.rs");
         let production = SOURCE.split("\n#[cfg(test)]\nmod tests").next().unwrap();
-        assert_eq!(production.matches("PRAGMA main.application_id").count(), 1);
-        assert_eq!(production.matches("PRAGMA main.user_version").count(), 1);
+        assert_eq!(OBSERVER.matches("PRAGMA main.application_id").count(), 1);
+        assert_eq!(OBSERVER.matches("PRAGMA main.user_version").count(), 1);
         assert_eq!(
-            production
+            OBSERVER
                 .matches("FROM main.church_app_database_metadata")
                 .count(),
             1
         );
-        assert_eq!(production.matches(".parse()").count(), 1);
-        assert_eq!(production.matches(".validate_structure()").count(), 1);
-        let application = production
+        assert_eq!(OBSERVER.matches(".parse()").count(), 1);
+        assert_eq!(OBSERVER.matches(".validate_structure()").count(), 1);
+        let application = OBSERVER
             .find("observe_application_id(connection)?")
             .unwrap();
-        let user = production
-            .find("observe_user_version(connection)?")
-            .unwrap();
-        let metadata = production
+        let user = OBSERVER.find("observe_user_version(connection)?").unwrap();
+        let metadata = OBSERVER
             .find("observe_and_validate_metadata(connection)?")
             .unwrap();
         assert!(application < user && user < metadata);
         for required in ["LIMIT 2", "metadata_contract: DatabaseMetadataContractV1"] {
-            assert!(production.contains(required));
+            assert!(OBSERVER.contains(required) || production.contains(required));
         }
         for forbidden in [
             "SELECT *",
@@ -1489,12 +1345,14 @@ mod tests {
             "sqlite3_",
         ] {
             assert!(
-                !production.contains(forbidden),
+                !production.contains(forbidden) && !OBSERVER.contains(forbidden),
                 "forbidden production surface: {forbidden}"
             );
         }
         assert!(PARENT.contains("mod live_metadata_and_header_validation;"));
         assert!(!PARENT.contains("pub mod live_metadata_and_header_validation;"));
+        assert!(PARENT.contains("mod fixed_metadata_and_header_observation;"));
+        assert!(!PARENT.contains("pub mod fixed_metadata_and_header_observation;"));
         let debug = format!(
             "{:?}",
             LiveMetadataAndHeaderValidationOutcome::Failed(
