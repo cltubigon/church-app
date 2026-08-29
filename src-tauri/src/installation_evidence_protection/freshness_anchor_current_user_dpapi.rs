@@ -29,7 +29,7 @@ use super::{
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum AnchorProtectionError {
+pub(crate) enum AnchorProtectionError {
     WrapperParseFailed,
     UnsupportedWrapperVersion,
     WrongProtectedObjectKind,
@@ -1021,7 +1021,9 @@ mod tests {
     #[test]
     fn source_preserves_exact_transition_order_scope_and_cfg_boundary() {
         const SOURCE: &str = include_str!("freshness_anchor_current_user_dpapi.rs");
+        const PARENT_SOURCE: &str = include_str!("mod.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let parent_production = PARENT_SOURCE.split("#[cfg(test)]").next().unwrap();
         let recovery = production
             .split_once("fn recover_and_validate_freshness_anchor_with(")
             .unwrap()
@@ -1064,6 +1066,53 @@ mod tests {
         assert!(
             production
                 .contains("#[cfg(windows)]\npub(crate) fn protect_authenticated_freshness_anchor")
+        );
+        assert!(production.contains("pub(crate) enum AnchorProtectionError"));
+        assert!(parent_production.contains(
+            "#[cfg(windows)]\n#[allow(unused_imports)]\npub(crate) use freshness_anchor_current_user_dpapi::{\n    AnchorProtectionError, protect_anchor_authentication_material,\n    protect_authenticated_freshness_anchor,\n};"
+        ));
+        assert!(!parent_production.contains("pub mod freshness_anchor_current_user_dpapi"));
+        assert_eq!(
+            production
+                .matches("pub(crate) fn protect_anchor_authentication_material(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production
+                .matches("pub(crate) fn protect_authenticated_freshness_anchor(")
+                .count(),
+            1
+        );
+        assert!(parent_production.contains(
+            "pub(crate) fn protect_anchor_authentication_material_for_manual_startup_fixture("
+        ));
+        assert!(parent_production.contains(
+            "freshness_anchor_current_user_dpapi::protect_anchor_authentication_material("
+        ));
+        assert!(parent_production.contains(
+            "pub(crate) fn protect_authenticated_freshness_anchor_for_manual_startup_fixture("
+        ));
+        assert!(parent_production.contains(
+            "freshness_anchor_current_user_dpapi::protect_authenticated_freshness_anchor(envelope)"
+        ));
+
+        #[cfg(windows)]
+        fn require_exact_production_facade(
+            _: fn(
+                &AnchorAuthenticationKey,
+                AnchorAuthenticationKeyGenerationIdentifier,
+            ) -> Result<EncodedProtectedWrapper, AnchorProtectionError>,
+            _: fn(
+                &EncodedAuthenticatedFreshnessAnchorV1,
+            ) -> Result<EncodedProtectedWrapper, AnchorProtectionError>,
+        ) {
+        }
+
+        #[cfg(windows)]
+        require_exact_production_facade(
+            super::super::protect_anchor_authentication_material,
+            super::super::protect_authenticated_freshness_anchor,
         );
         assert!(
             production

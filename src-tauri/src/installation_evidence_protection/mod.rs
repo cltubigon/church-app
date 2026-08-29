@@ -64,6 +64,12 @@ pub(crate) use first_time_setup_database_key_binding::{
     ProtectedFirstTimeSetupDatabaseKeyBinding, bind_generated_database_key_for_first_time_setup,
 };
 #[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use freshness_anchor_current_user_dpapi::{
+    AnchorProtectionError, protect_anchor_authentication_material,
+    protect_authenticated_freshness_anchor,
+};
+#[cfg(windows)]
 pub(crate) use freshness_anchor_observation::observe_normalized_current_freshness_anchor;
 #[allow(unused_imports)]
 pub(crate) use generation_bound_database_key::{
