@@ -110,6 +110,16 @@ struct FileIdentity {
     file_id: [u8; 16],
 }
 
+pub(crate) struct SetupDatabaseIdentityProof {
+    created_leaf_identity: FileIdentity,
+}
+
+impl fmt::Debug for SetupDatabaseIdentityProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SetupDatabaseIdentityProof([REDACTED])")
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 struct RetainedObservation {
     identity: FileIdentity,
@@ -162,6 +172,13 @@ pub(crate) struct IntegrityValidatedInitializedNewProductionDatabaseConnection {
     observed_metadata_contract: DatabaseMetadataContractV1,
 }
 
+/// Setup-only non-live predecessor retaining only the exact validated metadata
+/// and historical native identity provenance for the created leaf.
+pub(crate) struct ClosedIntegrityValidatedInitializedNewProductionDatabase {
+    observed_metadata_contract: DatabaseMetadataContractV1,
+    identity_proof: SetupDatabaseIdentityProof,
+}
+
 impl fmt::Debug for NewlyCreatedKeyedProductionDatabaseConnection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("NewlyCreatedKeyedProductionDatabaseConnection([REDACTED])")
@@ -184,6 +201,18 @@ impl fmt::Debug for IntegrityValidatedInitializedNewProductionDatabaseConnection
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .write_str("IntegrityValidatedInitializedNewProductionDatabaseConnection([REDACTED])")
+    }
+}
+
+impl fmt::Debug for ClosedIntegrityValidatedInitializedNewProductionDatabase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ClosedIntegrityValidatedInitializedNewProductionDatabase([REDACTED])")
+    }
+}
+
+impl ClosedIntegrityValidatedInitializedNewProductionDatabase {
+    pub(crate) fn into_parts(self) -> (DatabaseMetadataContractV1, SetupDatabaseIdentityProof) {
+        (self.observed_metadata_contract, self.identity_proof)
     }
 }
 
@@ -458,6 +487,48 @@ impl fmt::Debug for NewProductionDatabaseConnectionCloseFailure {
     }
 }
 
+#[must_use = "the setup database close-and-preserve outcome must be handled"]
+pub(crate) enum NewProductionDatabaseCloseAndPreserveOutcome {
+    Closed(ClosedIntegrityValidatedInitializedNewProductionDatabase),
+    Failed(NewProductionDatabaseCloseAndPreserveFailure),
+}
+
+impl fmt::Debug for NewProductionDatabaseCloseAndPreserveOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed(_) => formatter.write_str("Closed([REDACTED])"),
+            Self::Failed(_) => formatter.write_str("Failed([REDACTED])"),
+        }
+    }
+}
+
+pub(crate) struct NewProductionDatabaseCloseAndPreserveFailure {
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    observed_metadata_contract: DatabaseMetadataContractV1,
+    identity_proof: SetupDatabaseIdentityProof,
+}
+
+impl fmt::Debug for NewProductionDatabaseCloseAndPreserveFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NewProductionDatabaseCloseAndPreserveFailure([REDACTED])")
+    }
+}
+
+#[must_use = "the setup database close-and-preserve retry outcome must be handled"]
+pub(crate) enum NewProductionDatabaseCloseAndPreserveRetryOutcome {
+    Closed(ClosedIntegrityValidatedInitializedNewProductionDatabase),
+    Failed(NewProductionDatabaseCloseAndPreserveFailure),
+}
+
+impl fmt::Debug for NewProductionDatabaseCloseAndPreserveRetryOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed(_) => formatter.write_str("Closed([REDACTED])"),
+            Self::Failed(_) => formatter.write_str("Failed([REDACTED])"),
+        }
+    }
+}
+
 pub(crate) struct NewProductionDatabaseConnectionConstructionCloseFailure {
     category: PostCreateConstructionFailure,
     owner: NewlyCreatedConnectionLifetimeOwner,
@@ -612,6 +683,31 @@ impl NewProductionDatabaseConnectionCloseFailure {
     }
 }
 
+impl NewProductionDatabaseCloseAndPreserveFailure {
+    pub(crate) fn retry_close(self) -> NewProductionDatabaseCloseAndPreserveRetryOutcome {
+        retry_close_and_preserve_using(
+            self,
+            |connection| {
+                connection
+                    .close()
+                    .map_err(|(returned_connection, _)| returned_connection)
+            },
+            drop,
+            drop,
+        )
+    }
+
+    #[cfg(test)]
+    fn retry_close_using(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+        release_leaf: impl FnOnce(RetainedEntry),
+        release_parent: impl FnOnce(RetainedEntry),
+    ) -> NewProductionDatabaseCloseAndPreserveRetryOutcome {
+        retry_close_and_preserve_using(self, close, release_leaf, release_parent)
+    }
+}
+
 impl NewProductionDatabaseConnectionConstructionCloseFailure {
     pub(crate) fn retry_close(
         self,
@@ -752,6 +848,24 @@ pub(crate) fn validate_initialized_new_production_database_integrity(
                 .close()
                 .map_err(|(returned_connection, _)| returned_connection)
         },
+    )
+}
+
+/// Consumes the completed create-new validation chain, captures only its
+/// historical created-leaf identity, explicitly closes SQLite, and then
+/// releases the retained leaf before its retained parent.
+pub(crate) fn close_and_preserve_integrity_validated_initialized_new_production_database(
+    database: IntegrityValidatedInitializedNewProductionDatabaseConnection,
+) -> NewProductionDatabaseCloseAndPreserveOutcome {
+    close_and_preserve_integrity_validated_initialized_new_production_database_using(
+        database,
+        |connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        },
+        drop,
+        drop,
     )
 }
 
@@ -1941,6 +2055,94 @@ fn close_new_lifetime_owner_using(
     }
 }
 
+fn close_and_preserve_integrity_validated_initialized_new_production_database_using(
+    database: IntegrityValidatedInitializedNewProductionDatabaseConnection,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+    release_leaf: impl FnOnce(RetainedEntry),
+    release_parent: impl FnOnce(RetainedEntry),
+) -> NewProductionDatabaseCloseAndPreserveOutcome {
+    let IntegrityValidatedInitializedNewProductionDatabaseConnection {
+        owner,
+        observed_metadata_contract,
+    } = database;
+    let identity_proof = SetupDatabaseIdentityProof {
+        created_leaf_identity: owner.retained.leaf.initial.identity,
+    };
+    finish_close_and_preserve_using(
+        owner,
+        observed_metadata_contract,
+        identity_proof,
+        close,
+        release_leaf,
+        release_parent,
+    )
+}
+
+fn finish_close_and_preserve_using(
+    owner: NewlyCreatedConnectionLifetimeOwner,
+    observed_metadata_contract: DatabaseMetadataContractV1,
+    identity_proof: SetupDatabaseIdentityProof,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+    release_leaf: impl FnOnce(RetainedEntry),
+    release_parent: impl FnOnce(RetainedEntry),
+) -> NewProductionDatabaseCloseAndPreserveOutcome {
+    let NewlyCreatedConnectionLifetimeOwner {
+        connection,
+        retained,
+    } = owner;
+    match close(connection) {
+        Ok(()) => {
+            let RetainedCreatedDatabase { parent, leaf } = retained;
+            release_leaf(leaf);
+            release_parent(parent);
+            NewProductionDatabaseCloseAndPreserveOutcome::Closed(
+                ClosedIntegrityValidatedInitializedNewProductionDatabase {
+                    observed_metadata_contract,
+                    identity_proof,
+                },
+            )
+        }
+        Err(connection) => NewProductionDatabaseCloseAndPreserveOutcome::Failed(
+            NewProductionDatabaseCloseAndPreserveFailure {
+                owner: NewlyCreatedConnectionLifetimeOwner {
+                    connection,
+                    retained,
+                },
+                observed_metadata_contract,
+                identity_proof,
+            },
+        ),
+    }
+}
+
+fn retry_close_and_preserve_using(
+    failure: NewProductionDatabaseCloseAndPreserveFailure,
+    close: impl FnOnce(Connection) -> Result<(), Connection>,
+    release_leaf: impl FnOnce(RetainedEntry),
+    release_parent: impl FnOnce(RetainedEntry),
+) -> NewProductionDatabaseCloseAndPreserveRetryOutcome {
+    let NewProductionDatabaseCloseAndPreserveFailure {
+        owner,
+        observed_metadata_contract,
+        identity_proof,
+    } = failure;
+    match finish_close_and_preserve_using(
+        owner,
+        observed_metadata_contract,
+        identity_proof,
+        close,
+        release_leaf,
+        release_parent,
+    ) {
+        NewProductionDatabaseCloseAndPreserveOutcome::Closed(closed) => {
+            NewProductionDatabaseCloseAndPreserveRetryOutcome::Closed(closed)
+        }
+        NewProductionDatabaseCloseAndPreserveOutcome::Failed(failure) => {
+            NewProductionDatabaseCloseAndPreserveRetryOutcome::Failed(failure)
+        }
+    }
+}
+
 fn retry_construction_close_using(
     failure: NewProductionDatabaseConnectionConstructionCloseFailure,
     close: impl FnOnce(Connection) -> Result<(), Connection>,
@@ -1971,7 +2173,7 @@ fn retry_construction_close_using(
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::Cell,
+        cell::{Cell, RefCell},
         fs,
         io::Write,
         mem::{needs_drop, size_of},
@@ -1992,6 +2194,7 @@ mod tests {
         installation_evidence_protection::{
             bind_database_key_candidate_to_trusted_installation_evidence,
             bind_generated_database_key_for_first_time_setup, protect_database_key,
+            protect_first_time_setup_database_key_binding,
             recover_database_key_candidate_from_loaded_wrapper,
             trusted_current_installation_evidence_assessment_for_test,
         },
@@ -3950,6 +4153,342 @@ mod tests {
             NewProductionDatabaseConnectionCloseOutcome::Closed
         ));
         assert!(root.path().join(PRODUCTION_DATABASE_FILENAME).is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn close_and_preserve_api_representation_and_authority_surface_are_exact() {
+        const SOURCE: &str = include_str!("create_new_database.rs");
+        const PARENT: &str = include_str!("../production_database_connection_handoff.rs");
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let signature = "pub(crate) fn close_and_preserve_integrity_validated_initialized_new_production_database(\n    database: IntegrityValidatedInitializedNewProductionDatabaseConnection,\n) -> NewProductionDatabaseCloseAndPreserveOutcome";
+        assert!(production.contains(signature));
+        assert!(PARENT.contains(
+            "close_and_preserve_integrity_validated_initialized_new_production_database,"
+        ));
+
+        let closed = production
+            .split_once(
+                "pub(crate) struct ClosedIntegrityValidatedInitializedNewProductionDatabase {",
+            )
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(closed.lines().filter(|line| line.contains(':')).count(), 2);
+        assert!(closed.contains("observed_metadata_contract: DatabaseMetadataContractV1"));
+        assert!(closed.contains("identity_proof: SetupDatabaseIdentityProof"));
+        for forbidden in [
+            "Connection",
+            "OwnedHandle",
+            "HANDLE",
+            "Path",
+            "ProductionDatabasePath",
+            "StagedDatabasePath",
+            "RetainedObservation",
+        ] {
+            assert!(
+                !closed.contains(forbidden),
+                "closed owner retained {forbidden}"
+            );
+        }
+
+        assert!(production.contains("pub(crate) struct SetupDatabaseIdentityProof {"));
+        let proof = production
+            .split_once("pub(crate) struct SetupDatabaseIdentityProof {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(proof.lines().filter(|line| line.contains(':')).count(), 1);
+        assert!(proof.contains("created_leaf_identity: FileIdentity"));
+        assert!(!proof.contains("pub(crate) created_leaf_identity"));
+        assert!(!production.contains("impl SetupDatabaseIdentityProof {"));
+        assert!(!production.contains("pub(crate) struct FileIdentity {"));
+        let file_identity = production
+            .split_once("struct FileIdentity {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(
+            file_identity
+                .lines()
+                .filter(|line| line.contains(':'))
+                .count(),
+            2
+        );
+        assert!(file_identity.contains("volume_serial: u64"));
+        assert!(file_identity.contains("file_id: [u8; 16]"));
+
+        let into_parts = production
+            .split_once("impl ClosedIntegrityValidatedInitializedNewProductionDatabase {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let exact_into_parts = "\n    pub(crate) fn into_parts(self) -> (DatabaseMetadataContractV1, SetupDatabaseIdentityProof) {\n        (self.observed_metadata_contract, self.identity_proof)\n    }";
+        assert_eq!(into_parts, exact_into_parts);
+        for forbidden in [
+            "clone",
+            "DatabaseMetadataContractV1::new",
+            "serialize",
+            "parse",
+            "query",
+            "identity_from",
+            "Path",
+            "volume_serial",
+            "file_id",
+            "as_bytes",
+            "into_bytes",
+            "matches",
+        ] {
+            assert!(
+                !into_parts.contains(forbidden),
+                "forbidden consuming decomposition capability: {forbidden}"
+            );
+        }
+
+        for forbidden in [
+            "impl Clone for ClosedIntegrityValidatedInitializedNewProductionDatabase",
+            "impl Copy for ClosedIntegrityValidatedInitializedNewProductionDatabase",
+            "Serialize for ClosedIntegrityValidatedInitializedNewProductionDatabase",
+            "Deserialize for ClosedIntegrityValidatedInitializedNewProductionDatabase",
+            "impl Clone for SetupDatabaseIdentityProof",
+            "impl Copy for SetupDatabaseIdentityProof",
+            "Serialize for SetupDatabaseIdentityProof",
+            "Deserialize for SetupDatabaseIdentityProof",
+            "ProtectedFirstTimeSetupDatabaseKeyBinding",
+            "EncodedProtectedWrapper",
+            "database_key_wrapper:",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "forbidden close surface: {forbidden}"
+            );
+        }
+
+        let transition = production
+            .split_once(signature)
+            .unwrap()
+            .1
+            .split_once("/// Consumes first-time setup authority")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "Connection::open",
+            "open_with_flags",
+            "ProductionDatabasePath",
+            "StagedDatabasePath",
+            "production_database_path",
+            "inspect_production_database_file",
+            "CreateFileW",
+            "query_observation",
+            "revalidate_retained_creation",
+            "borrowed_handle_matches_created_leaf",
+            "sqlite_main_database_handle",
+            "publication",
+            "staging",
+            "evidence",
+            "freshness",
+            "complete_setup",
+            "startup_authorization",
+            "operational_activation",
+            "cleanup",
+            "recovery",
+            "ProtectedFirstTimeSetupDatabaseKeyBinding",
+            "EncodedProtectedWrapper",
+        ] {
+            assert!(
+                !transition.contains(forbidden),
+                "forbidden close transition capability: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn close_and_preserve_orders_close_leaf_parent_and_preserves_exact_values() {
+        let root = TestRoot::create();
+        let integrity_validated = validate_initialized_new_production_database_integrity(
+            validated_initialized_fixture(&root),
+        )
+        .expect("fixed setup integrity validation should succeed");
+        let expected_metadata = integrity_validated.observed_metadata_contract;
+        let expected_identity = integrity_validated.owner.retained.leaf.initial.identity;
+        let events = RefCell::new(Vec::new());
+
+        let outcome =
+            close_and_preserve_integrity_validated_initialized_new_production_database_using(
+                integrity_validated,
+                |connection| {
+                    events.borrow_mut().push("sqlite-close");
+                    drop(connection);
+                    Ok(())
+                },
+                |leaf| {
+                    events.borrow_mut().push("leaf-release");
+                    drop(leaf);
+                },
+                |parent| {
+                    events.borrow_mut().push("parent-release");
+                    drop(parent);
+                },
+            );
+        let NewProductionDatabaseCloseAndPreserveOutcome::Closed(closed) = outcome else {
+            panic!("injected successful close must return the closed predecessor");
+        };
+        assert_eq!(
+            events.into_inner(),
+            ["sqlite-close", "leaf-release", "parent-release"]
+        );
+        assert_eq!(
+            format!("{closed:?}"),
+            "ClosedIntegrityValidatedInitializedNewProductionDatabase([REDACTED])"
+        );
+        let parts: (DatabaseMetadataContractV1, SetupDatabaseIdentityProof) = closed.into_parts();
+        let (observed_metadata_contract, identity_proof) = parts;
+        assert_eq!(observed_metadata_contract, expected_metadata);
+        assert!(identity_proof.created_leaf_identity == expected_identity);
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn close_and_preserve_failure_and_retries_retain_all_state_and_only_close() {
+        let root = TestRoot::create();
+        let integrity_validated = validate_initialized_new_production_database_integrity(
+            validated_initialized_fixture(&root),
+        )
+        .expect("fixed setup integrity validation should succeed");
+        let expected_metadata = integrity_validated.observed_metadata_contract;
+        let expected_identity = integrity_validated.owner.retained.leaf.initial.identity;
+        let expected_connection = unsafe { integrity_validated.owner.connection.handle() };
+        let releases = Cell::new(0_u8);
+
+        let outcome =
+            close_and_preserve_integrity_validated_initialized_new_production_database_using(
+                integrity_validated,
+                Err,
+                |_| releases.set(releases.get() + 1),
+                |_| releases.set(releases.get() + 1),
+            );
+        assert_eq!(format!("{outcome:?}"), "Failed([REDACTED])");
+        let NewProductionDatabaseCloseAndPreserveOutcome::Failed(failure) = outcome else {
+            panic!("injected close failure must retain all close-and-preserve state");
+        };
+        assert_eq!(releases.get(), 0);
+        assert_eq!(failure.observed_metadata_contract, expected_metadata);
+        assert!(failure.identity_proof.created_leaf_identity == expected_identity);
+        assert_eq!(
+            unsafe { failure.owner.connection.handle() },
+            expected_connection
+        );
+        assert_eq!(
+            format!("{failure:?}"),
+            "NewProductionDatabaseCloseAndPreserveFailure([REDACTED])"
+        );
+
+        let NewProductionDatabaseCloseAndPreserveRetryOutcome::Failed(failure) = failure
+            .retry_close_using(
+                Err,
+                |_| releases.set(releases.get() + 1),
+                |_| releases.set(releases.get() + 1),
+            )
+        else {
+            panic!("repeated close failure must remain retryable");
+        };
+        assert_eq!(releases.get(), 0);
+        assert_eq!(failure.observed_metadata_contract, expected_metadata);
+        assert!(failure.identity_proof.created_leaf_identity == expected_identity);
+        assert_eq!(
+            unsafe { failure.owner.connection.handle() },
+            expected_connection
+        );
+
+        let NewProductionDatabaseCloseAndPreserveRetryOutcome::Closed(closed) =
+            failure.retry_close()
+        else {
+            panic!("eventual close success must return the closed predecessor");
+        };
+        let parts: (DatabaseMetadataContractV1, SetupDatabaseIdentityProof) = closed.into_parts();
+        let (observed_metadata_contract, identity_proof) = parts;
+        assert_eq!(observed_metadata_contract, expected_metadata);
+        assert!(identity_proof.created_leaf_identity == expected_identity);
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn close_and_preserve_real_windows_setup_flow_matches_fresh_post_close_identity() {
+        let root = TestRoot::create();
+        let authorization = authorization();
+        let binding = bind_generated_database_key_for_first_time_setup(
+            &authorization,
+            generate_database_key_material().expect("OS key randomness should be available"),
+            generate_installation_identifier()
+                .expect("OS installation identifier randomness should be available"),
+        );
+        let protected = protect_first_time_setup_database_key_binding(binding)
+            .expect("test-owned database key protection should succeed");
+        let (
+            key,
+            installation_identifier,
+            database_key_generation_identifier,
+            protected_database_key_wrapper,
+        ) = protected.into_parts();
+        let parish_identifier = generate_parish_identifier()
+            .expect("OS parish identifier randomness should be available")
+            .into_parish_identifier();
+        let setup_publication_identifier = generate_setup_publication_identifier()
+            .expect("OS setup publication randomness should be available")
+            .into_setup_publication_identifier();
+        let created =
+            create_new_keyed_production_database(authorization, root.database_path(), key)
+                .expect("real create-new handoff should succeed");
+        let initialized = initialize_new_production_database(
+            created,
+            parish_identifier,
+            installation_identifier,
+            database_key_generation_identifier,
+            setup_publication_identifier,
+            DatabaseCreationTimestamp::from_unix_milliseconds(1_798_000_000_123),
+        )
+        .expect("real initialization should succeed");
+        let validated = validate_initialized_new_production_database(initialized)
+            .expect("real immediate validation should succeed");
+        let expected_metadata = validated.observed_metadata_contract;
+        let integrity_validated = validate_initialized_new_production_database_integrity(validated)
+            .expect("fixed setup integrity validation should succeed");
+        let outcome = close_and_preserve_integrity_validated_initialized_new_production_database(
+            integrity_validated,
+        );
+        let NewProductionDatabaseCloseAndPreserveOutcome::Closed(closed) = outcome else {
+            panic!("real SQLite close should return the closed predecessor");
+        };
+        assert_eq!(
+            format!("{closed:?}"),
+            "ClosedIntegrityValidatedInitializedNewProductionDatabase([REDACTED])"
+        );
+        let parts: (DatabaseMetadataContractV1, SetupDatabaseIdentityProof) = closed.into_parts();
+        let (observed_metadata_contract, identity_proof) = parts;
+        assert_eq!(observed_metadata_contract, expected_metadata);
+
+        let current_handle = open_native_handle(
+            &root.path().join(PRODUCTION_DATABASE_FILENAME),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+        .expect("fresh test-only post-close identity handle should open");
+        let current_identity = query_observation(&current_handle)
+            .expect("fresh test-only post-close identity query should succeed")
+            .identity;
+        drop(current_handle);
+        assert!(identity_proof.created_leaf_identity == current_identity);
+        drop(protected_database_key_wrapper);
         root.assert_exact_cleanup();
     }
 }

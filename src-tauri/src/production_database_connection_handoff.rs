@@ -42,9 +42,12 @@ mod live_metadata_and_header_validation;
 
 #[allow(unused_imports)]
 pub(crate) use create_new_database::{
+    ClosedIntegrityValidatedInitializedNewProductionDatabase,
     InitializedNewProductionDatabaseConnection,
     IntegrityValidatedInitializedNewProductionDatabaseConnection,
-    NewProductionDatabaseConnectionCloseFailure, NewProductionDatabaseConnectionCloseOutcome,
+    NewProductionDatabaseCloseAndPreserveFailure, NewProductionDatabaseCloseAndPreserveOutcome,
+    NewProductionDatabaseCloseAndPreserveRetryOutcome, NewProductionDatabaseConnectionCloseFailure,
+    NewProductionDatabaseConnectionCloseOutcome,
     NewProductionDatabaseConnectionConstructionCloseFailure,
     NewProductionDatabaseConnectionConstructionCloseRetryOutcome,
     NewProductionDatabaseCreationError, NewProductionDatabaseImmediateValidationCloseFailure,
@@ -54,8 +57,10 @@ pub(crate) use create_new_database::{
     NewProductionDatabaseIntegrityValidationCloseFailure,
     NewProductionDatabaseIntegrityValidationCloseRetryOutcome,
     NewProductionDatabaseIntegrityValidationError, NewlyCreatedKeyedProductionDatabaseConnection,
-    ValidatedInitializedNewProductionDatabaseConnection, create_new_keyed_production_database,
-    initialize_new_production_database, validate_initialized_new_production_database,
+    ValidatedInitializedNewProductionDatabaseConnection,
+    close_and_preserve_integrity_validated_initialized_new_production_database,
+    create_new_keyed_production_database, initialize_new_production_database,
+    validate_initialized_new_production_database,
     validate_initialized_new_production_database_integrity,
 };
 
