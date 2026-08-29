@@ -13,8 +13,11 @@
 
 use std::{fmt, num::NonZeroU64};
 
-use crate::storage_foundation::{
-    APPLICATION_DATABASE_FORMAT_IDENTITY, ApplicationDatabaseFormatIdentity, ParishIdentifier,
+use crate::{
+    database_metadata_contract::DatabaseMetadataContractV1,
+    storage_foundation::{
+        APPLICATION_DATABASE_FORMAT_IDENTITY, ApplicationDatabaseFormatIdentity, ParishIdentifier,
+    },
 };
 
 pub const PERMANENT_APPLICATION_IDENTIFIER: &str = "io.github.cltubigon.churchapp";
@@ -469,6 +472,29 @@ impl<'a> UnvalidatedInstallationEvidenceContract<'a> {
     }
 }
 
+/// Constructs canonical plaintext evidence for first-time setup from the exact
+/// already-validated database metadata and an independently validated evidence
+/// creation timestamp.
+#[allow(dead_code)]
+pub(crate) fn construct_first_time_setup_installation_evidence_from_database_metadata(
+    metadata: &DatabaseMetadataContractV1,
+    creation_timestamp: CreationTimestamp,
+) -> StructurallyValidatedInstallationEvidence {
+    StructurallyValidatedInstallationEvidence {
+        evidence_format_identity: INSTALLATION_EVIDENCE_FORMAT_IDENTITY,
+        evidence_format_version: EvidenceFormatVersion(SUPPORTED_EVIDENCE_FORMAT_VERSION),
+        permanent_application_identifier: metadata.permanent_application_identifier(),
+        application_database_format_identity: metadata.database_format_identity(),
+        parish_identifier: metadata.parish_identifier(),
+        installation_identifier: metadata.installation_identifier(),
+        installation_generation: metadata.installation_generation(),
+        recovery_or_replacement_generation: metadata.recovery_replacement_generation(),
+        database_key_generation_identifier: metadata.database_key_generation_identifier(),
+        setup_publication_identifier: metadata.setup_publication_identifier(),
+        creation_timestamp,
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct StructurallyValidatedInstallationEvidence {
     evidence_format_identity: EvidenceFormatIdentity,
@@ -615,8 +641,9 @@ impl fmt::Debug for StructurallyValidatedInstallationEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::installation_state::{
-        InstallationEvidence, StorageDecision, decide_ordinary_startup,
+    use crate::{
+        database_metadata_contract::{DatabaseCreationTimestamp, DatabaseMetadataContractV1},
+        installation_state::{InstallationEvidence, StorageDecision, decide_ordinary_startup},
     };
 
     const PARISH_IDENTIFIER: &str = "3f6a819cc2044ae3976c5e8b37d29140";
@@ -698,6 +725,152 @@ mod tests {
             GOLDEN_SETUP_PUBLICATION_IDENTIFIER,
             GOLDEN_CREATION_TIMESTAMP,
         )
+    }
+
+    fn synthetic_setup_database_metadata() -> DatabaseMetadataContractV1 {
+        DatabaseMetadataContractV1::new(
+            PermanentApplicationIdentifier::canonical(),
+            ParishIdentifier::parse(GOLDEN_PARISH_IDENTIFIER).unwrap(),
+            InstallationIdentifier::from_bytes(GOLDEN_INSTALLATION_IDENTIFIER).unwrap(),
+            InstallationGeneration::new(7).unwrap(),
+            RecoveryOrReplacementGeneration::new(11).unwrap(),
+            DatabaseKeyGenerationIdentifier::from_bytes(GOLDEN_DATABASE_KEY_GENERATION_IDENTIFIER)
+                .unwrap(),
+            SetupPublicationIdentifier::from_bytes(GOLDEN_SETUP_PUBLICATION_IDENTIFIER).unwrap(),
+            DatabaseCreationTimestamp::from_unix_milliseconds(1_798_000_000_123),
+        )
+    }
+
+    #[test]
+    fn first_time_setup_constructor_preserves_exact_metadata_and_independent_timestamp() {
+        let metadata = synthetic_setup_database_metadata();
+        let creation_timestamp = CreationTimestamp::from_unix_seconds(42).unwrap();
+        let constructor: fn(
+            &DatabaseMetadataContractV1,
+            CreationTimestamp,
+        ) -> StructurallyValidatedInstallationEvidence =
+            construct_first_time_setup_installation_evidence_from_database_metadata;
+
+        let evidence = constructor(&metadata, creation_timestamp);
+
+        assert_eq!(
+            evidence.evidence_format_identity(),
+            INSTALLATION_EVIDENCE_FORMAT_IDENTITY
+        );
+        assert_eq!(
+            evidence.evidence_format_version().get(),
+            SUPPORTED_EVIDENCE_FORMAT_VERSION
+        );
+        assert_eq!(
+            evidence.permanent_application_identifier(),
+            metadata.permanent_application_identifier()
+        );
+        assert_eq!(
+            evidence.application_database_format_identity(),
+            metadata.database_format_identity()
+        );
+        assert_eq!(evidence.parish_identifier(), metadata.parish_identifier());
+        assert_eq!(
+            evidence.installation_identifier(),
+            metadata.installation_identifier()
+        );
+        assert_eq!(
+            evidence.installation_generation(),
+            metadata.installation_generation()
+        );
+        assert_eq!(evidence.installation_generation().get(), 7);
+        assert_eq!(
+            evidence.recovery_or_replacement_generation(),
+            metadata.recovery_replacement_generation()
+        );
+        assert_eq!(evidence.recovery_or_replacement_generation().get(), 11);
+        assert_eq!(
+            evidence.database_key_generation_identifier(),
+            metadata.database_key_generation_identifier()
+        );
+        assert_eq!(
+            evidence.setup_publication_identifier(),
+            metadata.setup_publication_identifier()
+        );
+        assert_eq!(evidence.creation_timestamp(), creation_timestamp);
+        assert_eq!(evidence.creation_timestamp().unix_seconds(), 42);
+        assert_ne!(
+            evidence.creation_timestamp().unix_seconds(),
+            metadata.database_created_at().unix_milliseconds()
+        );
+    }
+
+    #[test]
+    fn first_time_setup_constructor_has_exact_pure_typed_source_boundary() {
+        const SOURCE: &str = include_str!("installation_evidence_contract.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let constructor = production
+            .split_once(
+                "pub(crate) fn construct_first_time_setup_installation_evidence_from_database_metadata",
+            )
+            .expect("setup evidence constructor should have one exact name")
+            .1
+            .split_once("#[derive(Clone, Copy, Eq, PartialEq)]")
+            .expect("validated evidence type should follow the setup constructor")
+            .0;
+
+        assert_eq!(
+            production
+                .matches(
+                    "pub(crate) fn construct_first_time_setup_installation_evidence_from_database_metadata",
+                )
+                .count(),
+            1
+        );
+        assert!(constructor.contains("metadata: &DatabaseMetadataContractV1"));
+        assert!(constructor.contains("creation_timestamp: CreationTimestamp"));
+        assert!(constructor.contains(") -> StructurallyValidatedInstallationEvidence"));
+
+        for required in [
+            "INSTALLATION_EVIDENCE_FORMAT_IDENTITY",
+            "SUPPORTED_EVIDENCE_FORMAT_VERSION",
+            "metadata.permanent_application_identifier()",
+            "metadata.database_format_identity()",
+            "metadata.parish_identifier()",
+            "metadata.installation_identifier()",
+            "metadata.installation_generation()",
+            "metadata.recovery_replacement_generation()",
+            "metadata.database_key_generation_identifier()",
+            "metadata.setup_publication_identifier()",
+            "creation_timestamp,",
+        ] {
+            assert!(
+                constructor.contains(required),
+                "setup evidence constructor should contain {required}"
+            );
+        }
+
+        for forbidden in [
+            "database_created_at",
+            "unix_milliseconds",
+            "/ 1000",
+            "SystemTime",
+            "UNIX_EPOCH",
+            "std::fs",
+            "Path",
+            "rusqlite",
+            "dpapi",
+            "protect_",
+            "authenticate",
+            "getrandom",
+            "rand::",
+            "publish(",
+            "freshness",
+            "setup_completion",
+            "tauri",
+            "std::env",
+            "log::",
+        ] {
+            assert!(
+                !constructor.contains(forbidden),
+                "setup evidence constructor unexpectedly contains {forbidden}"
+            );
+        }
     }
 
     fn mutate_golden_byte(index: usize, bit: u8) -> [u8; ENCODED_INSTALLATION_EVIDENCE_V1_LENGTH] {
