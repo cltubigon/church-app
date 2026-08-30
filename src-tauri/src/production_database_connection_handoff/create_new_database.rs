@@ -68,10 +68,15 @@ pub(crate) use prepared_first_time_setup_publication_materials::{
     PreparedFirstTimeSetupPublicationMaterials, PreparedFirstTimeSetupPublicationMaterialsError,
     prepare_first_time_setup_publication_materials,
 };
+#[allow(unused_imports)]
 pub(crate) use protected_artifact_directories::{
     FirstTimeSetupProtectedArtifactDirectoryPreparationError,
-    PreparedFirstTimeSetupProtectedArtifactDirectories,
+    PreparedFirstTimeSetupProtectedArtifactDirectories, StagedProtectedWrapperWriteError,
     prepare_first_time_setup_protected_artifact_directories,
+    write_staged_authenticated_evidence_wrapper,
+    write_staged_authenticated_freshness_anchor_wrapper, write_staged_database_key_wrapper,
+    write_staged_evidence_authentication_key_wrapper,
+    write_staged_freshness_authentication_key_wrapper,
 };
 
 const MAIN_DATABASE_NAME: &str = "main";

@@ -19,6 +19,15 @@ use super::{
     validate_local_ntfs, validate_parent,
 };
 
+mod staged_protected_wrapper_writer;
+
+pub(crate) use staged_protected_wrapper_writer::{
+    StagedProtectedWrapperWriteError, write_staged_authenticated_evidence_wrapper,
+    write_staged_authenticated_freshness_anchor_wrapper, write_staged_database_key_wrapper,
+    write_staged_evidence_authentication_key_wrapper,
+    write_staged_freshness_authentication_key_wrapper,
+};
+
 /// Opaque setup-only ownership of the validated production root and its exact
 /// three empty protected-artifact directory children.
 #[allow(dead_code)]

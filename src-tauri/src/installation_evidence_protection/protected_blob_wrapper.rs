@@ -97,6 +97,10 @@ pub(crate) struct EncodedProtectedWrapper {
 }
 
 impl EncodedProtectedWrapper {
+    pub(crate) fn validate_database_key_bytes(input: &[u8]) -> Result<(), ProtectionStageError> {
+        ValidatedProtectedWrapper::parse(input, ProtectedObjectKind::DatabaseKey).map(|_| ())
+    }
+
     pub(crate) fn validate_authentication_key_bytes(
         input: &[u8],
     ) -> Result<(), ProtectionStageError> {
@@ -107,6 +111,20 @@ impl EncodedProtectedWrapper {
         input: &[u8],
     ) -> Result<(), ProtectionStageError> {
         ValidatedProtectedWrapper::parse(input, ProtectedObjectKind::AuthenticatedEvidence)
+            .map(|_| ())
+    }
+
+    pub(crate) fn validate_anchor_authentication_key_bytes(
+        input: &[u8],
+    ) -> Result<(), ProtectionStageError> {
+        ValidatedProtectedWrapper::parse(input, ProtectedObjectKind::AnchorAuthenticationKey)
+            .map(|_| ())
+    }
+
+    pub(crate) fn validate_authenticated_freshness_anchor_bytes(
+        input: &[u8],
+    ) -> Result<(), ProtectionStageError> {
+        ValidatedProtectedWrapper::parse(input, ProtectedObjectKind::AuthenticatedFreshnessAnchor)
             .map(|_| ())
     }
 
@@ -126,6 +144,36 @@ impl EncodedProtectedWrapper {
     ) -> Result<Self, ProtectionStageError> {
         Self::encode(
             ProtectedObjectKind::AuthenticatedEvidence,
+            OpaqueProtectedBytes::new(blob),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_database_key_for_staged_writer_test(
+        blob: Vec<u8>,
+    ) -> Result<Self, ProtectionStageError> {
+        Self::encode(
+            ProtectedObjectKind::DatabaseKey,
+            OpaqueProtectedBytes::new(blob),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_anchor_authentication_key_for_staged_writer_test(
+        blob: Vec<u8>,
+    ) -> Result<Self, ProtectionStageError> {
+        Self::encode(
+            ProtectedObjectKind::AnchorAuthenticationKey,
+            OpaqueProtectedBytes::new(blob),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_authenticated_freshness_anchor_for_staged_writer_test(
+        blob: Vec<u8>,
+    ) -> Result<Self, ProtectionStageError> {
+        Self::encode(
+            ProtectedObjectKind::AuthenticatedFreshnessAnchor,
             OpaqueProtectedBytes::new(blob),
         )
     }
@@ -616,7 +664,7 @@ mod tests {
         let tests = SOURCE.find("mod tests {").unwrap();
         let production = &SOURCE[..tests];
 
-        assert_eq!(production.matches("DatabaseKey").count(), 2);
+        assert_eq!(production.matches("DatabaseKey").count(), 4);
         for forbidden in [
             "crate::database_key",
             "EncodedDatabaseKeyPayload",
