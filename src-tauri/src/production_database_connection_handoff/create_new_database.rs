@@ -61,8 +61,14 @@ use super::{
     sqlite_main_database_handle,
 };
 
+mod current_canonical_database_identity;
 mod prepared_first_time_setup_publication_materials;
 mod protected_artifact_directories;
+
+pub(crate) use current_canonical_database_identity::{
+    CurrentCanonicalDatabaseIdentityComparisonError,
+    CurrentCanonicalDatabaseIdentityMatchesSetupProof, compare_current_canonical_database_identity,
+};
 
 pub(crate) use prepared_first_time_setup_publication_materials::{
     PreparedFirstTimeSetupPublicationMaterials, PreparedFirstTimeSetupPublicationMaterialsError,
@@ -4443,7 +4449,7 @@ mod tests {
     }
 
     #[test]
-    fn close_and_preserve_real_windows_setup_flow_matches_fresh_post_close_identity() {
+    fn close_and_preserve_real_windows_setup_flow_matches_current_canonical_database_identity() {
         let root = TestRoot::create();
         let authorization = authorization();
         let binding = bind_generated_database_key_for_first_time_setup(
@@ -4496,6 +4502,9 @@ mod tests {
         let parts: (DatabaseMetadataContractV1, SetupDatabaseIdentityProof) = closed.into_parts();
         let (observed_metadata_contract, identity_proof) = parts;
         assert_eq!(observed_metadata_contract, expected_metadata);
+
+        compare_current_canonical_database_identity(&identity_proof, &root.database_path())
+            .expect("closed real setup proof should match the independently inspected file");
 
         let current_handle = open_native_handle(
             &root.path().join(PRODUCTION_DATABASE_FILENAME),

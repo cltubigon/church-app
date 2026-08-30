@@ -42,6 +42,20 @@ pub(crate) struct InspectedProductionDatabaseFile {
     _file_identity: RetainedFileIdentity,
 }
 
+#[cfg(windows)]
+impl InspectedProductionDatabaseFile {
+    /// Comparison only: never releases the inspected native identity or handles.
+    pub(crate) fn has_native_identity(&self, volume_serial: u64, file_id: [u8; 16]) -> bool {
+        windows::identities_match(
+            self._file_identity,
+            RetainedFileIdentity {
+                volume_serial,
+                file_id,
+            },
+        )
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProductionDatabaseFileIdentityRevalidationError {
     Failed,
