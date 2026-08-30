@@ -13,6 +13,7 @@ mod database_key_protected_payload;
 mod database_metadata_contract;
 mod database_metadata_correspondence;
 mod database_metadata_decoding;
+mod first_time_setup_publication;
 mod freshness_anchor_active_wrapper_loader;
 mod freshness_anchor_authenticated_envelope;
 mod freshness_anchor_authentication_key;
