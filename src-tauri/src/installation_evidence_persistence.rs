@@ -39,6 +39,64 @@ pub(crate) fn load_active_installation_evidence_wrapper_pair(
 }
 
 #[cfg(windows)]
+#[derive(Eq, PartialEq)]
+pub(crate) struct LoadedStagedInstallationEvidenceWrapperPair {
+    authentication_key: ProtectedWrapperBytes,
+    authenticated_evidence: ProtectedWrapperBytes,
+}
+
+#[cfg(windows)]
+impl LoadedStagedInstallationEvidenceWrapperPair {
+    pub(super) fn from_wrappers(
+        authentication_key: ProtectedWrapperBytes,
+        authenticated_evidence: ProtectedWrapperBytes,
+    ) -> Self {
+        Self {
+            authentication_key,
+            authenticated_evidence,
+        }
+    }
+
+    pub(crate) fn into_wrappers(self) -> (ProtectedWrapperBytes, ProtectedWrapperBytes) {
+        (self.authentication_key, self.authenticated_evidence)
+    }
+}
+
+#[cfg(windows)]
+impl fmt::Debug for LoadedStagedInstallationEvidenceWrapperPair {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LoadedStagedInstallationEvidenceWrapperPair([REDACTED])")
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum StagedInstallationEvidenceWrapperPairLoadError {
+    Unavailable,
+    Malformed,
+}
+
+#[cfg(windows)]
+impl fmt::Debug for StagedInstallationEvidenceWrapperPairLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable => "StagedInstallationEvidencePairUnavailable",
+            Self::Malformed => "StagedInstallationEvidencePairMalformed",
+        })
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn load_staged_installation_evidence_wrapper_pair(
+    paths: &crate::storage_foundation::InstallationEvidencePersistencePaths,
+) -> Result<
+    LoadedStagedInstallationEvidenceWrapperPair,
+    StagedInstallationEvidenceWrapperPairLoadError,
+> {
+    windows_filesystem::load_staged_installation_evidence_wrapper_pair_coarse(paths)
+}
+
+#[cfg(windows)]
 pub(crate) fn observe_production_root_fact(
     paths: &crate::storage_foundation::InstallationEvidencePersistencePaths,
 ) -> ProductionRootFact {

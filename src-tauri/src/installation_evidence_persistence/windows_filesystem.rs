@@ -56,8 +56,9 @@ use crate::{
 
 use super::{
     ActiveInstallationEvidenceWrapperLoadError, BoundedReadError, EvidenceDirectoryChildrenFacts,
-    EvidenceDirectoryFact, FixedFileFact, MAXIMUM_PROTECTED_WRAPPER_LENGTH,
-    MINIMUM_PROTECTED_WRAPPER_LENGTH, ProductionRootFact, ProtectedWrapperBytes,
+    EvidenceDirectoryFact, FixedFileFact, LoadedStagedInstallationEvidenceWrapperPair,
+    MAXIMUM_PROTECTED_WRAPPER_LENGTH, MINIMUM_PROTECTED_WRAPPER_LENGTH, ProductionRootFact,
+    ProtectedWrapperBytes, StagedInstallationEvidenceWrapperPairLoadError,
     ValidatedProductionRootFacts, read_bounded_protected_wrapper,
 };
 
@@ -776,7 +777,32 @@ fn validate_approved_wrapper_name(path: &Path, expected_name: &str) -> Result<()
     Ok(())
 }
 
-fn enumerate_exact_active_wrapper_pair(directory: &Path) -> Result<(), HardeningError> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InstallationEvidencePairSelection {
+    Active,
+    Staged,
+}
+
+impl InstallationEvidencePairSelection {
+    const fn authentication_key_filename(self) -> &'static str {
+        match self {
+            Self::Active => ACTIVE_AUTHENTICATION_KEY_FILENAME,
+            Self::Staged => STAGED_AUTHENTICATION_KEY_FILENAME,
+        }
+    }
+
+    const fn authenticated_evidence_filename(self) -> &'static str {
+        match self {
+            Self::Active => ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+            Self::Staged => STAGED_AUTHENTICATED_EVIDENCE_FILENAME,
+        }
+    }
+}
+
+fn enumerate_exact_wrapper_pair(
+    directory: &Path,
+    selection: InstallationEvidencePairSelection,
+) -> Result<(), HardeningError> {
     let mut authentication_key_count = 0_u8;
     let mut authenticated_evidence_count = 0_u8;
     for entry in fs::read_dir(directory).map_err(|_| HardeningError::InspectionUnavailable)? {
@@ -785,12 +811,12 @@ fn enumerate_exact_active_wrapper_pair(directory: &Path) -> Result<(), Hardening
             .file_name();
         if name
             .encode_wide()
-            .eq(ACTIVE_AUTHENTICATION_KEY_FILENAME.encode_utf16())
+            .eq(selection.authentication_key_filename().encode_utf16())
         {
             authentication_key_count = authentication_key_count.saturating_add(1);
         } else if name
             .encode_wide()
-            .eq(ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME.encode_utf16())
+            .eq(selection.authenticated_evidence_filename().encode_utf16())
         {
             authenticated_evidence_count = authenticated_evidence_count.saturating_add(1);
         } else {
@@ -825,37 +851,29 @@ where
 fn inspect_retained_active_authentication_key_wrapper(
     path: &Path,
     retained: &[RetainedDirectory],
+    expected_name: &str,
 ) -> Result<LoadedActiveWrapper, HardeningError> {
     #[cfg(test)]
     ACTIVE_WRAPPER_LOADER_TEST_CALLS
         .with(|calls| calls.set((calls.get().0, calls.get().1 + 1, calls.get().2)));
-    inspect_retained_active_wrapper(
-        path,
-        ACTIVE_AUTHENTICATION_KEY_FILENAME,
-        retained,
-        |bytes| {
-            EncodedProtectedWrapper::validate_authentication_key_bytes(bytes)
-                .map_err(|_| HardeningError::WrapperInvalid)
-        },
-    )
+    inspect_retained_active_wrapper(path, expected_name, retained, |bytes| {
+        EncodedProtectedWrapper::validate_authentication_key_bytes(bytes)
+            .map_err(|_| HardeningError::WrapperInvalid)
+    })
 }
 
 fn inspect_retained_active_authenticated_evidence_wrapper(
     path: &Path,
     retained: &[RetainedDirectory],
+    expected_name: &str,
 ) -> Result<LoadedActiveWrapper, HardeningError> {
     #[cfg(test)]
     ACTIVE_WRAPPER_LOADER_TEST_CALLS
         .with(|calls| calls.set((calls.get().0, calls.get().1, calls.get().2 + 1)));
-    inspect_retained_active_wrapper(
-        path,
-        ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
-        retained,
-        |bytes| {
-            EncodedProtectedWrapper::validate_authenticated_evidence_bytes(bytes)
-                .map_err(|_| HardeningError::WrapperInvalid)
-        },
-    )
+    inspect_retained_active_wrapper(path, expected_name, retained, |bytes| {
+        EncodedProtectedWrapper::validate_authenticated_evidence_bytes(bytes)
+            .map_err(|_| HardeningError::WrapperInvalid)
+    })
 }
 
 fn confirm_retained_active_wrapper(
@@ -930,34 +948,42 @@ fn validate_active_wrapper_paths(
     })
 }
 
-fn validate_active_authentication_key_path<'a>(
+fn validate_authentication_key_path<'a>(
     paths: &'a InstallationEvidencePersistencePaths,
     validated: &ValidatedActiveWrapperPaths<'_>,
+    selection: InstallationEvidencePairSelection,
 ) -> Result<&'a Path, HardeningError> {
-    let active_authentication_key = paths.active_authentication_key.as_path();
-    if active_authentication_key
+    let authentication_key = match selection {
+        InstallationEvidencePairSelection::Active => paths.active_authentication_key.as_path(),
+        InstallationEvidencePairSelection::Staged => paths.staged_authentication_key.as_path(),
+    };
+    if authentication_key
         != validated
             .evidence_directory
-            .join(ACTIVE_AUTHENTICATION_KEY_FILENAME)
+            .join(selection.authentication_key_filename())
     {
         return Err(HardeningError::FinalPathMismatch);
     }
-    Ok(active_authentication_key)
+    Ok(authentication_key)
 }
 
-fn validate_active_authenticated_evidence_path<'a>(
+fn validate_authenticated_evidence_path<'a>(
     paths: &'a InstallationEvidencePersistencePaths,
     validated: &ValidatedActiveWrapperPaths<'_>,
+    selection: InstallationEvidencePairSelection,
 ) -> Result<&'a Path, HardeningError> {
-    let active_authenticated_evidence = paths.active_authenticated_evidence.as_path();
-    if active_authenticated_evidence
+    let authenticated_evidence = match selection {
+        InstallationEvidencePairSelection::Active => paths.active_authenticated_evidence.as_path(),
+        InstallationEvidencePairSelection::Staged => paths.staged_authenticated_evidence.as_path(),
+    };
+    if authenticated_evidence
         != validated
             .evidence_directory
-            .join(ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME)
+            .join(selection.authenticated_evidence_filename())
     {
         return Err(HardeningError::FinalPathMismatch);
     }
-    Ok(active_authenticated_evidence)
+    Ok(authenticated_evidence)
 }
 
 fn open_active_wrapper_retained_chain(
@@ -992,7 +1018,11 @@ fn load_active_authentication_key_wrapper(
     paths: &InstallationEvidencePersistencePaths,
 ) -> Result<ProtectedWrapperBytes, HardeningError> {
     let validated = validate_active_wrapper_paths(paths)?;
-    let active_authentication_key = validate_active_authentication_key_path(paths, &validated)?;
+    let active_authentication_key = validate_authentication_key_path(
+        paths,
+        &validated,
+        InstallationEvidencePairSelection::Active,
+    )?;
     let retained = open_active_wrapper_retained_chain(&validated)?;
     inspect_hardened_authentication_key_wrapper(
         active_authentication_key,
@@ -1005,8 +1035,11 @@ fn load_active_authenticated_evidence_wrapper(
     paths: &InstallationEvidencePersistencePaths,
 ) -> Result<ProtectedWrapperBytes, HardeningError> {
     let validated = validate_active_wrapper_paths(paths)?;
-    let active_authenticated_evidence =
-        validate_active_authenticated_evidence_path(paths, &validated)?;
+    let active_authenticated_evidence = validate_authenticated_evidence_path(
+        paths,
+        &validated,
+        InstallationEvidencePairSelection::Active,
+    )?;
     let retained = open_active_wrapper_retained_chain(&validated)?;
     inspect_hardened_authenticated_evidence_wrapper(
         active_authenticated_evidence,
@@ -1033,34 +1066,55 @@ fn load_active_installation_evidence_wrappers_with_hook<F>(
 where
     F: FnMut(ActivePairLoadPhase),
 {
-    let validated = validate_active_wrapper_paths(paths)?;
-    let active_authentication_key = validate_active_authentication_key_path(paths, &validated)?;
-    let active_authenticated_evidence =
-        validate_active_authenticated_evidence_path(paths, &validated)?;
-    let retained = open_active_wrapper_retained_chain(&validated)?;
-    enumerate_exact_active_wrapper_pair(validated.evidence_directory)?;
+    load_installation_evidence_wrappers_with_hook(
+        paths,
+        InstallationEvidencePairSelection::Active,
+        &mut hook,
+    )
+}
 
-    let authentication_key =
-        inspect_retained_active_authentication_key_wrapper(active_authentication_key, &retained)?;
+fn load_installation_evidence_wrappers_with_hook<F>(
+    paths: &InstallationEvidencePersistencePaths,
+    selection: InstallationEvidencePairSelection,
+    hook: &mut F,
+) -> Result<(ProtectedWrapperBytes, ProtectedWrapperBytes), HardeningError>
+where
+    F: FnMut(ActivePairLoadPhase),
+{
+    let validated = validate_active_wrapper_paths(paths)?;
+    let authentication_key = validate_authentication_key_path(paths, &validated, selection)?;
+    let authenticated_evidence =
+        validate_authenticated_evidence_path(paths, &validated, selection)?;
+    let authentication_key_filename = selection.authentication_key_filename();
+    let authenticated_evidence_filename = selection.authenticated_evidence_filename();
+    let retained = open_active_wrapper_retained_chain(&validated)?;
+    enumerate_exact_wrapper_pair(validated.evidence_directory, selection)?;
+
+    let authentication_key = inspect_retained_active_authentication_key_wrapper(
+        authentication_key,
+        &retained,
+        authentication_key_filename,
+    )?;
     hook(ActivePairLoadPhase::AfterKeyRead);
-    enumerate_exact_active_wrapper_pair(validated.evidence_directory)?;
+    enumerate_exact_wrapper_pair(validated.evidence_directory, selection)?;
 
     let authenticated_evidence = inspect_retained_active_authenticated_evidence_wrapper(
-        active_authenticated_evidence,
+        authenticated_evidence,
         &retained,
+        authenticated_evidence_filename,
     )?;
     hook(ActivePairLoadPhase::AfterEvidenceRead);
-    enumerate_exact_active_wrapper_pair(validated.evidence_directory)?;
+    enumerate_exact_wrapper_pair(validated.evidence_directory, selection)?;
 
     confirm_retained_active_wrapper(
-        active_authentication_key,
-        ACTIVE_AUTHENTICATION_KEY_FILENAME,
+        authentication_key_path(paths, selection),
+        authentication_key_filename,
         &retained[2],
         &authentication_key,
     )?;
     confirm_retained_active_wrapper(
-        active_authenticated_evidence,
-        ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+        authenticated_evidence_path(paths, selection),
+        authenticated_evidence_filename,
         &retained[2],
         &authenticated_evidence,
     )?;
@@ -1070,12 +1124,32 @@ where
 
     confirm_retained_directories(&validated, &retained)?;
     hook(ActivePairLoadPhase::BeforeFinalEnumeration);
-    enumerate_exact_active_wrapper_pair(validated.evidence_directory)?;
+    enumerate_exact_wrapper_pair(validated.evidence_directory, selection)?;
 
     Ok((
         authentication_key.into_bytes(),
         authenticated_evidence.into_bytes(),
     ))
+}
+
+fn authentication_key_path(
+    paths: &InstallationEvidencePersistencePaths,
+    selection: InstallationEvidencePairSelection,
+) -> &Path {
+    match selection {
+        InstallationEvidencePairSelection::Active => paths.active_authentication_key.as_path(),
+        InstallationEvidencePairSelection::Staged => paths.staged_authentication_key.as_path(),
+    }
+}
+
+fn authenticated_evidence_path(
+    paths: &InstallationEvidencePersistencePaths,
+    selection: InstallationEvidencePairSelection,
+) -> &Path {
+    match selection {
+        InstallationEvidencePairSelection::Active => paths.active_authenticated_evidence.as_path(),
+        InstallationEvidencePairSelection::Staged => paths.staged_authenticated_evidence.as_path(),
+    }
 }
 
 fn load_active_installation_evidence_wrappers(
@@ -1582,6 +1656,33 @@ pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(
 > {
     load_active_installation_evidence_wrappers(paths)
         .map_err(|_| ActiveInstallationEvidenceWrapperLoadError)
+}
+
+pub(super) fn load_staged_installation_evidence_wrapper_pair_coarse(
+    paths: &InstallationEvidencePersistencePaths,
+) -> Result<
+    LoadedStagedInstallationEvidenceWrapperPair,
+    StagedInstallationEvidenceWrapperPairLoadError,
+> {
+    let (authentication_key, authenticated_evidence) =
+        load_installation_evidence_wrappers_with_hook(
+            paths,
+            InstallationEvidencePairSelection::Staged,
+            &mut |_| {},
+        )
+        .map_err(|error| match error {
+            HardeningError::Missing
+            | HardeningError::PathUnavailable
+            | HardeningError::InspectionUnavailable
+            | HardeningError::ReadUnavailable => {
+                StagedInstallationEvidenceWrapperPairLoadError::Unavailable
+            }
+            _ => StagedInstallationEvidenceWrapperPairLoadError::Malformed,
+        })?;
+    Ok(LoadedStagedInstallationEvidenceWrapperPair::from_wrappers(
+        authentication_key,
+        authenticated_evidence,
+    ))
 }
 // PRODUCTION READ-HARDENING CORE END.
 
@@ -8639,7 +8740,7 @@ mod tests {
             .split_once("pub(crate) fn load_active_installation_evidence_wrapper_pair(")
             .unwrap()
             .1
-            .split_once("pub(crate) fn observe_production_root_fact(")
+            .split_once("pub(crate) struct LoadedStagedInstallationEvidenceWrapperPair")
             .unwrap()
             .0;
         for required in [
@@ -8658,7 +8759,7 @@ mod tests {
             .split_once("pub(super) fn load_active_installation_evidence_wrapper_pair_coarse(")
             .unwrap()
             .1
-            .split_once("// PRODUCTION READ-HARDENING CORE END")
+            .split_once("pub(super) fn load_staged_installation_evidence_wrapper_pair_coarse(")
             .unwrap()
             .0;
         assert_eq!(
@@ -8746,18 +8847,32 @@ mod tests {
                 .count(),
             1
         );
-        let paired = production
+        assert_eq!(
+            production
+                .matches("fn load_installation_evidence_wrappers_with_hook<")
+                .count(),
+            1
+        );
+        let active_facade = production
             .split_once("fn load_active_installation_evidence_wrappers_with_hook<")
             .unwrap()
             .1
-            .split_once("fn load_active_installation_evidence_wrappers(")
+            .split_once("fn load_installation_evidence_wrappers_with_hook<")
             .unwrap()
             .0;
-        let key_validation_position = paired
-            .find("validate_active_authentication_key_path(")
-            .unwrap();
+        assert!(active_facade.contains("InstallationEvidencePairSelection::Active"));
+        assert!(!active_facade.contains("InstallationEvidencePairSelection::Staged"));
+
+        let paired = production
+            .split_once("fn load_installation_evidence_wrappers_with_hook<")
+            .unwrap()
+            .1
+            .split_once("fn authentication_key_path(")
+            .unwrap()
+            .0;
+        let key_validation_position = paired.find("validate_authentication_key_path(").unwrap();
         let evidence_validation_position = paired
-            .find("validate_active_authenticated_evidence_path(")
+            .find("validate_authenticated_evidence_path(")
             .unwrap();
         let retained_chain_position = paired.find("open_active_wrapper_retained_chain(").unwrap();
         let key_position = paired
@@ -8775,8 +8890,8 @@ mod tests {
             "InstallationEvidencePersistencePaths",
             "ProtectedWrapperBytes",
             "validate_active_wrapper_paths(paths)?",
-            "validate_active_authentication_key_path(paths, &validated)?",
-            "validate_active_authenticated_evidence_path(paths, &validated)?",
+            "validate_authentication_key_path(paths, &validated, selection)?",
+            "validate_authenticated_evidence_path(paths, &validated, selection)?",
             "open_active_wrapper_retained_chain(&validated)?",
             "confirm_retained_active_wrapper(",
             "confirm_retained_directories(&validated, &retained)?",
@@ -8786,15 +8901,8 @@ mod tests {
                 "missing paired boundary: {required}"
             );
         }
-        assert_eq!(
-            paired
-                .matches("enumerate_exact_active_wrapper_pair(")
-                .count(),
-            4
-        );
+        assert_eq!(paired.matches("enumerate_exact_wrapper_pair(").count(), 4);
         for forbidden in [
-            "STAGED_AUTHENTICATION_KEY_FILENAME",
-            "STAGED_AUTHENTICATED_EVIDENCE_FILENAME",
             "resolve_installation_evidence_persistence_paths",
             "resolve_production_database_path",
             "CryptProtectData",
@@ -9078,7 +9186,8 @@ mod tests {
             "InstallationEvidencePersistencePaths",
             "ACTIVE_AUTHENTICATION_KEY_FILENAME",
             "validate_active_wrapper_paths",
-            "validate_active_authentication_key_path",
+            "validate_authentication_key_path",
+            "InstallationEvidencePairSelection::Active",
             "open_active_wrapper_retained_chain",
             "inspect_hardened_authentication_key_wrapper",
             "ProtectedWrapperBytes",
@@ -9328,7 +9437,8 @@ mod tests {
             "InstallationEvidencePersistencePaths",
             "ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME",
             "validate_active_wrapper_paths",
-            "validate_active_authenticated_evidence_path",
+            "validate_authenticated_evidence_path",
+            "InstallationEvidencePairSelection::Active",
             "open_active_wrapper_retained_chain",
             "inspect_hardened_authenticated_evidence_wrapper",
             "ProtectedWrapperBytes",

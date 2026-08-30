@@ -43,6 +43,8 @@ mod protected_blob_wrapper;
 mod protected_key_payload;
 #[cfg(windows)]
 mod staged_database_key_verification;
+#[cfg(windows)]
+mod staged_installation_evidence_verification;
 mod trusted_current_installation_evidence_assessment;
 mod trusted_current_installation_identity;
 #[cfg(windows)]
@@ -94,6 +96,12 @@ use protected_key_payload::EncodedProtectedKeyPayload;
 pub(crate) use staged_database_key_verification::{
     ReloadedStagedGenerationBoundDatabaseKeyForSetup, StagedDatabaseKeyVerificationError,
     verify_reloaded_staged_database_key_for_setup,
+};
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use staged_installation_evidence_verification::{
+    ReloadVerifiedStagedInstallationEvidenceForSetup, StagedInstallationEvidenceVerificationError,
+    verify_reloaded_staged_installation_evidence_for_setup,
 };
 pub(crate) use trusted_current_installation_evidence_assessment::TrustedCurrentInstallationEvidenceAssessment;
 #[cfg(windows)]
@@ -433,11 +441,11 @@ fn unprotect_authenticated_evidence_with(
 /// current-user DPAPI unprotections.
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
-fn unprotect_active_installation_evidence_wrappers(
+fn unprotect_installation_evidence_wrappers(
     authentication_key_wrapper: ProtectedWrapperBytes,
     authenticated_evidence_wrapper: ProtectedWrapperBytes,
 ) -> Result<(UnprotectedBytes, UnprotectedBytes), ProtectionStageError> {
-    unprotect_active_installation_evidence_wrappers_with(
+    unprotect_installation_evidence_wrappers_with(
         &WindowsCurrentUserDpapi,
         authentication_key_wrapper,
         authenticated_evidence_wrapper,
@@ -445,7 +453,7 @@ fn unprotect_active_installation_evidence_wrappers(
 }
 
 #[cfg(any(windows, test))]
-fn unprotect_active_installation_evidence_wrappers_with(
+fn unprotect_installation_evidence_wrappers_with(
     protector: &impl InMemoryProtector,
     authentication_key_wrapper: ProtectedWrapperBytes,
     authenticated_evidence_wrapper: ProtectedWrapperBytes,
@@ -544,7 +552,7 @@ fn recover_generation_matched_installation_evidence_from_wrappers(
     authenticated_evidence_wrapper: ProtectedWrapperBytes,
 ) -> Result<GenerationMatchedAuthenticatedEnvelopeV1, ProtectionStageError> {
     let (unprotected_authentication_key, unprotected_authenticated_evidence) =
-        unprotect_active_installation_evidence_wrappers(
+        unprotect_installation_evidence_wrappers(
             authentication_key_wrapper,
             authenticated_evidence_wrapper,
         )?;
@@ -1207,7 +1215,7 @@ mod tests {
     #[test]
     fn paired_wrapper_unprotection_returns_exact_owned_values_in_key_then_evidence_order() {
         let fake = FakeProtector::with_unprotected([vec![0x31, 0x32], vec![0x41, 0x42, 0x43]]);
-        let result = unprotect_active_installation_evidence_wrappers_with(
+        let result = unprotect_installation_evidence_wrappers_with(
             &fake,
             owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
             owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
@@ -1230,7 +1238,7 @@ mod tests {
         let malformed_key = owned_wrapper_bytes(&[0; 15]);
 
         assert_eq!(
-            unprotect_active_installation_evidence_wrappers_with(
+            unprotect_installation_evidence_wrappers_with(
                 &fake,
                 malformed_key,
                 owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
@@ -1246,7 +1254,7 @@ mod tests {
         let fake = FakeProtector::with_unprotected([vec![0x31], vec![0x41]]);
 
         assert_eq!(
-            unprotect_active_installation_evidence_wrappers_with(
+            unprotect_installation_evidence_wrappers_with(
                 &fake,
                 owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xa1]),
                 owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
@@ -1263,7 +1271,7 @@ mod tests {
             FakeProtector::with_unprotected_results([Err(ProtectorOperationError), Ok(vec![0x41])]);
 
         assert_eq!(
-            unprotect_active_installation_evidence_wrappers_with(
+            unprotect_installation_evidence_wrappers_with(
                 &fake,
                 owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
                 owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
@@ -1280,7 +1288,7 @@ mod tests {
         let malformed_evidence = owned_wrapper_bytes(&[0; 15]);
 
         assert_eq!(
-            unprotect_active_installation_evidence_wrappers_with(
+            unprotect_installation_evidence_wrappers_with(
                 &fake,
                 owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
                 malformed_evidence,
@@ -1296,7 +1304,7 @@ mod tests {
         let fake = FakeProtector::with_unprotected([vec![0x31], vec![0x41]]);
 
         assert_eq!(
-            unprotect_active_installation_evidence_wrappers_with(
+            unprotect_installation_evidence_wrappers_with(
                 &fake,
                 owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
                 owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xb2]),
@@ -1313,7 +1321,7 @@ mod tests {
             FakeProtector::with_unprotected_results([Ok(vec![0x31]), Err(ProtectorOperationError)]);
 
         assert_eq!(
-            unprotect_active_installation_evidence_wrappers_with(
+            unprotect_installation_evidence_wrappers_with(
                 &fake,
                 owned_wrapper(ProtectedObjectKind::AuthenticationKey, vec![0xa1]),
                 owned_wrapper(ProtectedObjectKind::AuthenticatedEvidence, vec![0xb2]),
@@ -1330,8 +1338,7 @@ mod tests {
     #[test]
     fn paired_wrapper_unprotection_source_proves_private_windows_boundary_and_secure_drop_path() {
         const SOURCE: &str = include_str!("mod.rs");
-        let definition_marker =
-            ["fn unprotect_active_installation_evidence_", "wrappers("].concat();
+        let definition_marker = ["fn unprotect_installation_evidence_", "wrappers("].concat();
         assert_eq!(SOURCE.matches(&definition_marker).count(), 1);
         let before_definition = SOURCE.split_once(&definition_marker).unwrap().0;
         let declaration_attributes = before_definition.rsplit_once("\n\n").unwrap().1;
@@ -1339,11 +1346,7 @@ mod tests {
         assert!(declaration_attributes.contains("#[cfg_attr(test, allow(dead_code))]"));
         assert!(!declaration_attributes.contains("pub"));
 
-        let injected_marker = [
-            "fn unprotect_active_installation_evidence_",
-            "wrappers_with(",
-        ]
-        .concat();
+        let injected_marker = ["fn unprotect_installation_evidence_", "wrappers_with("].concat();
         let paired_body = SOURCE
             .split_once(&injected_marker)
             .unwrap()
@@ -1778,7 +1781,7 @@ mod tests {
         );
 
         let stages = [
-            "unprotect_active_installation_evidence_wrappers(",
+            "unprotect_installation_evidence_wrappers(",
             "decode_unprotected_installation_evidence_key_material(",
             "authenticate_unprotected_installation_evidence(",
             "match_authenticated_installation_evidence_generation(",
