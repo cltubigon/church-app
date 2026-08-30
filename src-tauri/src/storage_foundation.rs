@@ -31,9 +31,17 @@ pub(crate) const ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME: &str =
 pub(crate) const ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME: &str =
     "authenticated-freshness-anchor.dpapi";
 #[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME: &str =
+    "anchor-authentication-key.dpapi.stage";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME: &str =
+    "authenticated-freshness-anchor.dpapi.stage";
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const DATABASE_KEY_DIRECTORY_NAME: &str = "database-key";
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const ACTIVE_DATABASE_KEY_FILENAME: &str = "active-database-key.dpapi";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const STAGED_DATABASE_KEY_FILENAME: &str = "active-database-key.dpapi.stage";
 
 const DEVELOPMENT_STORAGE_IDENTITY: &str = "io.github.cltubigon.churchapp.development";
 const AUTOMATED_TEST_STORAGE_IDENTITY: &str = "church-app-automated-tests";
@@ -144,8 +152,11 @@ redacted_persistence_path!(StagedDatabasePath);
 redacted_persistence_path!(FreshnessAnchorDirectoryPath);
 redacted_persistence_path!(ActiveAnchorAuthenticationKeyPath);
 redacted_persistence_path!(ActiveAuthenticatedFreshnessAnchorPath);
+redacted_persistence_path!(StagedAnchorAuthenticationKeyPath);
+redacted_persistence_path!(StagedAuthenticatedFreshnessAnchorPath);
 redacted_persistence_path!(DatabaseKeyDirectoryPath);
 redacted_persistence_path!(ActiveDatabaseKeyPath);
+redacted_persistence_path!(StagedDatabaseKeyPath);
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Eq, PartialEq)]
@@ -171,6 +182,8 @@ pub(crate) struct FreshnessAnchorPersistencePaths {
     pub(crate) freshness_anchor_directory: FreshnessAnchorDirectoryPath,
     pub(crate) active_anchor_authentication_key: ActiveAnchorAuthenticationKeyPath,
     pub(crate) active_authenticated_freshness_anchor: ActiveAuthenticatedFreshnessAnchorPath,
+    pub(crate) staged_anchor_authentication_key: StagedAnchorAuthenticationKeyPath,
+    pub(crate) staged_authenticated_freshness_anchor: StagedAuthenticatedFreshnessAnchorPath,
 }
 
 impl fmt::Debug for FreshnessAnchorPersistencePaths {
@@ -184,6 +197,7 @@ impl fmt::Debug for FreshnessAnchorPersistencePaths {
 pub(crate) struct DatabaseKeyPersistencePaths {
     pub(crate) database_key_directory: DatabaseKeyDirectoryPath,
     pub(crate) active_database_key: ActiveDatabaseKeyPath,
+    pub(crate) staged_database_key: StagedDatabaseKeyPath,
 }
 
 impl fmt::Debug for DatabaseKeyPersistencePaths {
@@ -335,6 +349,12 @@ pub(crate) fn freshness_anchor_persistence_paths(
         active_authenticated_freshness_anchor: ActiveAuthenticatedFreshnessAnchorPath(
             freshness_anchor_directory.join(ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME),
         ),
+        staged_anchor_authentication_key: StagedAnchorAuthenticationKeyPath(
+            freshness_anchor_directory.join(STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME),
+        ),
+        staged_authenticated_freshness_anchor: StagedAuthenticatedFreshnessAnchorPath(
+            freshness_anchor_directory.join(STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME),
+        ),
     }
 }
 
@@ -348,6 +368,9 @@ pub(crate) fn database_key_persistence_paths(
         database_key_directory: DatabaseKeyDirectoryPath(database_key_directory.clone()),
         active_database_key: ActiveDatabaseKeyPath(
             database_key_directory.join(ACTIVE_DATABASE_KEY_FILENAME),
+        ),
+        staged_database_key: StagedDatabaseKeyPath(
+            database_key_directory.join(STAGED_DATABASE_KEY_FILENAME),
         ),
     }
 }
@@ -411,6 +434,14 @@ mod tests {
             anchor_directory.join(ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME)
         );
         assert_eq!(
+            paths.staged_anchor_authentication_key.as_path(),
+            anchor_directory.join(STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME)
+        );
+        assert_eq!(
+            paths.staged_authenticated_freshness_anchor.as_path(),
+            anchor_directory.join(STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME)
+        );
+        assert_eq!(
             paths.freshness_anchor_directory.as_path().parent(),
             Some(root)
         );
@@ -425,13 +456,35 @@ mod tests {
                 .parent(),
             Some(anchor_directory.as_path())
         );
+        assert_eq!(
+            paths.staged_anchor_authentication_key.as_path().parent(),
+            Some(anchor_directory.as_path())
+        );
+        assert_eq!(
+            paths
+                .staged_authenticated_freshness_anchor
+                .as_path()
+                .parent(),
+            Some(anchor_directory.as_path())
+        );
 
-        for active_path in [
+        for path in [
             paths.active_anchor_authentication_key.as_path(),
             paths.active_authenticated_freshness_anchor.as_path(),
+            paths.staged_anchor_authentication_key.as_path(),
+            paths.staged_authenticated_freshness_anchor.as_path(),
         ] {
-            assert!(active_path.starts_with(root));
+            assert!(path.starts_with(root));
         }
+
+        assert_ne!(
+            paths.active_anchor_authentication_key.as_path(),
+            paths.staged_anchor_authentication_key.as_path()
+        );
+        assert_ne!(
+            paths.active_authenticated_freshness_anchor.as_path(),
+            paths.staged_authenticated_freshness_anchor.as_path()
+        );
     }
 
     fn assert_database_key_paths(root: &Path) {
@@ -443,10 +496,22 @@ mod tests {
             paths.active_database_key.as_path(),
             directory.join(ACTIVE_DATABASE_KEY_FILENAME)
         );
+        assert_eq!(
+            paths.staged_database_key.as_path(),
+            directory.join(STAGED_DATABASE_KEY_FILENAME)
+        );
         assert_eq!(paths.database_key_directory.as_path().parent(), Some(root));
         assert_eq!(
             paths.active_database_key.as_path().parent(),
             Some(directory.as_path())
+        );
+        assert_eq!(
+            paths.staged_database_key.as_path().parent(),
+            Some(directory.as_path())
+        );
+        assert_ne!(
+            paths.active_database_key.as_path(),
+            paths.staged_database_key.as_path()
         );
     }
 
@@ -454,6 +519,10 @@ mod tests {
     fn database_key_fixed_names_and_path_layout_are_exact() {
         assert_eq!(DATABASE_KEY_DIRECTORY_NAME, "database-key");
         assert_eq!(ACTIVE_DATABASE_KEY_FILENAME, "active-database-key.dpapi");
+        assert_eq!(
+            STAGED_DATABASE_KEY_FILENAME,
+            "active-database-key.dpapi.stage"
+        );
 
         assert_database_key_paths(Path::new(r"X:\synthetic-local-app-data\church-app"));
         assert_database_key_paths(Path::new("synthetic/portable/church-app"));
@@ -473,6 +542,7 @@ mod tests {
         assert!(!root.exists());
         assert!(!paths.database_key_directory.as_path().exists());
         assert!(!paths.active_database_key.as_path().exists());
+        assert!(!paths.staged_database_key.as_path().exists());
     }
 
     #[test]
@@ -481,6 +551,7 @@ mod tests {
         for debug in [
             format!("{:?}", paths.database_key_directory),
             format!("{:?}", paths.active_database_key),
+            format!("{:?}", paths.staged_database_key),
             format!("{paths:?}"),
         ] {
             assert!(debug.contains("[REDACTED]"));
@@ -488,6 +559,7 @@ mod tests {
                 "sensitive-synthetic-root",
                 DATABASE_KEY_DIRECTORY_NAME,
                 ACTIVE_DATABASE_KEY_FILENAME,
+                STAGED_DATABASE_KEY_FILENAME,
             ] {
                 assert!(!debug.contains(excluded));
             }
@@ -495,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn database_key_aggregate_has_only_directory_and_active_fields() {
+    fn database_key_aggregate_has_exactly_the_approved_fields() {
         const SOURCE: &str = include_str!("storage_foundation.rs");
         let aggregate = SOURCE
             .split("pub(crate) struct DatabaseKeyPersistencePaths")
@@ -506,17 +578,15 @@ mod tests {
             })
             .expect("database-key aggregate should remain a distinct definition");
 
-        assert_eq!(aggregate.matches("pub(crate)").count(), 2);
-        assert!(aggregate.contains("database_key_directory: DatabaseKeyDirectoryPath"));
-        assert!(aggregate.contains("active_database_key: ActiveDatabaseKeyPath"));
-        for excluded in [
-            "staged",
-            "previous",
-            "backup",
-            "temporary",
-            "legacy",
-            "recovery",
+        assert_eq!(aggregate.matches("pub(crate)").count(), 3);
+        for approved in [
+            "database_key_directory: DatabaseKeyDirectoryPath",
+            "active_database_key: ActiveDatabaseKeyPath",
+            "staged_database_key: StagedDatabaseKeyPath",
         ] {
+            assert!(aggregate.contains(approved));
+        }
+        for excluded in ["previous", "backup", "temporary", "legacy", "recovery"] {
             assert!(!aggregate.contains(excluded));
         }
     }
@@ -583,6 +653,14 @@ mod tests {
             ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
             "authenticated-freshness-anchor.dpapi"
         );
+        assert_eq!(
+            STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            "anchor-authentication-key.dpapi.stage"
+        );
+        assert_eq!(
+            STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+            "authenticated-freshness-anchor.dpapi.stage"
+        );
         assert_ne!(
             ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
             ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME
@@ -611,15 +689,17 @@ mod tests {
             evidence_directory
         );
 
-        for active_path in [
+        for path in [
             anchor_paths.active_anchor_authentication_key.as_path(),
             anchor_paths.active_authenticated_freshness_anchor.as_path(),
+            anchor_paths.staged_anchor_authentication_key.as_path(),
+            anchor_paths.staged_authenticated_freshness_anchor.as_path(),
         ] {
-            assert_eq!(active_path.parent(), Some(anchor_directory.as_path()));
-            assert!(!active_path.starts_with(&evidence_directory));
-            assert_ne!(active_path, database);
-            assert_ne!(active_path, staged_database);
-            assert!(active_path.starts_with(root));
+            assert_eq!(path.parent(), Some(anchor_directory.as_path()));
+            assert!(!path.starts_with(&evidence_directory));
+            assert_ne!(path, database);
+            assert_ne!(path, staged_database);
+            assert!(path.starts_with(root));
         }
     }
 
@@ -630,6 +710,8 @@ mod tests {
             format!("{:?}", paths.freshness_anchor_directory),
             format!("{:?}", paths.active_anchor_authentication_key),
             format!("{:?}", paths.active_authenticated_freshness_anchor),
+            format!("{:?}", paths.staged_anchor_authentication_key),
+            format!("{:?}", paths.staged_authenticated_freshness_anchor),
             format!("{paths:?}"),
         ];
 
@@ -640,6 +722,8 @@ mod tests {
                 FRESHNESS_ANCHOR_DIRECTORY_NAME,
                 ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
                 ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+                STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+                STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
             ] {
                 assert!(!debug.contains(excluded));
             }
@@ -647,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn freshness_anchor_aggregate_has_exactly_the_three_approved_fields() {
+    fn freshness_anchor_aggregate_has_exactly_the_approved_fields() {
         const SOURCE: &str = include_str!("storage_foundation.rs");
         let aggregate = SOURCE
             .split("pub(crate) struct FreshnessAnchorPersistencePaths")
@@ -658,18 +742,19 @@ mod tests {
             })
             .expect("freshness-anchor aggregate should remain a distinct definition");
 
-        assert_eq!(aggregate.matches("pub(crate)").count(), 3);
+        assert_eq!(aggregate.matches("pub(crate)").count(), 5);
         for approved in [
             "freshness_anchor_directory: FreshnessAnchorDirectoryPath",
             "active_anchor_authentication_key: ActiveAnchorAuthenticationKeyPath",
             "active_authenticated_freshness_anchor: ActiveAuthenticatedFreshnessAnchorPath",
+            "staged_anchor_authentication_key: StagedAnchorAuthenticationKeyPath",
+            "staged_authenticated_freshness_anchor: StagedAuthenticatedFreshnessAnchorPath",
         ] {
             assert!(aggregate.contains(approved));
         }
         for excluded in [
             "database",
             "evidence",
-            "stage",
             "previous",
             "retained",
             "intent",
@@ -683,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn freshness_anchor_contract_declares_only_the_three_approved_path_owners() {
+    fn freshness_anchor_contract_declares_only_the_approved_path_owners() {
         const SOURCE: &str = include_str!("storage_foundation.rs");
         let production_source = SOURCE
             .split("#[cfg(test)]")
@@ -694,6 +779,8 @@ mod tests {
             "redacted_persistence_path!(FreshnessAnchorDirectoryPath);",
             "redacted_persistence_path!(ActiveAnchorAuthenticationKeyPath);",
             "redacted_persistence_path!(ActiveAuthenticatedFreshnessAnchorPath);",
+            "redacted_persistence_path!(StagedAnchorAuthenticationKeyPath);",
+            "redacted_persistence_path!(StagedAuthenticatedFreshnessAnchorPath);",
         ] {
             assert_eq!(production_source.matches(approved).count(), 1);
         }
@@ -705,10 +792,9 @@ mod tests {
                     line.contains("FreshnessAnchor") || line.contains("AnchorAuthenticationKeyPath")
                 })
                 .count(),
-            3
+            5
         );
         for excluded in [
-            "StagedFreshnessAnchor",
             "PreviousFreshnessAnchor",
             "RetainedFreshnessAnchor",
             "FreshnessAnchorPublicationIntent",
