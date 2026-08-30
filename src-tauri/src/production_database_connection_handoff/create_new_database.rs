@@ -61,6 +61,13 @@ use super::{
     sqlite_main_database_handle,
 };
 
+mod prepared_first_time_setup_publication_materials;
+
+pub(crate) use prepared_first_time_setup_publication_materials::{
+    PreparedFirstTimeSetupPublicationMaterials, PreparedFirstTimeSetupPublicationMaterialsError,
+    prepare_first_time_setup_publication_materials,
+};
+
 const MAIN_DATABASE_NAME: &str = "main";
 const WIN32_VFS_NAME: &str = "win32";
 const PARENT_ACCESS: u32 = FILE_READ_ATTRIBUTES;

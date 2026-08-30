@@ -61,7 +61,9 @@ pub(crate) use first_time_setup_database_key_binding::protect_first_time_setup_d
 #[allow(unused_imports)]
 pub(crate) use first_time_setup_database_key_binding::{
     FirstTimeSetupDatabaseKeyBinding, FirstTimeSetupDatabaseKeyProtectionError,
-    ProtectedFirstTimeSetupDatabaseKeyBinding, bind_generated_database_key_for_first_time_setup,
+    ProtectedFirstTimeSetupDatabaseKeyBinding,
+    ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial,
+    bind_generated_database_key_for_first_time_setup,
 };
 #[cfg(windows)]
 #[allow(unused_imports)]

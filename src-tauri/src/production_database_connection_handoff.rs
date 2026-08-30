@@ -57,10 +57,11 @@ pub(crate) use create_new_database::{
     NewProductionDatabaseIntegrityValidationCloseFailure,
     NewProductionDatabaseIntegrityValidationCloseRetryOutcome,
     NewProductionDatabaseIntegrityValidationError, NewlyCreatedKeyedProductionDatabaseConnection,
+    PreparedFirstTimeSetupPublicationMaterials, PreparedFirstTimeSetupPublicationMaterialsError,
     ValidatedInitializedNewProductionDatabaseConnection,
     close_and_preserve_integrity_validated_initialized_new_production_database,
     create_new_keyed_production_database, initialize_new_production_database,
-    validate_initialized_new_production_database,
+    prepare_first_time_setup_publication_materials, validate_initialized_new_production_database,
     validate_initialized_new_production_database_integrity,
 };
 

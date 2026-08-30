@@ -58,6 +58,29 @@ pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyBinding {
 }
 
 impl ProtectedFirstTimeSetupDatabaseKeyBinding {
+    pub(crate) fn into_database_creation_key_and_publication_material(
+        self,
+    ) -> (
+        GenerationBoundDatabaseKey,
+        ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial,
+    ) {
+        let Self {
+            generation_bound_database_key,
+            installation_identifier,
+            database_key_generation_identifier,
+            protected_database_key_wrapper,
+        } = self;
+
+        (
+            generation_bound_database_key,
+            ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {
+                installation_identifier,
+                database_key_generation_identifier,
+                protected_database_key_wrapper,
+            },
+        )
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -78,6 +101,37 @@ impl ProtectedFirstTimeSetupDatabaseKeyBinding {
 impl fmt::Debug for ProtectedFirstTimeSetupDatabaseKeyBinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ProtectedFirstTimeSetupDatabaseKeyBinding([REDACTED])")
+    }
+}
+
+/// Opaque setup-only publication material produced from one canonical
+/// protected database-key binding. It grants no key-use, persistence,
+/// publication, database, setup-completion, startup, or operational authority.
+pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {
+    installation_identifier: InstallationIdentifier,
+    database_key_generation_identifier: DatabaseKeyGenerationIdentifier,
+    protected_database_key_wrapper: EncodedProtectedWrapper,
+}
+
+impl ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        InstallationIdentifier,
+        DatabaseKeyGenerationIdentifier,
+        EncodedProtectedWrapper,
+    ) {
+        (
+            self.installation_identifier,
+            self.database_key_generation_identifier,
+            self.protected_database_key_wrapper,
+        )
+    }
+}
+
+impl fmt::Debug for ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial([REDACTED])")
     }
 }
 
@@ -139,6 +193,22 @@ fn protect_first_time_setup_database_key_binding_using(
         database_key_generation_identifier,
         protected_database_key_wrapper,
     })
+}
+
+#[cfg(test)]
+impl ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {
+    pub(crate) fn lineage_for_test(
+        &self,
+    ) -> (InstallationIdentifier, DatabaseKeyGenerationIdentifier) {
+        (
+            self.installation_identifier,
+            self.database_key_generation_identifier,
+        )
+    }
+
+    pub(crate) fn protected_wrapper_for_test(&self) -> &EncodedProtectedWrapper {
+        &self.protected_database_key_wrapper
+    }
 }
 
 #[cfg(test)]
@@ -282,7 +352,7 @@ mod tests {
     #[test]
     fn handoff_surface_is_exact_private_owned_and_capability_narrow() {
         const SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
-        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
         let declaration = production
             .split_once("pub(crate) struct FirstTimeSetupDatabaseKeyBinding {")
             .unwrap()
@@ -367,7 +437,7 @@ mod tests {
     #[test]
     fn production_binding_is_infallible_borrowed_and_typed_movement_only() {
         const SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
-        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
         let signature = "pub(crate) fn bind_generated_database_key_for_first_time_setup(\n    authorization: &FirstTimeSetupAuthorization,\n    material: GeneratedDatabaseKeyMaterial,\n    installation: GeneratedInstallationIdentifier,\n) -> FirstTimeSetupDatabaseKeyBinding";
         let transition = production.split_once(signature).unwrap().1;
 
@@ -431,7 +501,10 @@ mod tests {
     fn setup_seam_is_private_setup_named_and_startup_binding_remains_independent() {
         const SETUP_SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
         const BOUND_SOURCE: &str = include_str!("generation_bound_database_key.rs");
-        let setup_production = SETUP_SOURCE.split("#[cfg(test)]").next().unwrap();
+        let setup_production = SETUP_SOURCE
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
         let bound_production = BOUND_SOURCE.split("#[cfg(test)]").next().unwrap();
         let seam = "pub(super) fn from_first_time_setup_generated_key(key: DatabaseKey) -> Self";
         let startup_signature = "pub(crate) fn bind_database_key_candidate_to_trusted_installation_evidence(\n    candidate: DecodedDatabaseKeyCandidate,\n    assessment: &TrustedCurrentInstallationEvidenceAssessment,\n) -> Result<GenerationBoundDatabaseKey, DatabaseKeyGenerationBindingError>";
@@ -487,7 +560,7 @@ mod tests {
     #[test]
     fn protected_handoff_surface_is_exact_owned_redacted_and_capability_narrow() {
         const SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
-        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
         let declaration = production
             .split_once("pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyBinding {")
             .unwrap()
@@ -543,7 +616,13 @@ mod tests {
         }
 
         let signature = "pub(crate) fn into_parts(\n        self,\n    ) -> (\n        GenerationBoundDatabaseKey,\n        InstallationIdentifier,\n        DatabaseKeyGenerationIdentifier,\n        EncodedProtectedWrapper,\n    )";
-        let decomposition = protected_surface.split_once(signature).unwrap().1;
+        let decomposition = protected_surface
+            .split_once(signature)
+            .unwrap()
+            .1
+            .split_once("\n}\n\nimpl fmt::Debug for ProtectedFirstTimeSetupDatabaseKeyBinding")
+            .unwrap()
+            .0;
         for field in [
             "self.generation_bound_database_key",
             "self.installation_identifier",
@@ -566,9 +645,138 @@ mod tests {
     }
 
     #[test]
+    fn protected_publication_material_is_exact_sealed_redacted_and_nonduplicable() {
+        const SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let declaration = production
+            .split_once("pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let fields: Vec<_> = declaration
+            .lines()
+            .filter(|line| line.contains(':'))
+            .collect();
+
+        assert_eq!(
+            fields,
+            [
+                "    installation_identifier: InstallationIdentifier,",
+                "    database_key_generation_identifier: DatabaseKeyGenerationIdentifier,",
+                "    protected_database_key_wrapper: EncodedProtectedWrapper,",
+            ]
+        );
+        assert!(!declaration.contains("pub"));
+        assert!(needs_drop::<
+            ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial,
+        >());
+
+        let surface = production
+            .split_once("pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {")
+            .unwrap()
+            .1
+            .split_once("#[derive(Clone, Copy, Eq, PartialEq)]")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "#[derive(",
+            "impl Clone",
+            "impl Copy",
+            "Serialize",
+            "Deserialize",
+            "pub(crate) fn new",
+            "pub(crate) fn from_parts",
+            "GenerationBoundDatabaseKey",
+            "DatabaseKey,",
+            "path:",
+            "PathBuf",
+            "File",
+            "Connection",
+            "authorization",
+            "publication_state",
+        ] {
+            assert!(
+                !surface.contains(forbidden),
+                "publication material unexpectedly exposes forbidden surface: {forbidden}"
+            );
+        }
+        assert_eq!(
+            production
+                .lines()
+                .filter(|line| {
+                    line.trim() == "ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {"
+                })
+                .count(),
+            1,
+            "the canonical split must be the only publication-material struct literal"
+        );
+        assert!(production.contains(
+            "formatter.write_str(\"ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial([REDACTED])\")"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_binding_split_directly_moves_creation_key_and_exact_publication_material() {
+        const SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let signature = "pub(crate) fn into_database_creation_key_and_publication_material(\n        self,\n    ) -> (\n        GenerationBoundDatabaseKey,\n        ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial,\n    )";
+        let split = production
+            .split_once(signature)
+            .unwrap()
+            .1
+            .split_once("    pub(crate) fn into_parts(")
+            .unwrap()
+            .0;
+
+        for field in [
+            "generation_bound_database_key",
+            "installation_identifier",
+            "database_key_generation_identifier",
+            "protected_database_key_wrapper",
+        ] {
+            assert_eq!(
+                split.matches(field).count(),
+                2,
+                "the split must destructure and move {field} exactly once"
+            );
+        }
+        for forbidden in [
+            ".clone()",
+            "protect_database_key",
+            "unprotect",
+            "from_bytes",
+            "parse",
+            "serialize",
+            "getrandom",
+            "std::fs",
+        ] {
+            assert!(!split.contains(forbidden));
+        }
+
+        let authorization = authorization();
+        let protected = protect_first_time_setup_database_key_binding(binding(&authorization))
+            .expect("CurrentUser DPAPI protection should succeed");
+        let expected_wrapper = protected.protected_database_key_wrapper.as_bytes().to_vec();
+        let (creation_key, publication_material) =
+            protected.into_database_creation_key_and_publication_material();
+        creation_key.expose_key(|key| key.expose_bytes(|bytes| assert_eq!(bytes.len(), 32)));
+        assert_eq!(
+            publication_material.protected_wrapper_for_test().as_bytes(),
+            expected_wrapper
+        );
+        assert_eq!(
+            format!("{publication_material:?}"),
+            "ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial([REDACTED])"
+        );
+    }
+
+    #[test]
     fn production_transition_has_exact_input_and_one_canonical_protection_call() {
         const SOURCE: &str = include_str!("first_time_setup_database_key_binding.rs");
-        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
         let signature = "pub(crate) fn protect_first_time_setup_database_key_binding(\n    binding: FirstTimeSetupDatabaseKeyBinding,\n) -> Result<ProtectedFirstTimeSetupDatabaseKeyBinding, FirstTimeSetupDatabaseKeyProtectionError>";
         let transition = production.split_once(signature).unwrap().1;
 
