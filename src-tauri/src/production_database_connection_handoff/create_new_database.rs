@@ -62,10 +62,16 @@ use super::{
 };
 
 mod prepared_first_time_setup_publication_materials;
+mod protected_artifact_directories;
 
 pub(crate) use prepared_first_time_setup_publication_materials::{
     PreparedFirstTimeSetupPublicationMaterials, PreparedFirstTimeSetupPublicationMaterialsError,
     prepare_first_time_setup_publication_materials,
+};
+pub(crate) use protected_artifact_directories::{
+    FirstTimeSetupProtectedArtifactDirectoryPreparationError,
+    PreparedFirstTimeSetupProtectedArtifactDirectories,
+    prepare_first_time_setup_protected_artifact_directories,
 };
 
 const MAIN_DATABASE_NAME: &str = "main";
@@ -1583,7 +1589,7 @@ fn finish_retained_creation(
     let leaf_initial = query_observation(&leaf_handle)
         .and_then(|observation| validate_created_leaf(&observation).map(|_| observation))
         .map_err(|_| NewProductionDatabaseCreationError::ConstructionFailedAfterCreation)?;
-    exact_child(&parent.initial, &leaf_initial)
+    exact_named_child(&parent.initial, &leaf_initial, PRODUCTION_DATABASE_FILENAME)
         .map_err(|_| NewProductionDatabaseCreationError::ConstructionFailedAfterCreation)?;
     stable_parent(&parent)
         .map_err(|_| NewProductionDatabaseCreationError::ConstructionFailedAfterCreation)?;
@@ -1785,13 +1791,17 @@ fn validate_created_leaf(observation: &RetainedObservation) -> Result<(), ()> {
     Ok(())
 }
 
-fn exact_child(parent: &RetainedObservation, leaf: &RetainedObservation) -> Result<(), ()> {
+fn exact_named_child(
+    parent: &RetainedObservation,
+    child: &RetainedObservation,
+    expected_name: &str,
+) -> Result<(), ()> {
     let parent_volume = volume_prefix(&parent.final_path)?;
-    let leaf_volume = volume_prefix(&leaf.final_path)?;
-    if parent.identity.volume_serial != leaf.identity.volume_serial
+    let child_volume = volume_prefix(&child.final_path)?;
+    if parent.identity.volume_serial != child.identity.volume_serial
         || !parent_volume
             .iter()
-            .zip(leaf_volume)
+            .zip(child_volume)
             .all(|(left, right)| fold_ascii(*left) == fold_ascii(*right))
     {
         return Err(());
@@ -1800,13 +1810,13 @@ fn exact_child(parent: &RetainedObservation, leaf: &RetainedObservation) -> Resu
     if expected.last() != Some(&(b'\\' as u16)) {
         expected.push(b'\\' as u16);
     }
-    expected.extend(PRODUCTION_DATABASE_FILENAME.encode_utf16());
-    if expected.len() != leaf.final_path.len()
-        || expected[..11] != leaf.final_path[..11]
-        || expected[47..] != leaf.final_path[47..]
+    expected.extend(expected_name.encode_utf16());
+    if expected.len() != child.final_path.len()
+        || expected[..11] != child.final_path[..11]
+        || expected[47..] != child.final_path[47..]
         || !expected[11..47]
             .iter()
-            .zip(&leaf.final_path[11..47])
+            .zip(&child.final_path[11..47])
             .all(|(left, right)| fold_ascii(*left) == fold_ascii(*right))
     {
         return Err(());
@@ -1870,7 +1880,7 @@ fn revalidate_retained_creation(retained: &RetainedCreatedDatabase) -> Result<()
     let leaf = query_observation(&retained.leaf.handle)?;
     validate_parent(&parent)?;
     validate_created_leaf(&leaf)?;
-    exact_child(&parent, &leaf)?;
+    exact_named_child(&parent, &leaf, PRODUCTION_DATABASE_FILENAME)?;
     if parent != retained.parent.initial || leaf != retained.leaf.initial {
         return Err(());
     }

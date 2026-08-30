@@ -43,6 +43,7 @@ mod live_metadata_and_header_validation;
 #[allow(unused_imports)]
 pub(crate) use create_new_database::{
     ClosedIntegrityValidatedInitializedNewProductionDatabase,
+    FirstTimeSetupProtectedArtifactDirectoryPreparationError,
     InitializedNewProductionDatabaseConnection,
     IntegrityValidatedInitializedNewProductionDatabaseConnection,
     NewProductionDatabaseCloseAndPreserveFailure, NewProductionDatabaseCloseAndPreserveOutcome,
@@ -57,10 +58,12 @@ pub(crate) use create_new_database::{
     NewProductionDatabaseIntegrityValidationCloseFailure,
     NewProductionDatabaseIntegrityValidationCloseRetryOutcome,
     NewProductionDatabaseIntegrityValidationError, NewlyCreatedKeyedProductionDatabaseConnection,
-    PreparedFirstTimeSetupPublicationMaterials, PreparedFirstTimeSetupPublicationMaterialsError,
+    PreparedFirstTimeSetupProtectedArtifactDirectories, PreparedFirstTimeSetupPublicationMaterials,
+    PreparedFirstTimeSetupPublicationMaterialsError,
     ValidatedInitializedNewProductionDatabaseConnection,
     close_and_preserve_integrity_validated_initialized_new_production_database,
     create_new_keyed_production_database, initialize_new_production_database,
+    prepare_first_time_setup_protected_artifact_directories,
     prepare_first_time_setup_publication_materials, validate_initialized_new_production_database,
     validate_initialized_new_production_database_integrity,
 };
