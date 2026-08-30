@@ -13,6 +13,7 @@ use std::fmt;
 
 use crate::{
     database_key::DatabaseKey, database_key_protected_payload::DecodedDatabaseKeyCandidate,
+    database_metadata_contract::DatabaseMetadataContractV1,
 };
 
 use super::TrustedCurrentInstallationEvidenceAssessment;
@@ -64,6 +65,20 @@ pub(crate) fn bind_database_key_candidate_to_trusted_installation_evidence(
     }
 }
 
+pub(super) fn bind_reloaded_staged_database_key_candidate_for_setup(
+    candidate: DecodedDatabaseKeyCandidate,
+    metadata: &DatabaseMetadataContractV1,
+) -> Result<GenerationBoundDatabaseKey, DatabaseKeyGenerationBindingError> {
+    let (key, candidate_generation_identifier) = candidate.into_parts();
+    let expected_generation_identifier = metadata.database_key_generation_identifier();
+
+    if candidate_generation_identifier == expected_generation_identifier {
+        Ok(GenerationBoundDatabaseKey { key })
+    } else {
+        Err(DatabaseKeyGenerationBindingError::GenerationMismatch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::{needs_drop, size_of};
@@ -71,11 +86,14 @@ mod tests {
     use super::*;
     use crate::{
         database_key_protected_payload::EncodedDatabaseKeyPayload,
+        database_metadata_contract::{DatabaseCreationTimestamp, DatabaseMetadataContractV1},
         installation_evidence_contract::{
-            DatabaseKeyGenerationIdentifier, PERMANENT_APPLICATION_IDENTIFIER,
+            DatabaseKeyGenerationIdentifier, InstallationGeneration, InstallationIdentifier,
+            PERMANENT_APPLICATION_IDENTIFIER, PermanentApplicationIdentifier,
+            RecoveryOrReplacementGeneration, SetupPublicationIdentifier,
             StructurallyValidatedInstallationEvidence, UnvalidatedInstallationEvidenceContract,
         },
-        storage_foundation::APPLICATION_DATABASE_FORMAT_IDENTITY,
+        storage_foundation::{APPLICATION_DATABASE_FORMAT_IDENTITY, ParishIdentifier},
     };
 
     const MATCHING_GENERATION: [u8; 16] = [0x31; 16];
@@ -119,6 +137,19 @@ mod tests {
         let payload = EncodedDatabaseKeyPayload::encode(&key, identifier(generation));
         DecodedDatabaseKeyCandidate::parse(payload.as_bytes())
             .expect("synthetic database-key payload must decode")
+    }
+
+    fn metadata(generation: [u8; 16]) -> DatabaseMetadataContractV1 {
+        DatabaseMetadataContractV1::new(
+            PermanentApplicationIdentifier::canonical(),
+            ParishIdentifier::from_bytes([0x11; 16]).unwrap(),
+            InstallationIdentifier::from_bytes([0x21; 16]).unwrap(),
+            InstallationGeneration::new(7).unwrap(),
+            RecoveryOrReplacementGeneration::new(11).unwrap(),
+            identifier(generation),
+            SetupPublicationIdentifier::from_bytes([0x61; 16]).unwrap(),
+            DatabaseCreationTimestamp::from_unix_milliseconds(1_800_000_000_000),
+        )
     }
 
     #[test]
@@ -224,6 +255,26 @@ mod tests {
     }
 
     #[test]
+    fn staged_setup_binding_compares_only_prepared_metadata_key_generation() {
+        let metadata = metadata(MATCHING_GENERATION);
+        let bound = bind_reloaded_staged_database_key_candidate_for_setup(
+            candidate(MATCHING_GENERATION),
+            &metadata,
+        )
+        .unwrap();
+        bound.expose_key(|key| key.expose_bytes(|bytes| assert_eq!(bytes, &SYNTHETIC_KEY)));
+
+        assert_eq!(
+            bind_reloaded_staged_database_key_candidate_for_setup(
+                candidate(DIFFERENT_GENERATION),
+                &metadata
+            )
+            .unwrap_err(),
+            DatabaseKeyGenerationBindingError::GenerationMismatch
+        );
+    }
+
+    #[test]
     fn binding_source_locks_exact_ownership_comparison_and_scope_boundaries() {
         const SOURCE: &str = include_str!("generation_bound_database_key.rs");
         const KEY_SOURCE: &str = include_str!("../database_key.rs");
@@ -231,7 +282,13 @@ mod tests {
         const LIB_SOURCE: &str = include_str!("../lib.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
         let signature = "pub(crate) fn bind_database_key_candidate_to_trusted_installation_evidence(\n    candidate: DecodedDatabaseKeyCandidate,\n    assessment: &TrustedCurrentInstallationEvidenceAssessment,\n) -> Result<GenerationBoundDatabaseKey, DatabaseKeyGenerationBindingError>";
-        let transition = production.split_once(signature).unwrap().1;
+        let transition = production
+            .split_once(signature)
+            .unwrap()
+            .1
+            .split_once("pub(super) fn bind_reloaded_staged_database_key_candidate_for_setup(")
+            .unwrap()
+            .0;
 
         assert_eq!(transition.matches("candidate.into_parts()").count(), 1);
         assert_eq!(
@@ -329,6 +386,53 @@ mod tests {
             assert!(
                 !transition.contains(excluded),
                 "binding transition contains excluded behavior: {excluded}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_setup_binding_source_locks_the_single_metadata_generation_comparison() {
+        const SOURCE: &str = include_str!("generation_bound_database_key.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let transition = production
+            .split_once("pub(super) fn bind_reloaded_staged_database_key_candidate_for_setup(")
+            .unwrap()
+            .1;
+
+        assert_eq!(transition.matches("candidate.into_parts()").count(), 1);
+        assert_eq!(
+            transition
+                .matches("metadata.database_key_generation_identifier()")
+                .count(),
+            1
+        );
+        assert_eq!(
+            transition
+                .matches("candidate_generation_identifier == expected_generation_identifier")
+                .count(),
+            1
+        );
+        assert_eq!(
+            transition
+                .matches("Ok(GenerationBoundDatabaseKey { key })")
+                .count(),
+            1
+        );
+        for forbidden in [
+            "installation_identifier()",
+            "setup_publication_identifier()",
+            "parish_identifier()",
+            "database_created_at()",
+            "TrustedCurrentInstallationEvidenceAssessment",
+            "startup",
+            "freshness",
+            "evidence",
+            "database open",
+            "publication",
+        ] {
+            assert!(
+                !transition.contains(forbidden),
+                "unexpected staged setup binding authority: {forbidden}"
             );
         }
     }

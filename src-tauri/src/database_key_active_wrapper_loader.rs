@@ -37,6 +37,23 @@ impl fmt::Debug for LoadedActiveDatabaseKeyWrapper {
     }
 }
 
+#[derive(Eq, PartialEq)]
+pub(crate) struct LoadedStagedDatabaseKeyWrapper {
+    bytes: Vec<u8>,
+}
+
+impl LoadedStagedDatabaseKeyWrapper {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl fmt::Debug for LoadedStagedDatabaseKeyWrapper {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LoadedStagedDatabaseKeyWrapper([REDACTED])")
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum DatabaseKeyActiveWrapperLoadError {
     PresenceNotPresent,
@@ -60,6 +77,21 @@ impl fmt::Debug for DatabaseKeyActiveWrapperLoadError {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum StagedDatabaseKeyWrapperLoadError {
+    StagedDatabaseKeyUnavailable,
+    StagedDatabaseKeyMalformed,
+}
+
+impl fmt::Debug for StagedDatabaseKeyWrapperLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::StagedDatabaseKeyUnavailable => "StagedDatabaseKeyUnavailable",
+            Self::StagedDatabaseKeyMalformed => "StagedDatabaseKeyMalformed",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BoundedReadError {
     SizeInvalid,
@@ -70,7 +102,7 @@ enum BoundedReadError {
 fn read_bounded_wrapper<R: Read>(
     reader: &mut R,
     reported_length: u64,
-) -> Result<LoadedActiveDatabaseKeyWrapper, BoundedReadError> {
+) -> Result<Vec<u8>, BoundedReadError> {
     if !(MINIMUM_PROTECTED_WRAPPER_LENGTH..=MAXIMUM_PROTECTED_WRAPPER_LENGTH)
         .contains(&reported_length)
     {
@@ -90,7 +122,7 @@ fn read_bounded_wrapper<R: Read>(
     let mut trailing = [0_u8; 1];
     loop {
         match reader.read(&mut trailing) {
-            Ok(0) => return Ok(LoadedActiveDatabaseKeyWrapper { bytes }),
+            Ok(0) => return Ok(bytes),
             Ok(_) => return Err(BoundedReadError::Unstable),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return Err(BoundedReadError::ReadUnavailable),
@@ -116,7 +148,20 @@ pub(crate) fn load_active_database_key_wrapper(
     paths: &crate::storage_foundation::DatabaseKeyPersistencePaths,
     presence: DatabaseKeyActivePresence,
 ) -> Result<LoadedActiveDatabaseKeyWrapper, DatabaseKeyActiveWrapperLoadError> {
-    require_present(presence, || windows::load(paths))
+    require_present(presence, || {
+        windows::load(paths, windows::ArtifactSelection::Active)
+            .map(|bytes| LoadedActiveDatabaseKeyWrapper { bytes })
+            .map_err(Into::into)
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn load_staged_database_key_wrapper(
+    paths: &crate::storage_foundation::DatabaseKeyPersistencePaths,
+) -> Result<LoadedStagedDatabaseKeyWrapper, StagedDatabaseKeyWrapperLoadError> {
+    windows::load(paths, windows::ArtifactSelection::Staged)
+        .map(|bytes| LoadedStagedDatabaseKeyWrapper { bytes })
+        .map_err(Into::into)
 }
 
 #[cfg(windows)]
@@ -152,11 +197,14 @@ mod windows {
 
     use crate::storage_foundation::{
         ACTIVE_DATABASE_KEY_FILENAME, DATABASE_KEY_DIRECTORY_NAME, DatabaseKeyPersistencePaths,
+        STAGED_DATABASE_KEY_FILENAME,
     };
 
+    #[cfg(test)]
+    use super::LoadedActiveDatabaseKeyWrapper;
     use super::{
-        BoundedReadError, DatabaseKeyActiveWrapperLoadError, LoadedActiveDatabaseKeyWrapper,
-        MAXIMUM_PROTECTED_WRAPPER_LENGTH, MINIMUM_PROTECTED_WRAPPER_LENGTH, read_bounded_wrapper,
+        BoundedReadError, DatabaseKeyActiveWrapperLoadError, MAXIMUM_PROTECTED_WRAPPER_LENGTH,
+        MINIMUM_PROTECTED_WRAPPER_LENGTH, StagedDatabaseKeyWrapperLoadError, read_bounded_wrapper,
     };
 
     const DIRECTORY_ACCESS: u32 = 0;
@@ -202,11 +250,34 @@ mod windows {
     struct LoadedFile {
         handle: File,
         observation: Observation,
-        loaded: LoadedActiveDatabaseKeyWrapper,
+        loaded: Vec<u8>,
     }
 
     #[derive(Clone, Copy, Eq, PartialEq)]
-    enum Failure {
+    pub(super) enum ArtifactSelection {
+        Active,
+        Staged,
+    }
+
+    impl ArtifactSelection {
+        fn filename(self) -> &'static str {
+            match self {
+                Self::Active => ACTIVE_DATABASE_KEY_FILENAME,
+                Self::Staged => STAGED_DATABASE_KEY_FILENAME,
+            }
+        }
+
+        fn path(self, paths: &DatabaseKeyPersistencePaths) -> &Path {
+            match self {
+                Self::Active => paths.active_database_key.as_path(),
+                Self::Staged => paths.staged_database_key.as_path(),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    pub(super) enum Failure {
+        Missing,
         Inspection,
         Invalid,
         Read,
@@ -224,11 +295,25 @@ mod windows {
     impl From<Failure> for DatabaseKeyActiveWrapperLoadError {
         fn from(value: Failure) -> Self {
             match value {
+                Failure::Missing => Self::ActiveArtifactUnstable,
                 Failure::Inspection => Self::InspectionUnavailable,
                 Failure::Invalid => Self::InvalidActiveArtifact,
                 Failure::Read => Self::WrapperReadUnavailable,
                 Failure::Size => Self::WrapperSizeInvalid,
                 Failure::Unstable => Self::ActiveArtifactUnstable,
+            }
+        }
+    }
+
+    impl From<Failure> for StagedDatabaseKeyWrapperLoadError {
+        fn from(value: Failure) -> Self {
+            match value {
+                Failure::Missing | Failure::Inspection | Failure::Read => {
+                    Self::StagedDatabaseKeyUnavailable
+                }
+                Failure::Invalid | Failure::Size | Failure::Unstable => {
+                    Self::StagedDatabaseKeyMalformed
+                }
             }
         }
     }
@@ -502,31 +587,37 @@ mod windows {
         Ok(RetainedDirectory { handle, initial })
     }
 
-    fn validate_contract(paths: &DatabaseKeyPersistencePaths) -> Result<&Path, Failure> {
+    fn validate_contract(
+        paths: &DatabaseKeyPersistencePaths,
+        selection: ArtifactSelection,
+    ) -> Result<&Path, Failure> {
         let directory = paths.database_key_directory.as_path();
         let parent = directory.parent().ok_or(Failure::Invalid)?;
         if directory != parent.join(DATABASE_KEY_DIRECTORY_NAME)
-            || paths.active_database_key.as_path() != directory.join(ACTIVE_DATABASE_KEY_FILENAME)
+            || selection.path(paths) != directory.join(selection.filename())
         {
             return Err(Failure::Invalid);
         }
         Ok(parent)
     }
 
-    fn enumerate_exact_active(directory: &Path) -> Result<(), Failure> {
-        let mut active_count = 0_u8;
+    fn enumerate_exact_selected(
+        directory: &Path,
+        selection: ArtifactSelection,
+    ) -> Result<(), Failure> {
+        let mut selected_count = 0_u8;
         for entry in fs::read_dir(directory).map_err(|_| Failure::Inspection)? {
             let name = entry.map_err(|_| Failure::Inspection)?.file_name();
-            if name
-                .encode_wide()
-                .eq(ACTIVE_DATABASE_KEY_FILENAME.encode_utf16())
-            {
-                active_count = active_count.saturating_add(1);
+            if name.encode_wide().eq(selection.filename().encode_utf16()) {
+                selected_count = selected_count.saturating_add(1);
             } else {
                 return Err(Failure::Invalid);
             }
         }
-        if active_count != 1 {
+        if selected_count == 0 {
+            return Err(Failure::Missing);
+        }
+        if selected_count != 1 {
             return Err(Failure::Unstable);
         }
         Ok(())
@@ -535,15 +626,16 @@ mod windows {
     fn load_file(
         path: &Path,
         directory: &RetainedDirectory,
+        selection: ArtifactSelection,
         mut before_read: impl FnMut(),
     ) -> Result<LoadedFile, Failure> {
-        if path.file_name() != Some(OsStr::new(ACTIVE_DATABASE_KEY_FILENAME)) {
+        if path.file_name() != Some(OsStr::new(selection.filename())) {
             return Err(Failure::Invalid);
         }
         let mut handle =
             open(path, FILE_ACCESS, FILE_SHARE, FILE_FLAGS).map_err(|failure| match failure {
                 OpenFailure::Invalid => Failure::Invalid,
-                OpenFailure::Missing => Failure::Unstable,
+                OpenFailure::Missing => Failure::Missing,
                 OpenFailure::Unavailable => Failure::Read,
             })?;
         let before = query_observation(&handle)?;
@@ -551,7 +643,7 @@ mod windows {
         exact_child(
             &directory.initial,
             &before,
-            OsStr::new(ACTIVE_DATABASE_KEY_FILENAME),
+            OsStr::new(selection.filename()),
         )?;
         before_read();
         let loaded =
@@ -578,6 +670,7 @@ mod windows {
         path: &Path,
         loaded: &LoadedFile,
         directory: &RetainedDirectory,
+        selection: ArtifactSelection,
     ) -> Result<(), Failure> {
         if query_observation(&loaded.handle)? != loaded.observation {
             return Err(Failure::Unstable);
@@ -585,7 +678,7 @@ mod windows {
         let reopened =
             open(path, FILE_ACCESS, FILE_SHARE, FILE_FLAGS).map_err(|failure| match failure {
                 OpenFailure::Invalid => Failure::Invalid,
-                OpenFailure::Missing => Failure::Unstable,
+                OpenFailure::Missing => Failure::Missing,
                 OpenFailure::Unavailable => Failure::Inspection,
             })?;
         let reopened_observation = query_observation(&reopened)?;
@@ -593,7 +686,7 @@ mod windows {
         exact_child(
             &directory.initial,
             &reopened_observation,
-            OsStr::new(ACTIVE_DATABASE_KEY_FILENAME),
+            OsStr::new(selection.filename()),
         )?;
         if reopened_observation != loaded.observation {
             return Err(Failure::Unstable);
@@ -611,28 +704,30 @@ mod windows {
 
     fn load_inner_with_hook<F>(
         paths: &DatabaseKeyPersistencePaths,
+        selection: ArtifactSelection,
         mut hook: F,
-    ) -> Result<LoadedActiveDatabaseKeyWrapper, Failure>
+    ) -> Result<Vec<u8>, Failure>
     where
         F: FnMut(TestPhase),
     {
-        let parent_path = validate_contract(paths)?;
+        let parent_path = validate_contract(paths, selection)?;
         let directory_path = paths.database_key_directory.as_path();
         let parent = open_directory(parent_path, None)?;
         let directory = open_directory(
             directory_path,
             Some((&parent.initial, OsStr::new(DATABASE_KEY_DIRECTORY_NAME))),
         )?;
-        enumerate_exact_active(directory_path)?;
-        let loaded = load_file(paths.active_database_key.as_path(), &directory, || {
+        enumerate_exact_selected(directory_path, selection)?;
+        let selected_path = selection.path(paths);
+        let loaded = load_file(selected_path, &directory, selection, || {
             hook(TestPhase::BeforeRead)
         })?;
         hook(TestPhase::AfterRead);
-        enumerate_exact_active(directory_path).map_err(|failure| match failure {
-            Failure::Invalid => Failure::Unstable,
+        enumerate_exact_selected(directory_path, selection).map_err(|failure| match failure {
+            Failure::Invalid | Failure::Missing => Failure::Unstable,
             other => other,
         })?;
-        confirm_file(paths.active_database_key.as_path(), &loaded, &directory)?;
+        confirm_file(selected_path, &loaded, &directory, selection)?;
         hook(TestPhase::BeforeFinalConfirmation);
         if query_observation(&parent.handle)? != parent.initial
             || query_observation(&directory.handle)? != directory.initial
@@ -653,11 +748,11 @@ mod windows {
         if reopened_directory.initial != directory.initial {
             return Err(Failure::Unstable);
         }
-        enumerate_exact_active(directory_path).map_err(|failure| match failure {
-            Failure::Invalid => Failure::Unstable,
+        enumerate_exact_selected(directory_path, selection).map_err(|failure| match failure {
+            Failure::Invalid | Failure::Missing => Failure::Unstable,
             other => other,
         })?;
-        confirm_file(paths.active_database_key.as_path(), &loaded, &directory)?;
+        confirm_file(selected_path, &loaded, &directory, selection)?;
         Ok(loaded.loaded)
     }
 
@@ -673,8 +768,9 @@ mod windows {
 
     fn load_inner(
         paths: &DatabaseKeyPersistencePaths,
-    ) -> Result<LoadedActiveDatabaseKeyWrapper, Failure> {
-        load_inner_with_hook(paths, |_| {})
+        selection: ArtifactSelection,
+    ) -> Result<Vec<u8>, Failure> {
+        load_inner_with_hook(paths, selection, |_| {})
     }
 
     #[cfg(test)]
@@ -685,13 +781,16 @@ mod windows {
     where
         F: FnMut(LoadPhase),
     {
-        load_inner_with_hook(paths, hook).map_err(Into::into)
+        load_inner_with_hook(paths, ArtifactSelection::Active, hook)
+            .map(|bytes| LoadedActiveDatabaseKeyWrapper { bytes })
+            .map_err(Into::into)
     }
 
     pub(super) fn load(
         paths: &DatabaseKeyPersistencePaths,
-    ) -> Result<LoadedActiveDatabaseKeyWrapper, DatabaseKeyActiveWrapperLoadError> {
-        load_inner(paths).map_err(Into::into)
+        selection: ArtifactSelection,
+    ) -> Result<Vec<u8>, Failure> {
+        load_inner(paths, selection)
     }
 }
 
@@ -704,7 +803,9 @@ mod tests {
     #[test]
     fn loaded_value_is_nominal_owned_exact_and_redacted() {
         let bytes = vec![0xa5; 31];
-        let loaded = read_bounded_wrapper(&mut Cursor::new(bytes.clone()), 31).unwrap();
+        let loaded = LoadedActiveDatabaseKeyWrapper {
+            bytes: read_bounded_wrapper(&mut Cursor::new(bytes.clone()), 31).unwrap(),
+        };
         assert_eq!(loaded.as_bytes(), bytes);
         assert_eq!(
             format!("{loaded:?}"),
@@ -786,14 +887,14 @@ mod tests {
         for bytes in [vec![0x11; 15], vec![0x22; 257], vec![0x33; 65_550]] {
             let loaded =
                 read_bounded_wrapper(&mut Cursor::new(bytes.clone()), bytes.len() as u64).unwrap();
-            assert_eq!(loaded.as_bytes(), bytes);
+            assert_eq!(loaded.as_slice(), bytes);
         }
         let mut malformed = b"not-CHDPAPI!!".to_vec();
         malformed.resize(29, 0xff);
         let loaded =
             read_bounded_wrapper(&mut Cursor::new(malformed.clone()), malformed.len() as u64)
                 .unwrap();
-        assert_eq!(loaded.as_bytes(), malformed);
+        assert_eq!(loaded.as_slice(), malformed);
     }
 
     #[test]
@@ -867,7 +968,7 @@ mod tests {
         assert_eq!(
             read_bounded_wrapper(&mut interrupted, 15)
                 .unwrap()
-                .as_bytes(),
+                .as_slice(),
             &[4; 15]
         );
     }

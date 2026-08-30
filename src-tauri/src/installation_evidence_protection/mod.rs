@@ -41,6 +41,8 @@ mod generation_bound_database_key;
 mod installation_bound_authenticated_active_freshness_anchor;
 mod protected_blob_wrapper;
 mod protected_key_payload;
+#[cfg(windows)]
+mod staged_database_key_verification;
 mod trusted_current_installation_evidence_assessment;
 mod trusted_current_installation_identity;
 #[cfg(windows)]
@@ -52,6 +54,8 @@ pub(crate) use database_key_current_user_dpapi::DatabaseKeyCandidateRecoveryErro
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub(crate) use database_key_current_user_dpapi::protect_database_key;
+#[cfg(windows)]
+use database_key_current_user_dpapi::recover_database_key_candidate_from_loaded_staged_wrapper;
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub(crate) use database_key_current_user_dpapi::recover_database_key_candidate_from_loaded_wrapper;
@@ -73,6 +77,8 @@ pub(crate) use freshness_anchor_current_user_dpapi::{
 };
 #[cfg(windows)]
 pub(crate) use freshness_anchor_observation::observe_normalized_current_freshness_anchor;
+#[cfg(windows)]
+use generation_bound_database_key::bind_reloaded_staged_database_key_candidate_for_setup;
 #[allow(unused_imports)]
 pub(crate) use generation_bound_database_key::{
     DatabaseKeyGenerationBindingError, GenerationBoundDatabaseKey,
@@ -83,6 +89,12 @@ pub(crate) use protected_blob_wrapper::EncodedProtectedWrapper;
 use protected_blob_wrapper::{ProtectedObjectKind, ValidatedProtectedWrapper};
 pub(crate) use protected_key_payload::DecodedProtectedKeyMaterial;
 use protected_key_payload::EncodedProtectedKeyPayload;
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use staged_database_key_verification::{
+    ReloadedStagedGenerationBoundDatabaseKeyForSetup, StagedDatabaseKeyVerificationError,
+    verify_reloaded_staged_database_key_for_setup,
+};
 pub(crate) use trusted_current_installation_evidence_assessment::TrustedCurrentInstallationEvidenceAssessment;
 #[cfg(windows)]
 pub(crate) use trusted_current_installation_evidence_assessment::load_trusted_current_installation_evidence_assessment;

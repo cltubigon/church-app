@@ -11,7 +11,9 @@
 use std::fmt;
 
 use crate::{
-    database_key_active_wrapper_loader::LoadedActiveDatabaseKeyWrapper,
+    database_key_active_wrapper_loader::{
+        LoadedActiveDatabaseKeyWrapper, LoadedStagedDatabaseKeyWrapper,
+    },
     database_key_protected_payload::DecodedDatabaseKeyCandidate,
 };
 
@@ -47,13 +49,29 @@ pub(crate) fn recover_database_key_candidate_from_loaded_wrapper(
     recover_database_key_candidate_from_loaded_wrapper_with(&WindowsCurrentUserDpapi, loaded)
 }
 
+#[cfg(windows)]
+pub(super) fn recover_database_key_candidate_from_loaded_staged_wrapper(
+    loaded: &LoadedStagedDatabaseKeyWrapper,
+) -> Result<DecodedDatabaseKeyCandidate, DatabaseKeyCandidateRecoveryError> {
+    recover_database_key_candidate_from_wrapper_bytes_with(
+        &WindowsCurrentUserDpapi,
+        loaded.as_bytes(),
+    )
+}
+
 fn recover_database_key_candidate_from_loaded_wrapper_with(
     protector: &impl InMemoryProtector,
     loaded: &LoadedActiveDatabaseKeyWrapper,
 ) -> Result<DecodedDatabaseKeyCandidate, DatabaseKeyCandidateRecoveryError> {
-    let wrapper =
-        ValidatedProtectedWrapper::parse(loaded.as_bytes(), ProtectedObjectKind::DatabaseKey)
-            .map_err(|_| DatabaseKeyCandidateRecoveryError::InvalidProtectedWrapper)?;
+    recover_database_key_candidate_from_wrapper_bytes_with(protector, loaded.as_bytes())
+}
+
+fn recover_database_key_candidate_from_wrapper_bytes_with(
+    protector: &impl InMemoryProtector,
+    wrapper_bytes: &[u8],
+) -> Result<DecodedDatabaseKeyCandidate, DatabaseKeyCandidateRecoveryError> {
+    let wrapper = ValidatedProtectedWrapper::parse(wrapper_bytes, ProtectedObjectKind::DatabaseKey)
+        .map_err(|_| DatabaseKeyCandidateRecoveryError::InvalidProtectedWrapper)?;
 
     let candidate = {
         let unprotected = protector
