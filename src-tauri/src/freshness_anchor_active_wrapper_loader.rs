@@ -63,6 +63,28 @@ impl fmt::Debug for LoadedActiveFreshnessAnchorWrapperPair {
     }
 }
 
+#[derive(Eq, PartialEq)]
+pub(crate) struct LoadedStagedFreshnessAnchorWrapperPair {
+    key_wrapper: FreshnessAnchorProtectedWrapperBytes,
+    authenticated_anchor_wrapper: FreshnessAnchorProtectedWrapperBytes,
+}
+
+impl LoadedStagedFreshnessAnchorWrapperPair {
+    pub(crate) fn key_wrapper_bytes(&self) -> &[u8] {
+        self.key_wrapper.as_bytes()
+    }
+
+    pub(crate) fn authenticated_anchor_wrapper_bytes(&self) -> &[u8] {
+        self.authenticated_anchor_wrapper.as_bytes()
+    }
+}
+
+impl fmt::Debug for LoadedStagedFreshnessAnchorWrapperPair {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LoadedStagedFreshnessAnchorWrapperPair([REDACTED])")
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum FreshnessAnchorActiveWrapperLoadError {
     PresenceNotComplete,
@@ -82,6 +104,21 @@ impl fmt::Debug for FreshnessAnchorActiveWrapperLoadError {
             Self::WrapperReadUnavailable => "WrapperReadUnavailable",
             Self::WrapperSizeInvalid => "WrapperSizeInvalid",
             Self::ActiveArtifactsUnstable => "ActiveArtifactsUnstable",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum StagedFreshnessAnchorWrapperPairLoadError {
+    Unavailable,
+    Malformed,
+}
+
+impl fmt::Debug for StagedFreshnessAnchorWrapperPairLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable => "StagedFreshnessAnchorPairUnavailable",
+            Self::Malformed => "StagedFreshnessAnchorPairMalformed",
         })
     }
 }
@@ -146,6 +183,13 @@ pub(crate) fn load_active_freshness_anchor_wrapper_pair(
 }
 
 #[cfg(windows)]
+pub(crate) fn load_staged_freshness_anchor_wrapper_pair(
+    paths: &crate::storage_foundation::FreshnessAnchorPersistencePaths,
+) -> Result<LoadedStagedFreshnessAnchorWrapperPair, StagedFreshnessAnchorWrapperPairLoadError> {
+    windows::load_staged(paths)
+}
+
+#[cfg(windows)]
 mod windows {
     use std::{
         ffi::{OsStr, c_void},
@@ -176,12 +220,15 @@ mod windows {
     use crate::storage_foundation::{
         ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME, ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
         FRESHNESS_ANCHOR_DIRECTORY_NAME, FreshnessAnchorPersistencePaths,
+        STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME, STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
     };
 
     use super::{
         BoundedReadError, FreshnessAnchorActiveWrapperLoadError,
         FreshnessAnchorProtectedWrapperBytes, LoadedActiveFreshnessAnchorWrapperPair,
-        MAXIMUM_PROTECTED_WRAPPER_LENGTH, MINIMUM_PROTECTED_WRAPPER_LENGTH, read_bounded_wrapper,
+        LoadedStagedFreshnessAnchorWrapperPair, MAXIMUM_PROTECTED_WRAPPER_LENGTH,
+        MINIMUM_PROTECTED_WRAPPER_LENGTH, StagedFreshnessAnchorWrapperPairLoadError,
+        read_bounded_wrapper,
     };
 
     const DIRECTORY_ACCESS: u32 = 0;
@@ -247,6 +294,15 @@ mod windows {
                 Failure::Read => Self::WrapperReadUnavailable,
                 Failure::Size => Self::WrapperSizeInvalid,
                 Failure::Unstable => Self::ActiveArtifactsUnstable,
+            }
+        }
+    }
+
+    impl From<Failure> for StagedFreshnessAnchorWrapperPairLoadError {
+        fn from(value: Failure) -> Self {
+            match value {
+                Failure::Inspection | Failure::Read => Self::Unavailable,
+                Failure::Invalid | Failure::Size | Failure::Unstable => Self::Malformed,
             }
         }
     }
@@ -522,20 +578,32 @@ mod windows {
         Ok(parent)
     }
 
-    fn enumerate_exact_pair(directory: &Path) -> Result<(), Failure> {
+    fn validate_staged_contract(paths: &FreshnessAnchorPersistencePaths) -> Result<&Path, Failure> {
+        let directory = paths.freshness_anchor_directory.as_path();
+        let parent = directory.parent().ok_or(Failure::Invalid)?;
+        if directory != parent.join(FRESHNESS_ANCHOR_DIRECTORY_NAME)
+            || paths.staged_anchor_authentication_key.as_path()
+                != directory.join(STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME)
+            || paths.staged_authenticated_freshness_anchor.as_path()
+                != directory.join(STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME)
+        {
+            return Err(Failure::Invalid);
+        }
+        Ok(parent)
+    }
+
+    fn enumerate_exact_pair(
+        directory: &Path,
+        key_name: &str,
+        anchor_name: &str,
+    ) -> Result<(), Failure> {
         let mut key_count = 0_u8;
         let mut anchor_count = 0_u8;
         for entry in fs::read_dir(directory).map_err(|_| Failure::Inspection)? {
             let name = entry.map_err(|_| Failure::Inspection)?.file_name();
-            if name
-                .encode_wide()
-                .eq(ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME.encode_utf16())
-            {
+            if name.encode_wide().eq(key_name.encode_utf16()) {
                 key_count = key_count.saturating_add(1);
-            } else if name
-                .encode_wide()
-                .eq(ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME.encode_utf16())
-            {
+            } else if name.encode_wide().eq(anchor_name.encode_utf16()) {
                 anchor_count = anchor_count.saturating_add(1);
             } else {
                 return Err(Failure::Invalid);
@@ -622,21 +690,33 @@ mod windows {
             directory_path,
             Some((&parent.initial, OsStr::new(FRESHNESS_ANCHOR_DIRECTORY_NAME))),
         )?;
-        enumerate_exact_pair(directory_path)?;
+        enumerate_exact_pair(
+            directory_path,
+            ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        )?;
         let key = load_file(
             paths.active_anchor_authentication_key.as_path(),
             ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
             &directory,
         )?;
         hook(TestPhase::AfterKeyRead);
-        enumerate_exact_pair(directory_path)?;
+        enumerate_exact_pair(
+            directory_path,
+            ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        )?;
         let anchor = load_file(
             paths.active_authenticated_freshness_anchor.as_path(),
             ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
             &directory,
         )?;
         hook(TestPhase::AfterAnchorRead);
-        enumerate_exact_pair(directory_path)?;
+        enumerate_exact_pair(
+            directory_path,
+            ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        )?;
         confirm_file(
             paths.active_anchor_authentication_key.as_path(),
             ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
@@ -665,7 +745,11 @@ mod windows {
         if reopened_directory.initial != directory.initial {
             return Err(Failure::Unstable);
         }
-        enumerate_exact_pair(directory_path)?;
+        enumerate_exact_pair(
+            directory_path,
+            ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        )?;
         Ok(LoadedActiveFreshnessAnchorWrapperPair {
             key_wrapper: key.bytes,
             authenticated_anchor_wrapper: anchor.bytes,
@@ -703,6 +787,86 @@ mod windows {
         paths: &FreshnessAnchorPersistencePaths,
     ) -> Result<LoadedActiveFreshnessAnchorWrapperPair, FreshnessAnchorActiveWrapperLoadError> {
         load_inner(paths).map_err(Into::into)
+    }
+
+    fn load_staged_inner(
+        paths: &FreshnessAnchorPersistencePaths,
+    ) -> Result<LoadedStagedFreshnessAnchorWrapperPair, Failure> {
+        let parent_path = validate_staged_contract(paths)?;
+        let directory_path = paths.freshness_anchor_directory.as_path();
+        let parent = open_directory(parent_path, None)?;
+        let directory = open_directory(
+            directory_path,
+            Some((&parent.initial, OsStr::new(FRESHNESS_ANCHOR_DIRECTORY_NAME))),
+        )?;
+        enumerate_exact_pair(
+            directory_path,
+            STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        )?;
+        let key = load_file(
+            paths.staged_anchor_authentication_key.as_path(),
+            STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            &directory,
+        )?;
+        enumerate_exact_pair(
+            directory_path,
+            STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        )?;
+        let anchor = load_file(
+            paths.staged_authenticated_freshness_anchor.as_path(),
+            STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+            &directory,
+        )?;
+        enumerate_exact_pair(
+            directory_path,
+            STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        )?;
+        confirm_file(
+            paths.staged_anchor_authentication_key.as_path(),
+            STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            &key,
+            &directory,
+        )?;
+        confirm_file(
+            paths.staged_authenticated_freshness_anchor.as_path(),
+            STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+            &anchor,
+            &directory,
+        )?;
+        if key.observation.identity == anchor.observation.identity {
+            return Err(Failure::Invalid);
+        }
+        if query_observation(&parent.handle)? != parent.initial
+            || query_observation(&directory.handle)? != directory.initial
+        {
+            return Err(Failure::Unstable);
+        }
+        let reopened_directory = open_directory(
+            directory_path,
+            Some((&parent.initial, OsStr::new(FRESHNESS_ANCHOR_DIRECTORY_NAME))),
+        )?;
+        if reopened_directory.initial != directory.initial {
+            return Err(Failure::Unstable);
+        }
+        enumerate_exact_pair(
+            directory_path,
+            STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+            STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        )?;
+        Ok(LoadedStagedFreshnessAnchorWrapperPair {
+            key_wrapper: key.bytes,
+            authenticated_anchor_wrapper: anchor.bytes,
+        })
+    }
+
+    pub(super) fn load_staged(
+        paths: &FreshnessAnchorPersistencePaths,
+    ) -> Result<LoadedStagedFreshnessAnchorWrapperPair, StagedFreshnessAnchorWrapperPairLoadError>
+    {
+        load_staged_inner(paths).map_err(Into::into)
     }
 }
 
@@ -896,7 +1060,9 @@ mod tests {
             freshness_anchor_presence::inspect_freshness_anchor_active_presence,
             storage_foundation::{
                 ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
-                ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME, freshness_anchor_persistence_paths,
+                ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+                STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+                STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME, freshness_anchor_persistence_paths,
             },
         };
 
@@ -930,6 +1096,28 @@ mod tests {
                 .unwrap();
                 Self { root, paths }
             }
+
+            fn staged(key: &[u8], anchor: &[u8]) -> Self {
+                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let root = std::env::temp_dir().join(format!(
+                    "church-app-staged-anchor-loader-{}-{nanos}-{id}",
+                    std::process::id()
+                ));
+                fs::create_dir(&root).unwrap();
+                let paths = freshness_anchor_persistence_paths(&root);
+                fs::create_dir(paths.freshness_anchor_directory.as_path()).unwrap();
+                fs::write(paths.staged_anchor_authentication_key.as_path(), key).unwrap();
+                fs::write(
+                    paths.staged_authenticated_freshness_anchor.as_path(),
+                    anchor,
+                )
+                .unwrap();
+                Self { root, paths }
+            }
         }
         impl Drop for Fixture {
             fn drop(&mut self) {
@@ -943,6 +1131,137 @@ mod tests {
         {
             let presence = inspect_freshness_anchor_active_presence(&fixture.paths);
             load_active_freshness_anchor_wrapper_pair(&fixture.paths, presence)
+        }
+
+        fn load_staged(
+            fixture: &Fixture,
+        ) -> Result<LoadedStagedFreshnessAnchorWrapperPair, StagedFreshnessAnchorWrapperPairLoadError>
+        {
+            load_staged_freshness_anchor_wrapper_pair(&fixture.paths)
+        }
+
+        #[test]
+        fn exact_staged_pair_loads_and_active_artifacts_remain_absent() {
+            let fixture = Fixture::staged(&[0x23; 15], &[0x47; 65_550]);
+            let loaded = load_staged(&fixture).unwrap();
+            assert_eq!(loaded.key_wrapper_bytes(), &[0x23; 15]);
+            assert_eq!(loaded.authenticated_anchor_wrapper_bytes(), &[0x47; 65_550]);
+            assert!(
+                !fixture
+                    .paths
+                    .active_anchor_authentication_key
+                    .as_path()
+                    .exists()
+            );
+            assert!(
+                !fixture
+                    .paths
+                    .active_authenticated_freshness_anchor
+                    .as_path()
+                    .exists()
+            );
+            assert_eq!(
+                format!("{loaded:?}"),
+                "LoadedStagedFreshnessAnchorWrapperPair([REDACTED])"
+            );
+        }
+
+        #[test]
+        fn staged_namespace_rejects_missing_active_unknown_and_nested_members() {
+            let missing_key = Fixture::staged(&[1; 15], &[2; 15]);
+            fs::remove_file(missing_key.paths.staged_anchor_authentication_key.as_path()).unwrap();
+            assert!(load_staged(&missing_key).is_err());
+
+            let missing_anchor = Fixture::staged(&[1; 15], &[2; 15]);
+            fs::remove_file(
+                missing_anchor
+                    .paths
+                    .staged_authenticated_freshness_anchor
+                    .as_path(),
+            )
+            .unwrap();
+            assert!(load_staged(&missing_anchor).is_err());
+
+            for name in [
+                ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+                ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+                "unknown.synthetic",
+            ] {
+                let fixture = Fixture::staged(&[1; 15], &[2; 15]);
+                fs::write(
+                    fixture
+                        .paths
+                        .freshness_anchor_directory
+                        .as_path()
+                        .join(name),
+                    [3; 15],
+                )
+                .unwrap();
+                assert!(load_staged(&fixture).is_err(), "accepted sibling: {name}");
+            }
+
+            let nested = Fixture::staged(&[1; 15], &[2; 15]);
+            fs::create_dir(
+                nested
+                    .paths
+                    .freshness_anchor_directory
+                    .as_path()
+                    .join("nested.synthetic"),
+            )
+            .unwrap();
+            assert!(load_staged(&nested).is_err());
+        }
+
+        #[test]
+        fn staged_pair_rejects_invalid_sizes_directories_and_hard_links() {
+            for (key, anchor) in [(vec![1; 14], vec![2; 15]), (vec![1; 15], vec![2; 65_551])] {
+                assert!(load_staged(&Fixture::staged(&key, &anchor)).is_err());
+            }
+
+            let directory = Fixture::staged(&[1; 15], &[2; 15]);
+            fs::remove_file(directory.paths.staged_anchor_authentication_key.as_path()).unwrap();
+            fs::create_dir(directory.paths.staged_anchor_authentication_key.as_path()).unwrap();
+            assert!(load_staged(&directory).is_err());
+
+            let hard_link = Fixture::staged(&[1; 15], &[2; 15]);
+            fs::hard_link(
+                hard_link.paths.staged_anchor_authentication_key.as_path(),
+                hard_link.root.join("staged-anchor-key-alias.synthetic"),
+            )
+            .unwrap();
+            assert!(load_staged(&hard_link).is_err());
+        }
+
+        #[test]
+        fn staged_reparse_file_is_rejected_when_symlink_creation_is_supported() {
+            let fixture = Fixture::staged(&[1; 15], &[2; 15]);
+            let target = fixture.root.join("staged-reparse-target.synthetic");
+            fs::write(&target, [4; 15]).unwrap();
+            fs::remove_file(fixture.paths.staged_anchor_authentication_key.as_path()).unwrap();
+            if std::os::windows::fs::symlink_file(
+                &target,
+                fixture.paths.staged_anchor_authentication_key.as_path(),
+            )
+            .is_ok()
+            {
+                assert!(load_staged(&fixture).is_err());
+            }
+        }
+
+        #[test]
+        fn staged_names_are_exact_and_distinct_from_active_names() {
+            assert_eq!(
+                STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+                "anchor-authentication-key.dpapi.stage"
+            );
+            assert_eq!(
+                STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+                "authenticated-freshness-anchor.dpapi.stage"
+            );
+            assert_ne!(
+                STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+                ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME
+            );
         }
 
         #[test]

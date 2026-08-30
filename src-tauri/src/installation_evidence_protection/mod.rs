@@ -44,6 +44,8 @@ mod protected_key_payload;
 #[cfg(windows)]
 mod staged_database_key_verification;
 #[cfg(windows)]
+mod staged_freshness_anchor_verification;
+#[cfg(windows)]
 mod staged_installation_evidence_verification;
 mod trusted_current_installation_evidence_assessment;
 mod trusted_current_installation_identity;
@@ -96,6 +98,12 @@ use protected_key_payload::EncodedProtectedKeyPayload;
 pub(crate) use staged_database_key_verification::{
     ReloadedStagedGenerationBoundDatabaseKeyForSetup, StagedDatabaseKeyVerificationError,
     verify_reloaded_staged_database_key_for_setup,
+};
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use staged_freshness_anchor_verification::{
+    ReloadVerifiedStagedFreshnessAnchorForSetup, StagedFreshnessAnchorVerificationError,
+    verify_reloaded_staged_freshness_anchor_for_setup,
 };
 #[cfg(windows)]
 #[allow(unused_imports)]

@@ -158,7 +158,7 @@ mod tests {
             .unwrap()
             .1;
         let validation = loaded_composition
-            .find("recover_and_validate_freshness_anchor_with(")
+            .find("recover_and_validate_loaded_freshness_anchor_wrapper_bytes_with(")
             .unwrap();
         let construction = loaded_composition
             .find("AuthenticatedActiveFreshnessAnchor::from_authenticated_active_contract(")
@@ -177,6 +177,10 @@ mod tests {
             )
         );
         assert!(production.contains("fn recover_and_validate_freshness_anchor_with("));
+        assert!(
+            production
+                .contains("fn recover_and_validate_loaded_freshness_anchor_wrapper_bytes_with(")
+        );
         assert!(
             production.contains(") -> Result<FreshnessAnchorContractV1, AnchorProtectionError>")
         );

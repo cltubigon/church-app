@@ -5,7 +5,9 @@
 use std::fmt;
 
 #[cfg(any(windows, test))]
-use crate::freshness_anchor_active_wrapper_loader::LoadedActiveFreshnessAnchorWrapperPair;
+use crate::freshness_anchor_active_wrapper_loader::{
+    LoadedActiveFreshnessAnchorWrapperPair, LoadedStagedFreshnessAnchorWrapperPair,
+};
 use crate::{
     freshness_anchor_authenticated_envelope::{
         AnchorAuthenticationKeyGenerationIdentifier, EncodedAuthenticatedFreshnessAnchorV1,
@@ -263,15 +265,40 @@ fn recover_and_validate_loaded_freshness_anchor_pair_with(
     protector: &impl InMemoryProtector,
     loaded_pair: LoadedActiveFreshnessAnchorWrapperPair,
 ) -> Result<AuthenticatedActiveFreshnessAnchor, LoadedFreshnessAnchorValidationError> {
+    let contract = recover_and_validate_loaded_freshness_anchor_wrapper_bytes_with(
+        protector,
+        loaded_pair.key_wrapper_bytes(),
+        loaded_pair.authenticated_anchor_wrapper_bytes(),
+    )?;
+
+    Ok(AuthenticatedActiveFreshnessAnchor::from_authenticated_active_contract(contract))
+}
+
+#[cfg(windows)]
+pub(super) fn recover_and_validate_loaded_staged_freshness_anchor_pair(
+    loaded_pair: LoadedStagedFreshnessAnchorWrapperPair,
+) -> Result<FreshnessAnchorContractV1, LoadedFreshnessAnchorValidationError> {
+    recover_and_validate_loaded_freshness_anchor_wrapper_bytes_with(
+        &WindowsCurrentUserDpapi,
+        loaded_pair.key_wrapper_bytes(),
+        loaded_pair.authenticated_anchor_wrapper_bytes(),
+    )
+}
+
+#[cfg(any(windows, test))]
+fn recover_and_validate_loaded_freshness_anchor_wrapper_bytes_with(
+    protector: &impl InMemoryProtector,
+    key_wrapper_bytes: &[u8],
+    authenticated_anchor_wrapper_bytes: &[u8],
+) -> Result<FreshnessAnchorContractV1, LoadedFreshnessAnchorValidationError> {
     let (authentication_key, recovered_generation_identifier) =
-        recover_anchor_authentication_material_with(protector, loaded_pair.key_wrapper_bytes())
-            .map_err(|_| {
-                LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed
-            })?;
+        recover_anchor_authentication_material_with(protector, key_wrapper_bytes).map_err(
+            |_| LoadedFreshnessAnchorValidationError::KeyWrapperProtectionOrPayloadFailed,
+        )?;
 
     let contract = recover_and_validate_freshness_anchor_with(
         protector,
-        loaded_pair.authenticated_anchor_wrapper_bytes(),
+        authenticated_anchor_wrapper_bytes,
         &authentication_key,
         &recovered_generation_identifier,
     )
@@ -299,7 +326,7 @@ fn recover_and_validate_loaded_freshness_anchor_pair_with(
         }
     })?;
 
-    Ok(AuthenticatedActiveFreshnessAnchor::from_authenticated_active_contract(contract))
+    Ok(contract)
 }
 
 #[cfg(test)]
@@ -1049,7 +1076,7 @@ mod tests {
             .unwrap()
             .1;
         let structural_validation = loaded_recovery
-            .find("recover_and_validate_freshness_anchor_with(")
+            .find("recover_and_validate_loaded_freshness_anchor_wrapper_bytes_with(")
             .unwrap();
         let proof_construction = loaded_recovery
             .find("AuthenticatedActiveFreshnessAnchor::from_authenticated_active_contract(")
