@@ -62,12 +62,18 @@ use super::{
 };
 
 mod current_canonical_database_identity;
+mod identity_bound_staged_key_open;
 mod prepared_first_time_setup_publication_materials;
 mod protected_artifact_directories;
 
 pub(crate) use current_canonical_database_identity::{
     CurrentCanonicalDatabaseIdentityComparisonError,
     CurrentCanonicalDatabaseIdentityMatchesSetupProof, compare_current_canonical_database_identity,
+};
+
+pub(crate) use identity_bound_staged_key_open::{
+    IdentityBoundStagedKeyOpenedProductionDatabaseForSetup, SetupProductionDatabaseOpenError,
+    open_identity_bound_staged_key_production_database_for_setup,
 };
 
 pub(crate) use prepared_first_time_setup_publication_materials::{
