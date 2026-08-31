@@ -342,11 +342,147 @@ impl FirstTimeSetupPublicationStateMachine {
     }
 }
 
+/// Production bridge for the sealed protected-artifact staging operation only.
+/// Milestones are constructed and applied here; none can escape to a caller.
+/// Every call requires the opaque authority owned by the sealed operation.
+pub(crate) mod protected_artifact_staging {
+    use super::*;
+
+    mod sealed {
+        pub trait Machine {}
+        impl Machine for super::FirstTimeSetupPublicationStateMachine {}
+    }
+
+    /// Only the publication machine can implement this binding, exactly once.
+    /// Its implementation lives beside the opaque authority, avoiding any
+    /// platform or payload dependency here. There is no authority factory.
+    pub(crate) trait AuthorityBinding: sealed::Machine {
+        type Authority;
+    }
+
+    pub(crate) fn begin<M: AuthorityBinding>(
+        _authority: &M::Authority,
+    ) -> FirstTimeSetupPublicationStateMachine {
+        FirstTimeSetupPublicationStateMachine::begin(CanonicalDatabaseClosedAndMaterialsPrepared {
+            _private: (),
+        })
+    }
+
+    pub(crate) fn advance_database_key_staged<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(machine.advance(
+            FirstTimeSetupPublicationEvent::ProtectedDatabaseKeyWrapperStaged(
+                ProtectedDatabaseKeyWrapperStaged { _private: () },
+            ),
+        ))
+    }
+
+    pub(crate) fn advance_freshness_authentication_key_staged<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(machine.advance(
+            FirstTimeSetupPublicationEvent::FreshnessAuthenticationKeyWrapperStaged(
+                FreshnessAuthenticationKeyWrapperStaged { _private: () },
+            ),
+        ))
+    }
+
+    pub(crate) fn advance_authenticated_freshness_anchor_staged<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(machine.advance(
+            FirstTimeSetupPublicationEvent::AuthenticatedFreshnessAnchorStaged(
+                AuthenticatedFreshnessAnchorStaged { _private: () },
+            ),
+        ))
+    }
+
+    pub(crate) fn advance_evidence_authentication_key_staged<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(machine.advance(
+            FirstTimeSetupPublicationEvent::EvidenceAuthenticationKeyWrapperStaged(
+                EvidenceAuthenticationKeyWrapperStaged { _private: () },
+            ),
+        ))
+    }
+
+    pub(crate) fn advance_authenticated_evidence_staged<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(
+            machine.advance(FirstTimeSetupPublicationEvent::AuthenticatedEvidenceStaged(
+                AuthenticatedEvidenceStaged { _private: () },
+            )),
+        )
+    }
+
+    fn in_progress(
+        advance: Result<FirstTimeSetupPublicationAdvance, FirstTimeSetupPublicationTransitionError>,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        match advance? {
+            FirstTimeSetupPublicationAdvance::InProgress(machine) => Ok(machine),
+            FirstTimeSetupPublicationAdvance::Interrupted(_)
+            | FirstTimeSetupPublicationAdvance::Ready(_) => {
+                Err(FirstTimeSetupPublicationTransitionError::OutOfOrder)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::size_of;
 
     use super::*;
+
+    #[test]
+    fn protected_artifact_staging_operation_bridge_never_releases_milestones() {
+        let source = include_str!("first_time_setup_publication.rs")
+            .split_once("pub(crate) mod protected_artifact_staging {")
+            .unwrap()
+            .1
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert_eq!(source.matches("pub(crate) fn ").count(), 6);
+        assert_eq!(source.matches("_private: ()").count(), 6);
+        assert_eq!(source.matches("machine.advance(").count(), 5);
+        assert_eq!(
+            source
+                .matches("FirstTimeSetupPublicationStateMachine::begin(")
+                .count(),
+            1
+        );
+        for forbidden in [
+            "AllStagedArtifactsReloadVerified",
+            "Published",
+            "FinalActive",
+            "CanonicalInstallation",
+            "synthetic()",
+            "pub(crate) fn in_progress",
+            "panic!",
+            "unwrap(",
+            "expect(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "forbidden bridge authority: {forbidden}"
+            );
+        }
+    }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum SuccessEventKind {

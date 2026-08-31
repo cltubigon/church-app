@@ -8,6 +8,17 @@
 
 use std::fmt;
 
+#[path = "protected_artifact_staging_operation.rs"]
+mod protected_artifact_staging_operation;
+
+#[allow(unused_imports)]
+pub(crate) use protected_artifact_staging_operation::{
+    AllProtectedArtifactsStagedFirstTimeSetupOperation,
+    FirstTimeSetupProtectedArtifactStagingError, FirstTimeSetupProtectedArtifactStagingOperation,
+    prepare_first_time_setup_protected_artifact_staging_operation,
+    stage_first_time_setup_protected_artifacts,
+};
+
 use crate::{
     database_metadata_contract::DatabaseMetadataContractV1,
     installation_evidence_protection::{
@@ -262,7 +273,7 @@ mod tests {
     };
 
     // Uses the existing in-memory preparation boundary, never a database open.
-    fn prepared() -> (
+    pub(super) fn prepared() -> (
         PreparedFirstTimeSetupPublicationMaterials,
         DatabaseMetadataContractV1,
         Vec<u8>,
