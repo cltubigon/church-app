@@ -16,6 +16,13 @@ use super::{
 };
 
 mod database_evidence_correspondence_validation;
+mod setup_database_revalidation;
+
+pub(crate) use setup_database_revalidation::{
+    PreparedMetadataValidatedProductionDatabaseForSetup, SetupPreparedMetadataMismatchCloseFailure,
+    SetupProductionDatabaseRevalidationError,
+    revalidate_identity_bound_staged_key_production_database_for_setup,
+};
 
 pub(crate) use database_evidence_correspondence_validation::{
     DatabaseEvidenceCorrespondenceMismatch,

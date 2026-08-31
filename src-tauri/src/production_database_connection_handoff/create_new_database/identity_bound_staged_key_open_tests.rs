@@ -490,7 +490,6 @@ fn production_dataflow_binds_the_exact_retained_inspection_before_handoff_and_op
         "Deserialize",
         "pub fn",
         "pub(super)",
-        "validate_production_database",
         "PRAGMA",
         "cipher_integrity_check",
         "quick_check",
@@ -529,4 +528,11 @@ fn production_dataflow_binds_the_exact_retained_inspection_before_handoff_and_op
             "unexpected capability: {forbidden}"
         );
     }
+    assert!(!transition.contains("validate_production_database"));
+    assert_eq!(
+        production
+            .matches("validate_production_database_readability_and_integrity(self.database)")
+            .count(),
+        1
+    );
 }

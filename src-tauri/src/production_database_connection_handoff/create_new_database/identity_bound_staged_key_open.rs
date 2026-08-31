@@ -37,6 +37,13 @@ impl fmt::Debug for IdentityBoundStagedKeyOpenedProductionDatabaseForSetup {
 }
 
 impl IdentityBoundStagedKeyOpenedProductionDatabaseForSetup {
+    /// Sealed consuming handoff for setup revalidation; never releases a raw owner.
+    pub(in crate::production_database_connection_handoff) fn validate_readability_and_integrity(
+        self,
+    ) -> super::super::ProductionDatabaseValidationOutcome {
+        super::super::validate_production_database_readability_and_integrity(self.database)
+    }
+
     /// Ordinary consuming close discards setup provenance; no revalidation proof.
     pub(crate) fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
         self.database.close()
