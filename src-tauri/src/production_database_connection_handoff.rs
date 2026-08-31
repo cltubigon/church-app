@@ -75,6 +75,7 @@ pub(crate) use create_new_database::{
 
 #[allow(unused_imports)]
 pub(crate) use live_metadata_and_header_validation::{
+    ClosedPreparedMetadataValidatedProductionDatabaseForSetup,
     DatabaseEvidenceCorrespondenceMismatch,
     DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection,
     DatabaseEvidenceCorrespondenceValidationCloseFailure,
@@ -91,9 +92,11 @@ pub(crate) use live_metadata_and_header_validation::{
     ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
-    SetupPreparedMetadataMismatchCloseFailure, SetupProductionDatabaseRevalidationError,
+    SetupPreparedMetadataMismatchCloseFailure, SetupProductionDatabaseRevalidationCloseFailure,
+    SetupProductionDatabaseRevalidationCloseOutcome, SetupProductionDatabaseRevalidationError,
     StartupAuthorizedProductionDatabaseConnection,
     activate_production_database_for_operational_use, authorize_production_database_startup,
+    close_and_preserve_prepared_metadata_validated_production_database_for_setup,
     revalidate_identity_bound_staged_key_production_database_for_setup,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
     validate_production_database_live_metadata_and_headers,

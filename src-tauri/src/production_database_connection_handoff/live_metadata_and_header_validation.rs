@@ -19,8 +19,11 @@ mod database_evidence_correspondence_validation;
 mod setup_database_revalidation;
 
 pub(crate) use setup_database_revalidation::{
+    ClosedPreparedMetadataValidatedProductionDatabaseForSetup,
     PreparedMetadataValidatedProductionDatabaseForSetup, SetupPreparedMetadataMismatchCloseFailure,
-    SetupProductionDatabaseRevalidationError,
+    SetupProductionDatabaseRevalidationCloseFailure,
+    SetupProductionDatabaseRevalidationCloseOutcome, SetupProductionDatabaseRevalidationError,
+    close_and_preserve_prepared_metadata_validated_production_database_for_setup,
     revalidate_identity_bound_staged_key_production_database_for_setup,
 };
 

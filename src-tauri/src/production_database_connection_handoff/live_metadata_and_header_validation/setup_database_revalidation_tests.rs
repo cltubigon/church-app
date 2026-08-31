@@ -1,7 +1,7 @@
 use std::{
     cell::Cell,
     fs::{self, OpenOptions},
-    mem::{needs_drop, size_of},
+    mem::{needs_drop, size_of, size_of_val},
     os::windows::io::AsRawHandle,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -639,7 +639,7 @@ fn source_contract_locks_order_full_typed_equality_and_excluded_authority() {
         .0;
     assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 12);
     assert!(fields.contains("database_created_at: DatabaseCreationTimestamp"));
-    assert_eq!(source.matches("pub(crate) fn ").count(), 3); // entry, ordinary close, mismatch retry
+    assert_eq!(source.matches("pub(crate) fn ").count(), 5); // Slice 2 plus preserved close and retry
     for forbidden in [
         "pub fn",
         "Deref",
@@ -682,4 +682,286 @@ fn source_contract_locks_order_full_typed_equality_and_excluded_authority() {
             "unexpected capability: {forbidden}"
         );
     }
+}
+
+#[test]
+fn slice_3_real_success_explicitly_closes_and_preserves_resource_free_proof() {
+    let fixture = Fixture::new();
+    let before = fs::read(fixture.path().as_path()).unwrap();
+    let validated = fixture.revalidate().unwrap();
+    fixture.assert_write_access(false);
+    let outcome =
+        handoff::close_and_preserve_prepared_metadata_validated_production_database_for_setup(
+            validated,
+        );
+    assert_eq!(format!("{outcome:?}"), "Closed([REDACTED])");
+    let handoff::SetupProductionDatabaseRevalidationCloseOutcome::Closed(closed) = outcome else {
+        panic!("explicit close must return the setup proof");
+    };
+    let _: &handoff::ClosedPreparedMetadataValidatedProductionDatabaseForSetup = &closed;
+    assert_eq!(
+        format!("{closed:?}"),
+        "ClosedPreparedMetadataValidatedProductionDatabaseForSetup([REDACTED])"
+    );
+    assert_eq!(size_of_val(&closed), 0);
+    fixture.assert_write_access(true);
+    assert_eq!(fs::read(fixture.path().as_path()).unwrap(), before);
+    assert!(!fixture.paths.active_database_key.as_path().exists());
+
+    // The existing ordinary close still returns the canonical payload-free result.
+    let ordinary: ProductionDatabaseConnectionCloseOutcome = fixture.revalidate().unwrap().close();
+    assert!(matches!(
+        ordinary,
+        ProductionDatabaseConnectionCloseOutcome::Closed
+    ));
+}
+
+#[test]
+fn slice_3_repeated_close_failures_retain_same_lifetime_until_close_only_retry() {
+    let fixture = Fixture::new();
+    let before = fs::read(fixture.path().as_path()).unwrap();
+    let validated = fixture.revalidate().unwrap();
+    let guard = validated.database.owner.guard.handle.as_raw_handle();
+    let sqlite =
+        handoff::sqlite_main_database_handle(&validated.database.owner.connection).unwrap();
+    let close_calls = Cell::new(0);
+    // Inject at the existing canonical close seam, after genuine Slice-2 success.
+    // No new production callback or canonical-close change is needed.
+    let outcome =
+        preserve_revalidation_close_result(validated.database.close_using(|connection| {
+            close_calls.set(close_calls.get() + 1);
+            fixture.assert_write_access(false);
+            Err(connection)
+        }));
+    assert_eq!(format!("{outcome:?}"), "Failed([REDACTED])");
+    let SetupProductionDatabaseRevalidationCloseOutcome::Failed(mut failure) = outcome else {
+        panic!("failed close cannot produce a closed proof");
+    };
+    let _: &handoff::SetupProductionDatabaseRevalidationCloseFailure = &failure;
+    for _ in 0..3 {
+        assert_eq!(
+            format!("{failure:?}"),
+            "SetupProductionDatabaseRevalidationCloseFailure([REDACTED])"
+        );
+        assert_eq!(failure.failure.owner.guard.handle.as_raw_handle(), guard);
+        assert_eq!(
+            handoff::sqlite_main_database_handle(&failure.failure.owner.connection).unwrap(),
+            sqlite
+        );
+        fixture.assert_write_access(false);
+        // The canonical retry's exact lifetime handoff, with injected failure.
+        let repeated = preserve_revalidation_close_result(handoff::close_lifetime_owner_using(
+            failure.failure.owner,
+            |connection| {
+                close_calls.set(close_calls.get() + 1);
+                fixture.assert_write_access(false);
+                Err(connection)
+            },
+        ));
+        let SetupProductionDatabaseRevalidationCloseOutcome::Failed(retained) = repeated else {
+            panic!("repeated failure must preserve pending setup provenance");
+        };
+        failure = retained;
+    }
+    assert_eq!(close_calls.get(), 4);
+    assert_eq!(failure.failure.owner.guard.handle.as_raw_handle(), guard);
+    assert_eq!(
+        handoff::sqlite_main_database_handle(&failure.failure.owner.connection).unwrap(),
+        sqlite
+    );
+    // Keep the earlier comparison's failure injection armed: retry cannot enter it.
+    FAIL_MISMATCH_CLOSE.with(|fail| fail.set(true));
+    let outcome = failure.retry_close();
+    assert!(FAIL_MISMATCH_CLOSE.with(|fail| fail.replace(false)));
+    let SetupProductionDatabaseRevalidationCloseOutcome::Closed(closed) = outcome else {
+        panic!("eventual canonical close must return the same closed proof type");
+    };
+    assert_eq!(size_of_val(&closed), 0);
+    fixture.assert_write_access(true);
+    assert_eq!(fs::read(fixture.path().as_path()).unwrap(), before);
+}
+
+#[test]
+fn slice_3_proof_and_failure_are_opaque_redacted_and_non_serializable() {
+    macro_rules! assert_not_impl {
+        ($owner:ty, $bound:path) => {{
+            trait AmbiguousIfImpl<A> {
+                fn check() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+            struct Implemented;
+            impl<T: ?Sized + $bound> AmbiguousIfImpl<Implemented> for T {}
+            let _ = <$owner as AmbiguousIfImpl<_>>::check;
+        }};
+    }
+    macro_rules! assert_opaque {
+        ($owner:ty) => {
+            assert_not_impl!($owner, Clone);
+            assert_not_impl!($owner, Copy);
+            assert_not_impl!($owner, Default);
+            assert_not_impl!($owner, std::ops::Deref);
+            assert_not_impl!($owner, AsRef<rusqlite::Connection>);
+            assert_not_impl!($owner, serde::Serialize);
+            assert_not_impl!($owner, serde::de::DeserializeOwned);
+        };
+    }
+    assert_opaque!(ClosedPreparedMetadataValidatedProductionDatabaseForSetup);
+    assert_opaque!(SetupProductionDatabaseRevalidationCloseFailure);
+    assert_opaque!(SetupProductionDatabaseRevalidationCloseOutcome);
+    assert_eq!(
+        size_of::<ClosedPreparedMetadataValidatedProductionDatabaseForSetup>(),
+        0
+    );
+    assert!(!needs_drop::<
+        ClosedPreparedMetadataValidatedProductionDatabaseForSetup,
+    >());
+    assert_eq!(
+        size_of::<SetupProductionDatabaseRevalidationCloseFailure>(),
+        size_of::<ProductionDatabaseConnectionCloseFailure>()
+    );
+    assert!(needs_drop::<SetupProductionDatabaseRevalidationCloseFailure>());
+}
+
+#[test]
+fn slice_3_source_contract_locks_close_only_provenance_and_resource_release() {
+    let source = include_str!("setup_database_revalidation.rs");
+    let slice_3 = source.split_once("/// Resource-free evidence").unwrap().1;
+    for (name, fields) in [
+        (
+            "ClosedPreparedMetadataValidatedProductionDatabaseForSetup",
+            "_private: (),",
+        ),
+        (
+            "SetupProductionDatabaseRevalidationCloseFailure",
+            "failure: ProductionDatabaseConnectionCloseFailure,",
+        ),
+    ] {
+        assert_eq!(
+            slice_3
+                .split_once(&format!("pub(crate) struct {name} {{"))
+                .unwrap()
+                .1
+                .split_once('}')
+                .unwrap()
+                .0
+                .trim(),
+            fields
+        );
+    }
+    let transition = slice_3
+        .split_once("pub(crate) fn close_and_preserve_prepared_metadata_validated_production_database_for_setup(")
+        .unwrap().1.split_once("\n}").unwrap().0;
+    assert_eq!(
+        transition.trim(),
+        "database: PreparedMetadataValidatedProductionDatabaseForSetup,\n) -> SetupProductionDatabaseRevalidationCloseOutcome {\n    preserve_revalidation_close_result(database.database.close())"
+    );
+    let retry = slice_3
+        .split_once("pub(crate) fn retry_close(self)")
+        .unwrap()
+        .1
+        .split_once("\n}")
+        .unwrap()
+        .0;
+    assert_eq!(
+        retry.trim(),
+        "-> SetupProductionDatabaseRevalidationCloseOutcome {\n        preserve_revalidation_close_result(self.failure.retry_close())\n    }"
+    );
+    let mapping = slice_3
+        .split_once("fn preserve_revalidation_close_result(")
+        .unwrap()
+        .1
+        .split_once("\n#[cfg(test)]")
+        .unwrap()
+        .0;
+    assert_eq!(
+        mapping.trim(),
+        "outcome: ProductionDatabaseConnectionCloseOutcome,\n) -> SetupProductionDatabaseRevalidationCloseOutcome {\n    match outcome {\n        ProductionDatabaseConnectionCloseOutcome::Closed => {\n            SetupProductionDatabaseRevalidationCloseOutcome::Closed(\n                ClosedPreparedMetadataValidatedProductionDatabaseForSetup { _private: () },\n            )\n        }\n        ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {\n            SetupProductionDatabaseRevalidationCloseOutcome::Failed(\n                SetupProductionDatabaseRevalidationCloseFailure { failure },\n            )\n        }\n    }\n}"
+    );
+    assert_eq!(
+        source
+            .matches("ClosedPreparedMetadataValidatedProductionDatabaseForSetup { _private: () }")
+            .count(),
+        1
+    );
+    assert_eq!(
+        source
+            .matches("preserve_revalidation_close_result(")
+            .count(),
+        3
+    );
+    assert_eq!(slice_3.matches("pub(crate) fn ").count(), 2);
+    assert!(!slice_3.contains("impl ClosedPreparedMetadataValidatedProductionDatabaseForSetup"));
+    assert!(slice_3.contains("#[must_use = \"the setup close outcome retains either closed provenance or the live lifetime\"]"));
+    for forbidden in [
+        "DatabaseMetadataContractV1",
+        "SetupDatabaseIdentityProof",
+        "ReloadedStaged",
+        "ReloadVerifiedStaged",
+        "PreparedFirstTimeSetupPublicationMaterials",
+        "AllStagedArtifactsReloadVerified",
+        "ProductionDatabasePath",
+        "Connection::",
+        "validate_",
+        "compare_prepared_metadata",
+        "inspect_",
+        "open_",
+        "PRAGMA",
+        "SELECT",
+        "pub fn",
+        "pub(super)",
+        "into_inner",
+        "into_parts",
+        "Deref",
+        "AsRef",
+        "Serialize",
+        "Deserialize",
+        "TrustedCurrent",
+        "AssuredFreshnessAnchor",
+        "StartupAuthorized",
+        "OperationalProductionDatabase",
+        "first_time_setup_publication",
+        "fs::",
+        "unsafe",
+        "Mutex",
+        "LockFileEx",
+        "rename",
+        "remove_",
+        "SECURITY_DESCRIPTOR",
+    ] {
+        assert!(
+            !slice_3.contains(forbidden),
+            "unexpected Slice-3 capability: {forbidden}"
+        );
+    }
+    // Lock unchanged lower-level ordering and complete failure ownership, including
+    // the inspection whose private native handles cannot be observed by this module.
+    let canonical = include_str!("../../production_database_connection_handoff.rs");
+    let close = canonical
+        .split_once("fn close_lifetime_owner_using(")
+        .unwrap()
+        .1
+        .split_once("\nfn encode_guard_path")
+        .unwrap()
+        .0;
+    assert!(close.contains("match close(connection) {\n        Ok(()) => {\n            drop(guard);\n            drop(inspected);\n            ProductionDatabaseConnectionCloseOutcome::Closed"));
+    assert!(close.contains("owner: ConnectionLifetimeOwner {\n                    connection,\n                    guard,\n                    inspected,\n                }"));
+    let canonical_retry = canonical
+        .split_once("impl ProductionDatabaseConnectionCloseFailure {")
+        .unwrap()
+        .1
+        .split_once("\n}")
+        .unwrap()
+        .0;
+    assert!(canonical_retry.contains("close_lifetime_owner(self.owner)"));
+    let ordinary = source
+        .split_once("pub(crate) fn close(self)")
+        .unwrap()
+        .1
+        .split_once("\n}")
+        .unwrap()
+        .0;
+    assert_eq!(
+        ordinary.trim(),
+        "-> ProductionDatabaseConnectionCloseOutcome {\n        self.database.close()\n    }"
+    );
 }
