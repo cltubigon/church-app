@@ -13,9 +13,11 @@ mod protected_artifact_staging_operation;
 
 #[allow(unused_imports)]
 pub(crate) use protected_artifact_staging_operation::{
-    AllProtectedArtifactsStagedFirstTimeSetupOperation,
+    AllProtectedArtifactsStagedFirstTimeSetupOperation, FirstTimeSetupPreActivePublicationError,
     FirstTimeSetupProtectedArtifactStagingError, FirstTimeSetupProtectedArtifactStagingOperation,
+    PreparedFirstTimeSetupActivePublicationOperation,
     StagedVerificationCompletedFirstTimeSetupOperation,
+    prepare_first_time_setup_active_publication,
     prepare_first_time_setup_protected_artifact_staging_operation,
     stage_first_time_setup_protected_artifacts, verify_all_staged_first_time_setup_operation,
 };

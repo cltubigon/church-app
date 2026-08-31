@@ -112,7 +112,10 @@ impl Drop for Fixture {
 }
 
 fn wrappers(context: &FirstTimeSetupStagedVerificationContext) -> [&[u8]; 5] {
-    let pending = &context.pending_publication;
+    pending_wrappers(&context.pending_publication)
+}
+
+fn pending_wrappers(pending: &PendingSetupPublicationPayloads) -> [&[u8]; 5] {
     [
         pending.protected_database_key_wrapper.as_bytes(),
         pending
@@ -215,7 +218,7 @@ fn each_writer_failure_is_terminal_preserves_residue_and_never_runs_later_writer
 }
 
 #[test]
-fn owners_are_non_clone_non_copy_non_serializable_and_have_no_deref() {
+fn pre_active_publication_owners_are_non_clone_non_copy_non_serializable_and_have_no_deref() {
     macro_rules! assert_not_impl {
         ($owner:ty, $bound:path) => {{
             trait AmbiguousIfImplemented<A> {
@@ -242,6 +245,8 @@ fn owners_are_non_clone_non_copy_non_serializable_and_have_no_deref() {
     assert_sealed!(AllProtectedArtifactsStagedFirstTimeSetupOperation);
     assert_sealed!(StagedVerificationCompletedFirstTimeSetupOperation);
     assert_not_impl!(StagedVerificationCompletedFirstTimeSetupOperation, Default);
+    assert_sealed!(PreparedFirstTimeSetupActivePublicationOperation);
+    assert_not_impl!(PreparedFirstTimeSetupActivePublicationOperation, Default);
 }
 
 fn production() -> &'static str {
@@ -288,14 +293,14 @@ fn authority_is_zero_sized_private_and_bound_only_to_the_publication_machine() {
         "modsealed{pubtraitMachine{}implMachineforsuper::FirstTimeSetupPublicationStateMachine{}}"
     ));
     assert!(bridge.contains("traitAuthorityBinding:sealed::Machine{typeAuthority;}"));
-    assert_eq!(bridge.matches("pub(crate)fn").count(), 6);
-    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 6);
-    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 6);
+    assert_eq!(bridge.matches("pub(crate)fn").count(), 7);
+    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 7);
+    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 7);
     assert!(!bridge.contains("pub(crate)modsealed"));
 }
 
 #[test]
-fn protected_artifact_staging_operation_bridges_require_authority_and_reject_wrong_order() {
+fn pre_active_publication_bridges_require_authority_and_reject_wrong_order() {
     use protected_artifact_staging as staging;
     type Advance = fn(
         &ProtectedArtifactStagingAuthority,
@@ -304,7 +309,7 @@ fn protected_artifact_staging_operation_bridges_require_authority_and_reject_wro
         FirstTimeSetupPublicationStateMachine,
         crate::first_time_setup_publication::FirstTimeSetupPublicationTransitionError,
     >;
-    let advances: [Advance; 5] = [
+    let advances: [Advance; 6] = [
         staging::advance_database_key_staged::<FirstTimeSetupPublicationStateMachine>,
         staging::advance_freshness_authentication_key_staged::<FirstTimeSetupPublicationStateMachine>,
         staging::advance_authenticated_freshness_anchor_staged::<
@@ -312,6 +317,9 @@ fn protected_artifact_staging_operation_bridges_require_authority_and_reject_wro
         >,
         staging::advance_evidence_authentication_key_staged::<FirstTimeSetupPublicationStateMachine>,
         staging::advance_authenticated_evidence_staged::<FirstTimeSetupPublicationStateMachine>,
+        staging::advance_all_staged_artifacts_reload_verified::<
+            FirstTimeSetupPublicationStateMachine,
+        >,
     ];
     let boundaries = [
         "CanonicalDatabaseClosedAndMaterialsPrepared",
@@ -320,11 +328,12 @@ fn protected_artifact_staging_operation_bridges_require_authority_and_reject_wro
         "AuthenticatedFreshnessAnchorStaged",
         "EvidenceAuthenticationKeyWrapperStaged",
         "AuthenticatedEvidenceStaged",
+        "AllStagedArtifactsReloadVerified",
     ];
     // Tests are descendants of the sealed module; no production test factory
     // is needed to exercise the bridge's unchanged transition semantics.
     let authority = ProtectedArtifactStagingAuthority { _private: () };
-    for completed in 0..=5 {
+    for completed in 0..=6 {
         for (index, advance) in advances.iter().enumerate() {
             let mut machine = staging::begin::<FirstTimeSetupPublicationStateMachine>(&authority);
             for preceding in &advances[..completed] {
@@ -364,8 +373,8 @@ fn source_seals_inputs_fields_and_construction_without_machine_pairing_or_replac
             )
         );
     }
-    assert_eq!(source.matches("pub(crate) fn ").count(), 3);
-    assert_eq!(source.matches("impl ").count(), 4); // Binding and redacted Debug only.
+    assert_eq!(source.matches("pub(crate) fn ").count(), 4);
+    assert_eq!(source.matches("impl ").count(), 5); // Binding and redacted Debug only.
     let construction = source
         .split_once("pub(crate) fn prepare_")
         .unwrap()
@@ -473,10 +482,8 @@ fn source_has_no_publication_retry_cleanup_or_detachable_authority() {
         "revalidate_",
         "open_identity_",
         "close_and_preserve_",
-        "AllStagedArtifactsReloadVerified",
         "Published",
         "FirstTimeSetupPublicationEvent",
-        "ReloadVerified",
         "ReadyForSetupCompletion",
         "std::fs",
         "rename(",
@@ -519,7 +526,10 @@ fn bound_verification_source_locks_single_input_single_call_and_unchanged_error_
     let transition = source
         .split_once("pub(crate) fn verify_all_staged_first_time_setup_operation(")
         .unwrap()
-        .1;
+        .1
+        .split("/// Consume the bound verification success")
+        .next()
+        .unwrap();
     // The entire body locks moves of the original four fields. There is no
     // second verifier, state transition, error mapping, retry, or cleanup path.
     assert_eq!(
@@ -606,13 +616,13 @@ fn bound_verification_source_locks_exact_opaque_owner_and_only_success_construct
             .count(),
         1
     );
-    // Only declaration, Debug implementation, and the successful return; no
+    // Declaration, Debug, successful return, and consuming destructure; no
     // independent factory, Default, getters, conversions, or replacement API.
     assert_eq!(
         source
             .matches("StagedVerificationCompletedFirstTimeSetupOperation {")
             .count(),
-        3
+        4
     );
     assert!(!source.contains("impl StagedVerificationCompletedFirstTimeSetupOperation"));
     assert_eq!(
@@ -625,6 +635,227 @@ fn bound_verification_source_locks_exact_opaque_owner_and_only_success_construct
 
 use super::super::verification_tests::{FailClose, Fixture as VerificationFixture};
 use crate::production_database_connection_handoff as handoff;
+
+#[test]
+fn pre_active_publication_source_locks_consumption_proof_retirement_and_only_one_advance() {
+    let source = production();
+    let transition = source
+        .split_once("pub(crate) fn prepare_first_time_setup_active_publication(")
+        .unwrap()
+        .1;
+    let without_comments = transition
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Lock the complete body: same authority/machine/directories, no second
+    // construction, copied metadata, rebuilt payload/path family, I/O, verifier,
+    // active loader/publication, observer, cleanup, or later trust boundary.
+    assert_eq!(
+        compact(&without_comments),
+        compact(
+            "operation: StagedVerificationCompletedFirstTimeSetupOperation,
+        ) -> Result<PreparedFirstTimeSetupActivePublicationOperation, FirstTimeSetupPreActivePublicationError> {
+            let StagedVerificationCompletedFirstTimeSetupOperation {
+                completed_context, directories, machine, authority,
+            } = operation;
+            let CompletedFirstTimeSetupStagedVerificationContext {
+                installation_evidence, freshness_anchor, closed_database,
+                pending_publication, database_metadata, installation_evidence_paths,
+                database_key_paths, freshness_anchor_paths,
+            } = completed_context;
+            {
+                let _installation_evidence = installation_evidence;
+                let _freshness_anchor = freshness_anchor;
+                let _closed_database = closed_database;
+            }
+            let machine = protected_artifact_staging::advance_all_staged_artifacts_reload_verified::<
+                FirstTimeSetupPublicationStateMachine,
+            >(&authority, machine)
+            .map_err(|_| FirstTimeSetupPreActivePublicationError::InternalState)?;
+            Ok(PreparedFirstTimeSetupActivePublicationOperation {
+                pending_publication, database_metadata, installation_evidence_paths,
+                database_key_paths, freshness_anchor_paths, directories, machine, authority,
+            })
+        }"
+        )
+    );
+    assert_eq!(
+        source
+            .matches("::advance_all_staged_artifacts_reload_verified::<")
+            .count(),
+        1
+    );
+    assert_eq!(
+        source
+            .matches("ProtectedArtifactStagingAuthority { _private: () }")
+            .count(),
+        1
+    );
+    // Also compile-check the narrow reexport and its single by-value input.
+    let _: fn(
+        StagedVerificationCompletedFirstTimeSetupOperation,
+    ) -> Result<
+        PreparedFirstTimeSetupActivePublicationOperation,
+        FirstTimeSetupPreActivePublicationError,
+    > = super::super::super::prepare_first_time_setup_active_publication;
+}
+
+#[test]
+fn pre_active_publication_source_locks_exact_opaque_owner_and_coarse_error() {
+    let source = production();
+    let fields = source
+        .split_once("pub(crate) struct PreparedFirstTimeSetupActivePublicationOperation {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    assert_eq!(
+        compact(fields),
+        compact(
+            "pending_publication: PendingSetupPublicationPayloads,
+        database_metadata: DatabaseMetadataContractV1,
+        installation_evidence_paths: InstallationEvidencePersistencePaths,
+        database_key_paths: DatabaseKeyPersistencePaths,
+        freshness_anchor_paths: FreshnessAnchorPersistencePaths,
+        directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
+        machine: FirstTimeSetupPublicationStateMachine,
+        authority: ProtectedArtifactStagingAuthority,"
+        )
+    );
+    assert_eq!(
+        source
+            .matches("PreparedFirstTimeSetupActivePublicationOperation {")
+            .count(),
+        3
+    );
+    assert!(!source.contains("impl PreparedFirstTimeSetupActivePublicationOperation"));
+    let error = source
+        .split_once("pub(crate) enum FirstTimeSetupPreActivePublicationError {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    assert_eq!(compact(error), "InternalState,");
+}
+
+#[test]
+fn pre_active_publication_source_locks_internal_milestone_and_neutral_bridge() {
+    let publication = include_str!("../../first_time_setup_publication.rs");
+    let bridge = publication
+        .split_once("pub(crate) fn advance_all_staged_artifacts_reload_verified")
+        .unwrap()
+        .1
+        .split_once("fn in_progress(")
+        .unwrap()
+        .0;
+    assert_eq!(compact(bridge), compact(
+        "<M: AuthorityBinding>(
+            _authority: &M::Authority,
+            machine: FirstTimeSetupPublicationStateMachine,
+        ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError> {
+            in_progress(machine.advance(
+                FirstTimeSetupPublicationEvent::AllStagedArtifactsReloadVerified(
+                    AllStagedArtifactsReloadVerified { _private: () },
+                ),
+            ))
+        }"
+    ));
+    let pure_production = publication.split("#[cfg(test)]\nmod tests").next().unwrap();
+    assert_eq!(
+        pure_production
+            .matches("AllStagedArtifactsReloadVerified { _private: () }")
+            .count(),
+        1
+    );
+    for forbidden in [
+        "std::fs",
+        "std::path",
+        "windows_sys",
+        "rusqlite",
+        "Vec<",
+        "PathBuf",
+        "EncodedProtectedWrapper",
+        "DatabaseMetadataContractV1",
+        "PersistencePaths",
+        "PreparedFirstTimeSetupProtectedArtifactDirectories",
+        "ProtectedArtifactStagingAuthority",
+        "impl AllStagedArtifactsReloadVerified",
+        "-> AllStagedArtifactsReloadVerified",
+    ] {
+        assert!(
+            !pure_production.contains(forbidden),
+            "forbidden dependency: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn pre_active_publication_real_chain_preserves_payload_allocations_paths_metadata_and_residue() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    assert_boundary(&completed.machine, "AuthenticatedEvidenceStaged");
+    let context = &completed.completed_context;
+    let allocations = pending_wrappers(&context.pending_publication).map(|bytes| bytes.as_ptr());
+    let bytes = pending_wrappers(&context.pending_publication).map(|bytes| bytes.to_vec());
+    let metadata = context.database_metadata;
+    // Test-only expected values; production moves all three families unchanged.
+    let evidence_paths = context.installation_evidence_paths.clone();
+    let key_paths = context.database_key_paths.clone();
+    let freshness_paths = context.freshness_anchor_paths.clone();
+    let before = fixture.snapshot();
+    assert_eq!(before.len(), 7); // Canonical DB, five stages, sentinel; no active wrappers.
+
+    let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    assert_boundary(&prepared.machine, "AllStagedArtifactsReloadVerified");
+    assert_eq!(
+        format!("{prepared:?}"),
+        "PreparedFirstTimeSetupActivePublicationOperation([REDACTED])"
+    );
+    assert_eq!(
+        pending_wrappers(&prepared.pending_publication).map(|bytes| bytes.as_ptr()),
+        allocations
+    );
+    assert_eq!(
+        pending_wrappers(&prepared.pending_publication).map(|bytes| bytes.to_vec()),
+        bytes
+    );
+    assert_eq!(prepared.database_metadata, metadata);
+    assert_eq!(prepared.installation_evidence_paths, evidence_paths);
+    assert_eq!(prepared.database_key_paths, key_paths);
+    assert_eq!(prepared.freshness_anchor_paths, freshness_paths);
+    assert_eq!(
+        format!("{:?}", prepared.directories),
+        "PreparedFirstTimeSetupProtectedArtifactDirectories([REDACTED])"
+    );
+    // Zero-sized authority has no meaningful address identity: its exact move
+    // and sole production constructor are enforced by the source contract.
+    assert_eq!(size_of_val(&prepared.authority), 0);
+    assert_eq!(fixture.snapshot(), before);
+    drop(prepared);
+    assert_eq!(fixture.snapshot(), before);
+}
+
+#[test]
+fn pre_active_publication_internal_discrepancy_fails_without_cleanup() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let mut completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    // Descendant-test-only invariant corruption; no production replacement API.
+    completed.machine = protected_artifact_staging::begin::<FirstTimeSetupPublicationStateMachine>(
+        &completed.authority,
+    );
+    let before = fixture.snapshot();
+    assert_eq!(
+        prepare_first_time_setup_active_publication(completed).unwrap_err(),
+        FirstTimeSetupPreActivePublicationError::InternalState,
+    );
+    assert_eq!(fixture.snapshot(), before);
+    fixture.assert_write_access(true);
+}
 
 fn stage_real_fixture(
     fixture: &mut VerificationFixture,

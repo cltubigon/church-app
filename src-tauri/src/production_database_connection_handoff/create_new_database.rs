@@ -75,10 +75,12 @@ pub(crate) use current_canonical_database_identity::{
 #[allow(unused_imports)]
 pub(crate) use first_time_setup_staged_verification_context::{
     AllProtectedArtifactsStagedFirstTimeSetupOperation,
-    CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupProtectedArtifactStagingError,
-    FirstTimeSetupProtectedArtifactStagingOperation, FirstTimeSetupStagedVerificationContext,
-    FirstTimeSetupStagedVerificationContextError, FirstTimeSetupStagedVerificationError,
+    CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupPreActivePublicationError,
+    FirstTimeSetupProtectedArtifactStagingError, FirstTimeSetupProtectedArtifactStagingOperation,
+    FirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContextError,
+    FirstTimeSetupStagedVerificationError, PreparedFirstTimeSetupActivePublicationOperation,
     StagedVerificationCompletedFirstTimeSetupOperation,
+    prepare_first_time_setup_active_publication,
     prepare_first_time_setup_protected_artifact_staging_operation,
     prepare_first_time_setup_staged_verification_context,
     stage_first_time_setup_protected_artifacts, verify_all_staged_first_time_setup_operation,

@@ -342,7 +342,7 @@ impl FirstTimeSetupPublicationStateMachine {
     }
 }
 
-/// Production bridge for the sealed protected-artifact staging operation only.
+/// Production bridge for the sealed protected-artifact staging lineage only.
 /// Milestones are constructed and applied here; none can escape to a caller.
 /// Every call requires the opaque authority owned by the sealed operation.
 pub(crate) mod protected_artifact_staging {
@@ -428,6 +428,18 @@ pub(crate) mod protected_artifact_staging {
         )
     }
 
+    pub(crate) fn advance_all_staged_artifacts_reload_verified<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(machine.advance(
+            FirstTimeSetupPublicationEvent::AllStagedArtifactsReloadVerified(
+                AllStagedArtifactsReloadVerified { _private: () },
+            ),
+        ))
+    }
+
     fn in_progress(
         advance: Result<FirstTimeSetupPublicationAdvance, FirstTimeSetupPublicationTransitionError>,
     ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
@@ -457,9 +469,9 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap();
-        assert_eq!(source.matches("pub(crate) fn ").count(), 6);
-        assert_eq!(source.matches("_private: ()").count(), 6);
-        assert_eq!(source.matches("machine.advance(").count(), 5);
+        assert_eq!(source.matches("pub(crate) fn ").count(), 7);
+        assert_eq!(source.matches("_private: ()").count(), 7);
+        assert_eq!(source.matches("machine.advance(").count(), 6);
         assert_eq!(
             source
                 .matches("FirstTimeSetupPublicationStateMachine::begin(")
@@ -467,7 +479,6 @@ mod tests {
             1
         );
         for forbidden in [
-            "AllStagedArtifactsReloadVerified",
             "Published",
             "FinalActive",
             "CanonicalInstallation",

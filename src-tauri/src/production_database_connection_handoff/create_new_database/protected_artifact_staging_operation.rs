@@ -1,10 +1,17 @@
-//! One sealed setup operation, from pre-staging ownership through staged verification.
-//! Verification preserves the staging boundary; no active publication occurs here.
+//! One sealed setup operation, from pre-staging ownership to pre-active publication.
+//! Staged verification is historical; no active publication occurs here.
 
 use std::fmt;
 
 use crate::first_time_setup_publication::{
     FirstTimeSetupPublicationStateMachine, protected_artifact_staging,
+};
+use crate::{
+    database_metadata_contract::DatabaseMetadataContractV1,
+    storage_foundation::{
+        DatabaseKeyPersistencePaths, FreshnessAnchorPersistencePaths,
+        InstallationEvidencePersistencePaths,
+    },
 };
 
 use super::{
@@ -16,7 +23,8 @@ use super::{
         write_staged_freshness_authentication_key_wrapper,
     },
     CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContext,
-    FirstTimeSetupStagedVerificationError, verify_first_time_setup_staged_context,
+    FirstTimeSetupStagedVerificationError, PendingSetupPublicationPayloads,
+    verify_first_time_setup_staged_context,
 };
 
 /// Payload-free authority, constructible only in this sealed module. The
@@ -73,6 +81,32 @@ pub(crate) struct StagedVerificationCompletedFirstTimeSetupOperation {
 impl fmt::Debug for StagedVerificationCompletedFirstTimeSetupOperation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("StagedVerificationCompletedFirstTimeSetupOperation([REDACTED])")
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FirstTimeSetupPreActivePublicationError {
+    InternalState,
+}
+
+/// All five staged writes and the bound verification chain have earned the
+/// AllStagedArtifactsReloadVerified boundary. Active publication has not begun.
+/// Historical verification and retained directories give neither continuing
+/// filesystem correctness nor cross-process exclusivity or setup completion.
+pub(crate) struct PreparedFirstTimeSetupActivePublicationOperation {
+    pending_publication: PendingSetupPublicationPayloads,
+    database_metadata: DatabaseMetadataContractV1,
+    installation_evidence_paths: InstallationEvidencePersistencePaths,
+    database_key_paths: DatabaseKeyPersistencePaths,
+    freshness_anchor_paths: FreshnessAnchorPersistencePaths,
+    directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
+    machine: FirstTimeSetupPublicationStateMachine,
+    authority: ProtectedArtifactStagingAuthority,
+}
+
+impl fmt::Debug for PreparedFirstTimeSetupActivePublicationOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PreparedFirstTimeSetupActivePublicationOperation([REDACTED])")
     }
 }
 
@@ -207,6 +241,52 @@ pub(crate) fn verify_all_staged_first_time_setup_operation(
     let completed_context = verify_first_time_setup_staged_context(context)?;
     Ok(StagedVerificationCompletedFirstTimeSetupOperation {
         completed_context,
+        directories,
+        machine,
+        authority,
+    })
+}
+
+/// Consume the bound verification success, retiring its staged-only proofs.
+/// Advance only the retained machine with its original authority. No storage
+/// operation or verification runs here, and an internal discrepancy is terminal.
+pub(crate) fn prepare_first_time_setup_active_publication(
+    operation: StagedVerificationCompletedFirstTimeSetupOperation,
+) -> Result<PreparedFirstTimeSetupActivePublicationOperation, FirstTimeSetupPreActivePublicationError>
+{
+    let StagedVerificationCompletedFirstTimeSetupOperation {
+        completed_context,
+        directories,
+        machine,
+        authority,
+    } = operation;
+    let CompletedFirstTimeSetupStagedVerificationContext {
+        installation_evidence,
+        freshness_anchor,
+        closed_database,
+        pending_publication,
+        database_metadata,
+        installation_evidence_paths,
+        database_key_paths,
+        freshness_anchor_paths,
+    } = completed_context;
+    // These proofs end here; sealed provenance and the immediately applied
+    // milestone subsume them. No proof or equivalent wrapper is retained.
+    {
+        let _installation_evidence = installation_evidence;
+        let _freshness_anchor = freshness_anchor;
+        let _closed_database = closed_database;
+    }
+    let machine = protected_artifact_staging::advance_all_staged_artifacts_reload_verified::<
+        FirstTimeSetupPublicationStateMachine,
+    >(&authority, machine)
+    .map_err(|_| FirstTimeSetupPreActivePublicationError::InternalState)?;
+    Ok(PreparedFirstTimeSetupActivePublicationOperation {
+        pending_publication,
+        database_metadata,
+        installation_evidence_paths,
+        database_key_paths,
+        freshness_anchor_paths,
         directories,
         machine,
         authority,
