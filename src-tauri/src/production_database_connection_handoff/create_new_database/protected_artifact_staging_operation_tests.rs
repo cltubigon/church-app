@@ -240,6 +240,8 @@ fn owners_are_non_clone_non_copy_non_serializable_and_have_no_deref() {
     assert_not_impl!(ProtectedArtifactStagingAuthority, Default);
     assert_sealed!(FirstTimeSetupProtectedArtifactStagingOperation);
     assert_sealed!(AllProtectedArtifactsStagedFirstTimeSetupOperation);
+    assert_sealed!(StagedVerificationCompletedFirstTimeSetupOperation);
+    assert_not_impl!(StagedVerificationCompletedFirstTimeSetupOperation, Default);
 }
 
 fn production() -> &'static str {
@@ -362,8 +364,8 @@ fn source_seals_inputs_fields_and_construction_without_machine_pairing_or_replac
             )
         );
     }
-    assert_eq!(source.matches("pub(crate) fn ").count(), 2);
-    assert_eq!(source.matches("impl ").count(), 3); // Binding and redacted Debug only.
+    assert_eq!(source.matches("pub(crate) fn ").count(), 3);
+    assert_eq!(source.matches("impl ").count(), 4); // Binding and redacted Debug only.
     let construction = source
         .split_once("pub(crate) fn prepare_")
         .unwrap()
@@ -400,7 +402,7 @@ fn source_seals_inputs_fields_and_construction_without_machine_pairing_or_replac
 
 #[test]
 fn source_locks_every_borrow_write_success_then_advance_and_terminal_error() {
-    let source = compact(production());
+    let source = compact(production().split("/// Verify only").next().unwrap());
     let mut remaining = source
         .split_once("letcore=&context.verification_core;letpending=&context.pending_publication;")
         .unwrap()
@@ -464,10 +466,10 @@ fn source_locks_every_borrow_write_success_then_advance_and_terminal_error() {
 }
 
 #[test]
-fn source_has_no_verification_publication_retry_cleanup_or_detachable_authority() {
+fn source_has_no_publication_retry_cleanup_or_detachable_authority() {
     let source = production();
     for forbidden in [
-        "verify_",
+        "verify_reloaded_",
         "revalidate_",
         "open_identity_",
         "close_and_preserve_",
@@ -475,7 +477,6 @@ fn source_has_no_verification_publication_retry_cleanup_or_detachable_authority(
         "Published",
         "FirstTimeSetupPublicationEvent",
         "ReloadVerified",
-        "CompletedFirstTimeSetup",
         "ReadyForSetupCompletion",
         "std::fs",
         "rename(",
@@ -509,5 +510,337 @@ fn source_has_no_verification_publication_retry_cleanup_or_detachable_authority(
             !source.contains(forbidden),
             "forbidden capability: {forbidden}"
         );
+    }
+}
+
+#[test]
+fn bound_verification_source_locks_single_input_single_call_and_unchanged_error_passthrough() {
+    let source = production();
+    let transition = source
+        .split_once("pub(crate) fn verify_all_staged_first_time_setup_operation(")
+        .unwrap()
+        .1;
+    // The entire body locks moves of the original four fields. There is no
+    // second verifier, state transition, error mapping, retry, or cleanup path.
+    assert_eq!(
+        compact(transition),
+        compact(
+            "operation: AllProtectedArtifactsStagedFirstTimeSetupOperation,
+        ) -> Result<StagedVerificationCompletedFirstTimeSetupOperation,
+                    FirstTimeSetupStagedVerificationError> {
+            let AllProtectedArtifactsStagedFirstTimeSetupOperation {
+                context, directories, machine, authority,
+            } = operation;
+            let completed_context = verify_first_time_setup_staged_context(context)?;
+            Ok(StagedVerificationCompletedFirstTimeSetupOperation {
+                completed_context, directories, machine, authority,
+            })
+        }"
+        )
+    );
+    assert_eq!(
+        source
+            .matches("verify_first_time_setup_staged_context(")
+            .count(),
+        1
+    );
+    let _: fn(
+        AllProtectedArtifactsStagedFirstTimeSetupOperation,
+    ) -> Result<
+        StagedVerificationCompletedFirstTimeSetupOperation,
+        FirstTimeSetupStagedVerificationError,
+    > = super::super::super::verify_all_staged_first_time_setup_operation;
+
+    // The unchanged canonical error includes all three database error families;
+    // the direct `?` above preserves every nested live owner, including open
+    // construction failures, without wrapping or invoking disposal itself.
+    let canonical = include_str!("first_time_setup_staged_verification_context.rs");
+    let error = canonical
+        .split_once("pub(crate) enum FirstTimeSetupStagedVerificationError {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    assert_eq!(
+        compact(error),
+        compact(
+            "InstallationEvidence(StagedInstallationEvidenceVerificationError),
+        FreshnessAnchor(StagedFreshnessAnchorVerificationError),
+        DatabaseKey(StagedDatabaseKeyVerificationError),
+        DatabaseOpen(SetupProductionDatabaseOpenError),
+        DatabaseRevalidation(SetupProductionDatabaseRevalidationError),
+        DatabaseClose(SetupProductionDatabaseRevalidationCloseFailure),"
+        )
+    );
+}
+
+#[test]
+fn bound_verification_source_locks_exact_opaque_owner_and_only_success_construction() {
+    let source = production();
+    let fields = source
+        .split_once("pub(crate) struct StagedVerificationCompletedFirstTimeSetupOperation {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    assert_eq!(
+        compact(fields),
+        compact(
+            "completed_context: CompletedFirstTimeSetupStagedVerificationContext,
+        directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
+        machine: FirstTimeSetupPublicationStateMachine,
+        authority: ProtectedArtifactStagingAuthority,"
+        )
+    );
+    assert_eq!(
+        fields
+            .matches("CompletedFirstTimeSetupStagedVerificationContext")
+            .count(),
+        1
+    );
+    assert_eq!(
+        source
+            .matches("Ok(StagedVerificationCompletedFirstTimeSetupOperation {")
+            .count(),
+        1
+    );
+    // Only declaration, Debug implementation, and the successful return; no
+    // independent factory, Default, getters, conversions, or replacement API.
+    assert_eq!(
+        source
+            .matches("StagedVerificationCompletedFirstTimeSetupOperation {")
+            .count(),
+        3
+    );
+    assert!(!source.contains("impl StagedVerificationCompletedFirstTimeSetupOperation"));
+    assert_eq!(
+        source
+            .matches("ProtectedArtifactStagingAuthority { _private: () }")
+            .count(),
+        1
+    );
+}
+
+use super::super::verification_tests::{FailClose, Fixture as VerificationFixture};
+use crate::production_database_connection_handoff as handoff;
+
+fn stage_real_fixture(
+    fixture: &mut VerificationFixture,
+) -> AllProtectedArtifactsStagedFirstTimeSetupOperation {
+    let context = fixture.context.take().unwrap();
+    let core = &context.verification_core;
+    let directories = super::super::super::protected_artifact_directories::
+        prepare_first_time_setup_protected_artifact_directories(
+            &core.database_key_paths,
+            &core.freshness_anchor_paths,
+            &core.installation_evidence_paths,
+        ).unwrap();
+    stage_first_time_setup_protected_artifacts(
+        prepare_first_time_setup_protected_artifact_staging_operation(context, directories),
+    )
+    .unwrap()
+}
+
+#[test]
+fn bound_verification_real_success_retains_context_allocations_and_authenticated_evidence_boundary()
+{
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let allocations = wrappers(&staged.context).map(|bytes| bytes.as_ptr());
+    let metadata = staged.context.verification_core.database_metadata;
+    let before = fixture.snapshot();
+    assert_boundary(&staged.machine, "AuthenticatedEvidenceStaged");
+
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    assert_eq!(
+        format!("{completed:?}"),
+        "StagedVerificationCompletedFirstTimeSetupOperation([REDACTED])"
+    );
+    assert_boundary(&completed.machine, "AuthenticatedEvidenceStaged");
+    assert_eq!(size_of_val(&completed.authority), 0);
+    assert_eq!(
+        format!("{:?}", completed.directories),
+        "PreparedFirstTimeSetupProtectedArtifactDirectories([REDACTED])"
+    );
+    let context: &CompletedFirstTimeSetupStagedVerificationContext = &completed.completed_context;
+    assert_eq!(context.database_metadata, metadata);
+    let pending = &context.pending_publication;
+    assert_eq!(
+        [
+            pending.protected_database_key_wrapper.as_bytes().as_ptr(),
+            pending
+                .protected_freshness_authentication_key_wrapper
+                .as_bytes()
+                .as_ptr(),
+            pending
+                .protected_authenticated_freshness_anchor_wrapper
+                .as_bytes()
+                .as_ptr(),
+            pending
+                .protected_evidence_authentication_key_wrapper
+                .as_bytes()
+                .as_ptr(),
+            pending
+                .protected_authenticated_evidence_wrapper
+                .as_bytes()
+                .as_ptr(),
+        ],
+        allocations
+    );
+    assert!(fixture.context.is_none());
+    fixture.assert_write_access(true); // Canonical explicit database close succeeded.
+    assert_eq!(before.len(), 7); // DB, five stages, sentinel; no active wrappers.
+    assert_eq!(fixture.snapshot(), before);
+    drop(completed);
+    assert_eq!(fixture.snapshot(), before); // No artifact cleanup on owner drop.
+}
+
+#[test]
+fn bound_verification_missing_stages_preserve_each_canonical_error_and_residue() {
+    use crate::installation_evidence_protection::{
+        StagedDatabaseKeyVerificationError, StagedFreshnessAnchorVerificationError,
+        StagedInstallationEvidenceVerificationError,
+    };
+    for index in 0..5 {
+        let mut fixture = VerificationFixture::new_unstaged();
+        let staged = stage_real_fixture(&mut fixture);
+        fs::remove_file(&fixture.staged_paths()[index]).unwrap();
+        let before = fixture.snapshot();
+        let error = verify_all_staged_first_time_setup_operation(staged).unwrap_err();
+        match index {
+            0 => assert!(matches!(
+                error,
+                FirstTimeSetupStagedVerificationError::DatabaseKey(
+                    StagedDatabaseKeyVerificationError::Unavailable
+                )
+            )),
+            1 | 2 => assert!(matches!(
+                error,
+                FirstTimeSetupStagedVerificationError::InstallationEvidence(
+                    StagedInstallationEvidenceVerificationError::Malformed
+                )
+            )),
+            3 | 4 => assert!(matches!(
+                error,
+                FirstTimeSetupStagedVerificationError::FreshnessAnchor(
+                    StagedFreshnessAnchorVerificationError::Malformed
+                )
+            )),
+            _ => unreachable!(),
+        }
+        fixture.assert_write_access(true);
+        assert_eq!(fixture.snapshot(), before);
+    }
+}
+
+#[test]
+fn bound_verification_preserves_database_open_identity_failure() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    // Test-only historical identity corruption before sealing the operation.
+    fixture
+        .context
+        .as_mut()
+        .unwrap()
+        .verification_core
+        .database_identity_proof
+        .created_leaf_identity
+        .file_id[0] ^= 1;
+    let staged = stage_real_fixture(&mut fixture);
+    let before = fixture.snapshot();
+    assert!(matches!(
+        verify_all_staged_first_time_setup_operation(staged),
+        Err(FirstTimeSetupStagedVerificationError::DatabaseOpen(
+            handoff::SetupProductionDatabaseOpenError::IdentityMismatch
+        ))
+    ));
+    fixture.assert_write_access(true);
+    assert_eq!(fixture.snapshot(), before);
+}
+
+#[test]
+fn bound_verification_preserves_all_revalidation_and_final_close_owners_without_retry() {
+    use crate::{
+        database_key::DatabaseKey,
+        installation_evidence_protection::{
+            protect_database_key, verify_reloaded_staged_database_key_for_setup,
+        },
+    };
+    use handoff::SetupProductionDatabaseRevalidationError as Revalidation;
+    for phase in 0..4 {
+        let mut fixture = VerificationFixture::new_unstaged();
+        let staged = stage_real_fixture(&mut fixture);
+        let core = &staged.context.verification_core;
+        match phase {
+            0 => {
+                let wrong_key = protect_database_key(
+                    &DatabaseKey::from_bytes([0x82; 32]),
+                    core.database_metadata.database_key_generation_identifier(),
+                )
+                .unwrap();
+                fs::write(&fixture.staged_paths()[0], wrong_key.as_bytes()).unwrap();
+            }
+            1 | 2 => {
+                let key = verify_reloaded_staged_database_key_for_setup(
+                    &core.database_key_paths,
+                    &core.database_metadata,
+                )
+                .unwrap()
+                .into_generation_bound_database_key();
+                let connection = rusqlite::Connection::open(
+                    core.installation_evidence_paths.active_database.as_path(),
+                )
+                .unwrap();
+                handoff::apply_key_once(&connection, &key).unwrap();
+                connection.execute_batch(if phase == 1 { "PRAGMA application_id = 0" } else {
+                    "UPDATE church_app_database_metadata SET database_created_at = database_created_at + 1"
+                }).unwrap();
+                connection.close().map_err(|(_, error)| error).unwrap();
+            }
+            _ => {} // Successful verification followed by failed explicit close.
+        }
+        let before = fixture.snapshot();
+        let injection = FailClose::arm();
+        let error = verify_all_staged_first_time_setup_operation(staged).unwrap_err();
+        assert_eq!(injection.attempts(), 1);
+        fixture.assert_write_access(false); // Complete guard lifetime still owned.
+        assert_eq!(fixture.snapshot(), before);
+        drop(injection);
+        // Explicit test disposal uses the original errors' existing capability;
+        // the production operation never retries verification or close.
+        match error {
+            FirstTimeSetupStagedVerificationError::DatabaseRevalidation(
+                Revalidation::IntegrityCloseFailed(failure),
+            ) if phase == 0 => assert!(matches!(
+                failure.retry_close(),
+                handoff::ProductionDatabaseValidationCloseRetryOutcome::Closed(_)
+            )),
+            FirstTimeSetupStagedVerificationError::DatabaseRevalidation(
+                Revalidation::LiveMetadataAndHeadersCloseFailed(failure),
+            ) if phase == 1 => assert!(matches!(
+                failure.retry_close(),
+                handoff::LiveMetadataAndHeaderValidationCloseRetryOutcome::Closed(_)
+            )),
+            FirstTimeSetupStagedVerificationError::DatabaseRevalidation(
+                Revalidation::PreparedMetadataMismatchCloseFailed(failure),
+            ) if phase == 2 => assert!(matches!(
+                failure.retry_close(),
+                Revalidation::PreparedMetadataMismatch
+            )),
+            FirstTimeSetupStagedVerificationError::DatabaseClose(failure) if phase == 3 => {
+                assert_eq!(
+                    format!("{failure:?}"),
+                    "SetupProductionDatabaseRevalidationCloseFailure([REDACTED])"
+                );
+                assert!(matches!(
+                    failure.retry_close(),
+                    handoff::SetupProductionDatabaseRevalidationCloseOutcome::Closed(_)
+                ));
+            }
+            _ => panic!("the exact ownership-bearing error must survive"),
+        }
+        fixture.assert_write_access(true);
+        assert_eq!(fixture.snapshot(), before);
     }
 }

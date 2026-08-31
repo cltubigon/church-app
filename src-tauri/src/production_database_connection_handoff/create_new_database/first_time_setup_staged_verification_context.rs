@@ -15,8 +15,9 @@ mod protected_artifact_staging_operation;
 pub(crate) use protected_artifact_staging_operation::{
     AllProtectedArtifactsStagedFirstTimeSetupOperation,
     FirstTimeSetupProtectedArtifactStagingError, FirstTimeSetupProtectedArtifactStagingOperation,
+    StagedVerificationCompletedFirstTimeSetupOperation,
     prepare_first_time_setup_protected_artifact_staging_operation,
-    stage_first_time_setup_protected_artifacts,
+    stage_first_time_setup_protected_artifacts, verify_all_staged_first_time_setup_operation,
 };
 
 use crate::{

@@ -26,13 +26,15 @@ use crate::{
     },
 };
 
-struct Fixture {
+pub(super) struct Fixture {
     root: PathBuf,
-    context: Option<FirstTimeSetupStagedVerificationContext>,
+    pub(super) context: Option<FirstTimeSetupStagedVerificationContext>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    // Shared real predecessor fixture; the bound-operation tests perform their
+    // own production directory preparation and sealed five-write transition.
+    pub(super) fn new_unstaged() -> Self {
         let temporary = std::env::temp_dir();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -103,6 +105,16 @@ impl Fixture {
             root,
             context: Some(context),
         };
+        fs::write(
+            fixture.root.join("sentinel.synthetic"),
+            b"unchanged synthetic sentinel",
+        )
+        .unwrap();
+        fixture
+    }
+
+    fn new() -> Self {
+        let fixture = Self::new_unstaged();
         let core = &fixture.context().verification_core;
         for directory in [
             core.installation_evidence_paths
@@ -124,11 +136,6 @@ impl Fixture {
         {
             fs::write(path, bytes).unwrap();
         }
-        fs::write(
-            fixture.root.join("sentinel.synthetic"),
-            b"unchanged synthetic sentinel",
-        )
-        .unwrap();
         fixture
     }
 
@@ -136,7 +143,7 @@ impl Fixture {
         self.context.as_ref().unwrap()
     }
 
-    fn staged_paths(&self) -> [PathBuf; 5] {
+    pub(super) fn staged_paths(&self) -> [PathBuf; 5] {
         let evidence = installation_evidence_persistence_paths(&self.root);
         let key = database_key_persistence_paths(&self.root);
         let freshness = freshness_anchor_persistence_paths(&self.root);
@@ -187,7 +194,7 @@ impl Fixture {
         connection.close().map_err(|(_, error)| error).unwrap();
     }
 
-    fn snapshot(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+    pub(super) fn snapshot(&self) -> BTreeMap<PathBuf, Vec<u8>> {
         fn collect(directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
             for entry in fs::read_dir(directory).unwrap() {
                 let path = entry.unwrap().path();
@@ -203,7 +210,7 @@ impl Fixture {
         files
     }
 
-    fn assert_write_access(&self, permitted: bool) {
+    pub(super) fn assert_write_access(&self, permitted: bool) {
         assert_eq!(
             OpenOptions::new()
                 .write(true)
@@ -242,15 +249,15 @@ fn payloads(pending: &PendingSetupPublicationPayloads) -> [&[u8]; 5] {
 
 // RAII keeps injection isolated even if an assertion panics. It deliberately
 // fails every attempted close while armed so automatic retries cannot hide.
-struct FailClose;
+pub(super) struct FailClose;
 impl FailClose {
-    fn arm() -> Self {
+    pub(super) fn arm() -> Self {
         handoff::tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| {
             assert_eq!(state.replace(Some(0)), None);
         });
         Self
     }
-    fn attempts(&self) -> usize {
+    pub(super) fn attempts(&self) -> usize {
         handoff::tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| state.get().unwrap())
     }
 }

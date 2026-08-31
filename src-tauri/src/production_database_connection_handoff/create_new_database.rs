@@ -78,9 +78,11 @@ pub(crate) use first_time_setup_staged_verification_context::{
     CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupProtectedArtifactStagingError,
     FirstTimeSetupProtectedArtifactStagingOperation, FirstTimeSetupStagedVerificationContext,
     FirstTimeSetupStagedVerificationContextError, FirstTimeSetupStagedVerificationError,
+    StagedVerificationCompletedFirstTimeSetupOperation,
     prepare_first_time_setup_protected_artifact_staging_operation,
     prepare_first_time_setup_staged_verification_context,
-    stage_first_time_setup_protected_artifacts, verify_first_time_setup_staged_context,
+    stage_first_time_setup_protected_artifacts, verify_all_staged_first_time_setup_operation,
+    verify_first_time_setup_staged_context,
 };
 
 pub(crate) use identity_bound_staged_key_open::{

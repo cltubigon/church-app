@@ -1,5 +1,5 @@
-//! One sealed setup operation, from pre-staging ownership to five staged writes.
-//! No reload verification or active publication is performed here.
+//! One sealed setup operation, from pre-staging ownership through staged verification.
+//! Verification preserves the staging boundary; no active publication occurs here.
 
 use std::fmt;
 
@@ -15,7 +15,8 @@ use super::{
         write_staged_evidence_authentication_key_wrapper,
         write_staged_freshness_authentication_key_wrapper,
     },
-    FirstTimeSetupStagedVerificationContext,
+    CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContext,
+    FirstTimeSetupStagedVerificationError, verify_first_time_setup_staged_context,
 };
 
 /// Payload-free authority, constructible only in this sealed module. The
@@ -56,6 +57,22 @@ pub(crate) struct AllProtectedArtifactsStagedFirstTimeSetupOperation {
 impl fmt::Debug for AllProtectedArtifactsStagedFirstTimeSetupOperation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("AllProtectedArtifactsStagedFirstTimeSetupOperation([REDACTED])")
+    }
+}
+
+/// The same sealed operation completed staged verification after all five writes.
+/// Its unchanged machine remains at AuthenticatedEvidenceStaged. This grants no
+/// active-publication authority or continuing guarantee about paths or bytes.
+pub(crate) struct StagedVerificationCompletedFirstTimeSetupOperation {
+    completed_context: CompletedFirstTimeSetupStagedVerificationContext,
+    directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
+    machine: FirstTimeSetupPublicationStateMachine,
+    authority: ProtectedArtifactStagingAuthority,
+}
+
+impl fmt::Debug for StagedVerificationCompletedFirstTimeSetupOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StagedVerificationCompletedFirstTimeSetupOperation([REDACTED])")
     }
 }
 
@@ -165,6 +182,31 @@ pub(crate) fn stage_first_time_setup_protected_artifacts(
 
     Ok(AllProtectedArtifactsStagedFirstTimeSetupOperation {
         context,
+        directories,
+        machine,
+        authority,
+    })
+}
+
+/// Verify only the context retained by this all-five-staged operation, once.
+/// Failure is terminal: directories, machine, and authority drop without a
+/// publication event, retry, or artifact cleanup. Return the existing error
+/// unchanged, preserving every ownership-bearing database disposal capability.
+// Keep the canonical ownership-bearing error inline, without a new wrapper.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_all_staged_first_time_setup_operation(
+    operation: AllProtectedArtifactsStagedFirstTimeSetupOperation,
+) -> Result<StagedVerificationCompletedFirstTimeSetupOperation, FirstTimeSetupStagedVerificationError>
+{
+    let AllProtectedArtifactsStagedFirstTimeSetupOperation {
+        context,
+        directories,
+        machine,
+        authority,
+    } = operation;
+    let completed_context = verify_first_time_setup_staged_context(context)?;
+    Ok(StagedVerificationCompletedFirstTimeSetupOperation {
+        completed_context,
         directories,
         machine,
         authority,
