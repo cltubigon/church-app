@@ -1,7 +1,8 @@
-//! Incomplete, sealed ownership for one future setup staged-verification operation.
+//! Sealed ownership for one setup staged-verification operation.
 //!
 //! Construction checks only the joint typed path contract. It neither observes
-//! storage nor verifies staged artifacts, and grants no publication authority.
+//! storage nor verifies staged artifacts. Consuming verification establishes
+//! common provenance only; neither owner grants publication authority.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
@@ -9,7 +10,14 @@ use std::fmt;
 
 use crate::{
     database_metadata_contract::DatabaseMetadataContractV1,
-    installation_evidence_protection::EncodedProtectedWrapper,
+    installation_evidence_protection::{
+        EncodedProtectedWrapper, ReloadVerifiedStagedFreshnessAnchorForSetup,
+        ReloadVerifiedStagedInstallationEvidenceForSetup, StagedDatabaseKeyVerificationError,
+        StagedFreshnessAnchorVerificationError, StagedInstallationEvidenceVerificationError,
+        verify_reloaded_staged_database_key_for_setup,
+        verify_reloaded_staged_freshness_anchor_for_setup,
+        verify_reloaded_staged_installation_evidence_for_setup,
+    },
     storage_foundation::{
         DatabaseKeyPersistencePaths, FreshnessAnchorPersistencePaths,
         InstallationEvidencePersistencePaths,
@@ -17,14 +25,22 @@ use crate::{
 };
 
 use super::{
+    super::{
+        ClosedPreparedMetadataValidatedProductionDatabaseForSetup,
+        SetupProductionDatabaseRevalidationCloseFailure,
+        SetupProductionDatabaseRevalidationCloseOutcome, SetupProductionDatabaseRevalidationError,
+        close_and_preserve_prepared_metadata_validated_production_database_for_setup,
+        revalidate_identity_bound_staged_key_production_database_for_setup,
+    },
     PreparedFirstTimeSetupPublicationMaterials, SetupDatabaseIdentityProof,
+    SetupProductionDatabaseOpenError, open_identity_bound_staged_key_production_database_for_setup,
     protected_artifact_directories::validate_typed_path_contracts,
 };
 
 struct SetupStagedVerificationCore {
     database_metadata: DatabaseMetadataContractV1,
     database_identity_proof: SetupDatabaseIdentityProof,
-    // The future database branch must use this family's active_database.
+    // The database branch uses only this family's active_database.
     installation_evidence_paths: InstallationEvidencePersistencePaths,
     database_key_paths: DatabaseKeyPersistencePaths,
     freshness_anchor_paths: FreshnessAnchorPersistencePaths,
@@ -96,6 +112,113 @@ pub(crate) fn prepare_first_time_setup_staged_verification_context(
             protected_freshness_authentication_key_wrapper,
             protected_authenticated_freshness_anchor_wrapper,
         },
+    })
+}
+
+/// All staged branches originated in one consumed sealed context, and its exact
+/// identity-bound database passed canonical revalidation and explicit close.
+/// This is not publication, final active verification, setup completion, startup
+/// authorization, operational trust, cross-process exclusivity, or a continuing
+/// guarantee about paths or bytes after close.
+pub(crate) struct CompletedFirstTimeSetupStagedVerificationContext {
+    installation_evidence: ReloadVerifiedStagedInstallationEvidenceForSetup,
+    freshness_anchor: ReloadVerifiedStagedFreshnessAnchorForSetup,
+    closed_database: ClosedPreparedMetadataValidatedProductionDatabaseForSetup,
+    pending_publication: PendingSetupPublicationPayloads,
+    // Preserve the single metadata anchor for future final verification. Move
+    // the existing path families intact for the future publication continuation.
+    database_metadata: DatabaseMetadataContractV1,
+    installation_evidence_paths: InstallationEvidencePersistencePaths,
+    database_key_paths: DatabaseKeyPersistencePaths,
+    freshness_anchor_paths: FreshnessAnchorPersistencePaths,
+}
+
+impl fmt::Debug for CompletedFirstTimeSetupStagedVerificationContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CompletedFirstTimeSetupStagedVerificationContext([REDACTED])")
+    }
+}
+
+/// Existing error families, including every live close-failure owner, pass
+/// through unchanged. Disposal retry belongs only to those existing owners.
+#[derive(Debug)]
+#[must_use = "a database close failure retains its complete live ownership"]
+pub(crate) enum FirstTimeSetupStagedVerificationError {
+    InstallationEvidence(StagedInstallationEvidenceVerificationError),
+    FreshnessAnchor(StagedFreshnessAnchorVerificationError),
+    DatabaseKey(StagedDatabaseKeyVerificationError),
+    DatabaseOpen(SetupProductionDatabaseOpenError),
+    DatabaseRevalidation(SetupProductionDatabaseRevalidationError),
+    DatabaseClose(SetupProductionDatabaseRevalidationCloseFailure),
+}
+
+/// Consume exactly one sealed context. Verify evidence and freshness before
+/// recovering the key, then immediately move that key into the identity-bound
+/// open. The order bounds resource lifetimes, not a publication protocol.
+/// First failure is terminal: no retries or artifact cleanup are performed.
+// Keep the exact existing ownership-bearing errors inline without introducing
+// allocation or flattening their live connection/guard/inspection lifetime.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_first_time_setup_staged_context(
+    context: FirstTimeSetupStagedVerificationContext,
+) -> Result<CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationError>
+{
+    let FirstTimeSetupStagedVerificationContext {
+        verification_core,
+        pending_publication,
+    } = context;
+    let installation_evidence = verify_reloaded_staged_installation_evidence_for_setup(
+        &verification_core.installation_evidence_paths,
+        &verification_core.database_metadata,
+    )
+    .map_err(FirstTimeSetupStagedVerificationError::InstallationEvidence)?;
+    let freshness_anchor = verify_reloaded_staged_freshness_anchor_for_setup(
+        &verification_core.freshness_anchor_paths,
+        &verification_core.database_metadata,
+    )
+    .map_err(FirstTimeSetupStagedVerificationError::FreshnessAnchor)?;
+    let staged_key = verify_reloaded_staged_database_key_for_setup(
+        &verification_core.database_key_paths,
+        &verification_core.database_metadata,
+    )
+    .map_err(FirstTimeSetupStagedVerificationError::DatabaseKey)?;
+    let opened = open_identity_bound_staged_key_production_database_for_setup(
+        &verification_core.database_identity_proof,
+        verification_core
+            .installation_evidence_paths
+            .active_database
+            .clone(),
+        staged_key,
+    )
+    .map_err(FirstTimeSetupStagedVerificationError::DatabaseOpen)?;
+    let validated = revalidate_identity_bound_staged_key_production_database_for_setup(
+        opened,
+        &verification_core.database_metadata,
+    )
+    .map_err(FirstTimeSetupStagedVerificationError::DatabaseRevalidation)?;
+    let closed_database =
+        match close_and_preserve_prepared_metadata_validated_production_database_for_setup(
+            validated,
+        ) {
+            SetupProductionDatabaseRevalidationCloseOutcome::Closed(closed) => closed,
+            SetupProductionDatabaseRevalidationCloseOutcome::Failed(failure) => {
+                return Err(FirstTimeSetupStagedVerificationError::DatabaseClose(
+                    failure,
+                ));
+            }
+        };
+
+    // Historical identity was needed only by the open. It is not a continuing
+    // path guarantee and is deliberately not retained after successful close.
+    Ok(CompletedFirstTimeSetupStagedVerificationContext {
+        installation_evidence,
+        freshness_anchor,
+        closed_database,
+        pending_publication,
+        database_metadata: verification_core.database_metadata,
+        installation_evidence_paths: verification_core.installation_evidence_paths,
+        database_key_paths: verification_core.database_key_paths,
+        freshness_anchor_paths: verification_core.freshness_anchor_paths,
     })
 }
 
@@ -377,6 +500,8 @@ mod tests {
             };
         }
         assert_sealed!(FirstTimeSetupStagedVerificationContext);
+        assert_sealed!(CompletedFirstTimeSetupStagedVerificationContext);
+        assert_sealed!(FirstTimeSetupStagedVerificationError);
         assert_sealed!(SetupStagedVerificationCore);
         assert_sealed!(PendingSetupPublicationPayloads);
     }
@@ -388,7 +513,10 @@ mod tests {
     #[test]
     fn source_locks_single_consuming_transition_and_no_execution_capabilities() {
         let production = include_str!("first_time_setup_staged_verification_context.rs")
-            .split("#[cfg(test)]")
+            .split_once("struct SetupStagedVerificationCore")
+            .unwrap()
+            .1
+            .split("/// All staged branches")
             .next()
             .unwrap();
         assert_eq!(production.matches("pub(crate) fn ").count(), 1);
@@ -536,3 +664,7 @@ mod tests {
         assert!(!production.contains("fn validate_typed_path_contracts"));
     }
 }
+
+#[cfg(test)]
+#[path = "first_time_setup_staged_verification_context_tests.rs"]
+mod verification_tests;

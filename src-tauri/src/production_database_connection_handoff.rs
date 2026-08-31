@@ -43,11 +43,12 @@ mod live_metadata_and_header_validation;
 #[allow(unused_imports)]
 pub(crate) use create_new_database::{
     ClosedIntegrityValidatedInitializedNewProductionDatabase,
+    CompletedFirstTimeSetupStagedVerificationContext,
     CurrentCanonicalDatabaseIdentityComparisonError,
     CurrentCanonicalDatabaseIdentityMatchesSetupProof,
     FirstTimeSetupProtectedArtifactDirectoryPreparationError,
     FirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContextError,
-    IdentityBoundStagedKeyOpenedProductionDatabaseForSetup,
+    FirstTimeSetupStagedVerificationError, IdentityBoundStagedKeyOpenedProductionDatabaseForSetup,
     InitializedNewProductionDatabaseConnection,
     IntegrityValidatedInitializedNewProductionDatabaseConnection,
     NewProductionDatabaseCloseAndPreserveFailure, NewProductionDatabaseCloseAndPreserveOutcome,
@@ -73,7 +74,7 @@ pub(crate) use create_new_database::{
     prepare_first_time_setup_publication_materials,
     prepare_first_time_setup_staged_verification_context,
     validate_initialized_new_production_database,
-    validate_initialized_new_production_database_integrity,
+    validate_initialized_new_production_database_integrity, verify_first_time_setup_staged_context,
 };
 
 #[allow(unused_imports)]
@@ -605,6 +606,19 @@ fn close_lifetime_owner_using(
     owner: ConnectionLifetimeOwner,
     close: impl FnOnce(Connection) -> Result<(), Connection>,
 ) -> ProductionDatabaseConnectionCloseOutcome {
+    // Thread-local injection exercises the actual ownership-preserving callers
+    // in common-context tests without changing production close behavior.
+    #[cfg(test)]
+    if tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| {
+        state.get().is_some_and(|attempts| {
+            state.set(Some(attempts + 1));
+            true
+        })
+    }) {
+        return ProductionDatabaseConnectionCloseOutcome::Failed(
+            ProductionDatabaseConnectionCloseFailure { owner },
+        );
+    }
     let ConnectionLifetimeOwner {
         connection,
         guard,
@@ -881,6 +895,11 @@ fn enable_and_verify_query_only(
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        pub(super) static COMMON_CONTEXT_CLOSE_FAILURE: std::cell::Cell<Option<usize>> = const {
+            std::cell::Cell::new(None)
+        };
+    }
     use std::{
         cell::Cell,
         fs::{self, OpenOptions},

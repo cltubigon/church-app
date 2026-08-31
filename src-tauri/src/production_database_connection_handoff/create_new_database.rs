@@ -73,8 +73,9 @@ pub(crate) use current_canonical_database_identity::{
 };
 
 pub(crate) use first_time_setup_staged_verification_context::{
-    FirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContextError,
-    prepare_first_time_setup_staged_verification_context,
+    CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContext,
+    FirstTimeSetupStagedVerificationContextError, FirstTimeSetupStagedVerificationError,
+    prepare_first_time_setup_staged_verification_context, verify_first_time_setup_staged_context,
 };
 
 pub(crate) use identity_bound_staged_key_open::{
