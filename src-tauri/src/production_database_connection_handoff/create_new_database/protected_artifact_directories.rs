@@ -117,7 +117,7 @@ pub(crate) fn prepare_first_time_setup_protected_artifact_directories(
     })
 }
 
-fn validate_typed_path_contracts<'a>(
+pub(super) fn validate_typed_path_contracts<'a>(
     database_key_paths: &'a DatabaseKeyPersistencePaths,
     freshness_anchor_paths: &'a FreshnessAnchorPersistencePaths,
     installation_evidence_paths: &'a InstallationEvidencePersistencePaths,

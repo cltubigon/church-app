@@ -46,6 +46,7 @@ pub(crate) use create_new_database::{
     CurrentCanonicalDatabaseIdentityComparisonError,
     CurrentCanonicalDatabaseIdentityMatchesSetupProof,
     FirstTimeSetupProtectedArtifactDirectoryPreparationError,
+    FirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContextError,
     IdentityBoundStagedKeyOpenedProductionDatabaseForSetup,
     InitializedNewProductionDatabaseConnection,
     IntegrityValidatedInitializedNewProductionDatabaseConnection,
@@ -69,7 +70,9 @@ pub(crate) use create_new_database::{
     initialize_new_production_database,
     open_identity_bound_staged_key_production_database_for_setup,
     prepare_first_time_setup_protected_artifact_directories,
-    prepare_first_time_setup_publication_materials, validate_initialized_new_production_database,
+    prepare_first_time_setup_publication_materials,
+    prepare_first_time_setup_staged_verification_context,
+    validate_initialized_new_production_database,
     validate_initialized_new_production_database_integrity,
 };
 

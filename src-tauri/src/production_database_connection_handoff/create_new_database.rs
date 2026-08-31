@@ -62,6 +62,7 @@ use super::{
 };
 
 mod current_canonical_database_identity;
+mod first_time_setup_staged_verification_context;
 mod identity_bound_staged_key_open;
 mod prepared_first_time_setup_publication_materials;
 mod protected_artifact_directories;
@@ -69,6 +70,11 @@ mod protected_artifact_directories;
 pub(crate) use current_canonical_database_identity::{
     CurrentCanonicalDatabaseIdentityComparisonError,
     CurrentCanonicalDatabaseIdentityMatchesSetupProof, compare_current_canonical_database_identity,
+};
+
+pub(crate) use first_time_setup_staged_verification_context::{
+    FirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContextError,
+    prepare_first_time_setup_staged_verification_context,
 };
 
 pub(crate) use identity_bound_staged_key_open::{
