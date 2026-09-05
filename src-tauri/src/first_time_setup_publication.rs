@@ -440,6 +440,18 @@ pub(crate) mod protected_artifact_staging {
         ))
     }
 
+    pub(crate) fn advance_database_key_wrapper_published<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(machine.advance(
+            FirstTimeSetupPublicationEvent::ProtectedDatabaseKeyWrapperPublished(
+                ProtectedDatabaseKeyWrapperPublished { _private: () },
+            ),
+        ))
+    }
+
     fn in_progress(
         advance: Result<FirstTimeSetupPublicationAdvance, FirstTimeSetupPublicationTransitionError>,
     ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
@@ -469,9 +481,9 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap();
-        assert_eq!(source.matches("pub(crate) fn ").count(), 7);
-        assert_eq!(source.matches("_private: ()").count(), 7);
-        assert_eq!(source.matches("machine.advance(").count(), 6);
+        assert_eq!(source.matches("pub(crate) fn ").count(), 8);
+        assert_eq!(source.matches("_private: ()").count(), 8);
+        assert_eq!(source.matches("machine.advance(").count(), 7);
         assert_eq!(
             source
                 .matches("FirstTimeSetupPublicationStateMachine::begin(")
@@ -479,8 +491,11 @@ mod tests {
             1
         );
         for forbidden in [
-            "Published",
-            "FinalActive",
+            "FreshnessAuthenticationKeyWrapperPublished",
+            "AuthenticatedFreshnessAnchorPublished",
+            "EvidenceAuthenticationKeyWrapperPublished",
+            "AuthenticatedEvidencePublished",
+            "FinalActiveArtifactsVerified",
             "CanonicalInstallation",
             "synthetic()",
             "pub(crate) fn in_progress",

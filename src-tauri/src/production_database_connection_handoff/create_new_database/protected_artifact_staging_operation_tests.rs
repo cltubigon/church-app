@@ -247,6 +247,8 @@ fn pre_active_publication_owners_are_non_clone_non_copy_non_serializable_and_hav
     assert_not_impl!(StagedVerificationCompletedFirstTimeSetupOperation, Default);
     assert_sealed!(PreparedFirstTimeSetupActivePublicationOperation);
     assert_not_impl!(PreparedFirstTimeSetupActivePublicationOperation, Default);
+    assert_sealed!(DatabaseKeyWrapperPublishedFirstTimeSetupOperation);
+    assert_not_impl!(DatabaseKeyWrapperPublishedFirstTimeSetupOperation, Default);
 }
 
 fn production() -> &'static str {
@@ -293,9 +295,9 @@ fn authority_is_zero_sized_private_and_bound_only_to_the_publication_machine() {
         "modsealed{pubtraitMachine{}implMachineforsuper::FirstTimeSetupPublicationStateMachine{}}"
     ));
     assert!(bridge.contains("traitAuthorityBinding:sealed::Machine{typeAuthority;}"));
-    assert_eq!(bridge.matches("pub(crate)fn").count(), 7);
-    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 7);
-    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 7);
+    assert_eq!(bridge.matches("pub(crate)fn").count(), 8);
+    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 8);
+    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 8);
     assert!(!bridge.contains("pub(crate)modsealed"));
 }
 
@@ -373,8 +375,8 @@ fn source_seals_inputs_fields_and_construction_without_machine_pairing_or_replac
             )
         );
     }
-    assert_eq!(source.matches("pub(crate) fn ").count(), 4);
-    assert_eq!(source.matches("impl ").count(), 5); // Binding and redacted Debug only.
+    assert_eq!(source.matches("pub(crate) fn ").count(), 5);
+    assert_eq!(source.matches("impl ").count(), 7); // Binding and redacted Debug only.
     let construction = source
         .split_once("pub(crate) fn prepare_")
         .unwrap()
@@ -482,7 +484,11 @@ fn source_has_no_publication_retry_cleanup_or_detachable_authority() {
         "revalidate_",
         "open_identity_",
         "close_and_preserve_",
-        "Published",
+        "FreshnessAuthenticationKeyWrapperPublished",
+        "AuthenticatedFreshnessAnchorPublished",
+        "EvidenceAuthenticationKeyWrapperPublished",
+        "AuthenticatedEvidencePublished",
+        "FinalActiveArtifactsVerified",
         "FirstTimeSetupPublicationEvent",
         "ReadyForSetupCompletion",
         "std::fs",
@@ -642,7 +648,10 @@ fn pre_active_publication_source_locks_consumption_proof_retirement_and_only_one
     let transition = source
         .split_once("pub(crate) fn prepare_first_time_setup_active_publication(")
         .unwrap()
-        .1;
+        .1
+        .split("/// Publish exactly the staged database-key wrapper")
+        .next()
+        .unwrap();
     let without_comments = transition
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
@@ -728,7 +737,7 @@ fn pre_active_publication_source_locks_exact_opaque_owner_and_coarse_error() {
         source
             .matches("PreparedFirstTimeSetupActivePublicationOperation {")
             .count(),
-        3
+        4
     );
     assert!(!source.contains("impl PreparedFirstTimeSetupActivePublicationOperation"));
     let error = source
@@ -748,7 +757,7 @@ fn pre_active_publication_source_locks_internal_milestone_and_neutral_bridge() {
         .split_once("pub(crate) fn advance_all_staged_artifacts_reload_verified")
         .unwrap()
         .1
-        .split_once("fn in_progress(")
+        .split_once("pub(crate) fn advance_database_key_wrapper_published")
         .unwrap()
         .0;
     assert_eq!(compact(bridge), compact(
@@ -837,6 +846,163 @@ fn pre_active_publication_real_chain_preserves_payload_allocations_paths_metadat
     assert_eq!(fixture.snapshot(), before);
     drop(prepared);
     assert_eq!(fixture.snapshot(), before);
+}
+
+#[test]
+fn database_key_publication_real_chain_moves_only_key_and_preserves_sealed_ownership() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    let allocations = pending_wrappers(&prepared.pending_publication).map(|bytes| bytes.as_ptr());
+    let expected_key = prepared
+        .pending_publication
+        .protected_database_key_wrapper
+        .as_bytes()
+        .to_vec();
+    let metadata = prepared.database_metadata;
+    let evidence_paths = prepared.installation_evidence_paths.clone();
+    let key_paths = prepared.database_key_paths.clone();
+    let freshness_paths = prepared.freshness_anchor_paths.clone();
+    let other_staged = fixture.staged_paths()[1..]
+        .iter()
+        .map(|path| (path.clone(), fs::read(path).unwrap()))
+        .collect::<Vec<_>>();
+
+    let published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+    assert_boundary(&published.machine, "ProtectedDatabaseKeyWrapperPublished");
+    assert_eq!(
+        format!("{published:?}"),
+        "DatabaseKeyWrapperPublishedFirstTimeSetupOperation([REDACTED])"
+    );
+    assert_eq!(
+        pending_wrappers(&published.pending_publication).map(|bytes| bytes.as_ptr()),
+        allocations
+    );
+    assert_eq!(published.database_metadata, metadata);
+    assert_eq!(published.installation_evidence_paths, evidence_paths);
+    assert_eq!(published.database_key_paths, key_paths);
+    assert_eq!(published.freshness_anchor_paths, freshness_paths);
+    assert_eq!(
+        format!("{:?}", published.directories),
+        "PreparedFirstTimeSetupProtectedArtifactDirectories([REDACTED])"
+    );
+    assert_eq!(size_of_val(&published.authority), 0);
+    assert!(!key_paths.staged_database_key.as_path().exists());
+    assert_eq!(
+        fs::read(key_paths.active_database_key.as_path()).unwrap(),
+        expected_key
+    );
+    for (path, bytes) in other_staged {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    for active in [
+        freshness_paths.active_anchor_authentication_key.as_path(),
+        freshness_paths
+            .active_authenticated_freshness_anchor
+            .as_path(),
+        evidence_paths.active_authentication_key.as_path(),
+        evidence_paths.active_authenticated_evidence.as_path(),
+    ] {
+        assert!(!active.exists());
+    }
+    fixture.assert_write_access(true);
+}
+
+#[test]
+fn database_key_publication_machine_failure_is_post_mutation_and_does_not_rollback() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    let mut prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    let key_paths = prepared.database_key_paths.clone();
+    prepared.machine = protected_artifact_staging::begin::<FirstTimeSetupPublicationStateMachine>(
+        &prepared.authority,
+    );
+    assert_eq!(
+        publish_first_time_setup_database_key_wrapper(prepared).unwrap_err(),
+        FirstTimeSetupDatabaseKeyPublicationError::InternalStateAfterPublication
+    );
+    assert!(!key_paths.staged_database_key.as_path().exists());
+    assert!(key_paths.active_database_key.as_path().exists());
+}
+
+#[test]
+fn database_key_publication_maps_each_filesystem_phase_without_advancing() {
+    use DatabaseKeyWrapperPublicationFilesystemError as Filesystem;
+    for (filesystem, operation_error) in [
+        (
+            Filesystem::PrepublicationRejected,
+            FirstTimeSetupDatabaseKeyPublicationError::PrepublicationRejected,
+        ),
+        (
+            Filesystem::RenameOutcomeUnconfirmed,
+            FirstTimeSetupDatabaseKeyPublicationError::RenameOutcomeUnconfirmed,
+        ),
+        (
+            Filesystem::PostRenameFlushFailed,
+            FirstTimeSetupDatabaseKeyPublicationError::PostRenameFlushFailed,
+        ),
+        (
+            Filesystem::PostRenameValidationFailed,
+            FirstTimeSetupDatabaseKeyPublicationError::PostRenameValidationFailed,
+        ),
+    ] {
+        let mut fixture = VerificationFixture::new_unstaged();
+        let staged = stage_real_fixture(&mut fixture);
+        let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+        let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+        let before = fixture.snapshot();
+        assert_eq!(
+            publish_first_time_setup_database_key_wrapper_using(prepared, |_, _, _| Err(
+                filesystem
+            ))
+            .unwrap_err(),
+            operation_error
+        );
+        assert_eq!(fixture.snapshot(), before);
+    }
+}
+
+#[test]
+fn database_key_publication_owner_and_errors_are_sealed_and_redacted() {
+    let source = production();
+    let fields = source
+        .split_once("pub(crate) struct DatabaseKeyWrapperPublishedFirstTimeSetupOperation {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    for field in [
+        "pending_publication: PendingSetupPublicationPayloads",
+        "database_metadata: DatabaseMetadataContractV1",
+        "installation_evidence_paths: InstallationEvidencePersistencePaths",
+        "database_key_paths: DatabaseKeyPersistencePaths",
+        "freshness_anchor_paths: FreshnessAnchorPersistencePaths",
+        "directories: PreparedFirstTimeSetupProtectedArtifactDirectories",
+        "machine: FirstTimeSetupPublicationStateMachine",
+        "authority: ProtectedArtifactStagingAuthority",
+    ] {
+        assert_eq!(fields.matches(field).count(), 1);
+    }
+    assert_eq!(
+        source
+            .matches("ProtectedArtifactStagingAuthority { _private: () }")
+            .count(),
+        1
+    );
+    for error in [
+        FirstTimeSetupDatabaseKeyPublicationError::PrepublicationRejected,
+        FirstTimeSetupDatabaseKeyPublicationError::RenameOutcomeUnconfirmed,
+        FirstTimeSetupDatabaseKeyPublicationError::PostRenameFlushFailed,
+        FirstTimeSetupDatabaseKeyPublicationError::PostRenameValidationFailed,
+        FirstTimeSetupDatabaseKeyPublicationError::InternalStateAfterPublication,
+    ] {
+        let debug = format!("{error:?}");
+        assert!(!debug.contains('\\'));
+        assert!(!debug.contains("dpapi"));
+    }
 }
 
 #[test]

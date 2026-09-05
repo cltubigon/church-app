@@ -75,16 +75,18 @@ pub(crate) use current_canonical_database_identity::{
 #[allow(unused_imports)]
 pub(crate) use first_time_setup_staged_verification_context::{
     AllProtectedArtifactsStagedFirstTimeSetupOperation,
-    CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupPreActivePublicationError,
-    FirstTimeSetupProtectedArtifactStagingError, FirstTimeSetupProtectedArtifactStagingOperation,
-    FirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContextError,
-    FirstTimeSetupStagedVerificationError, PreparedFirstTimeSetupActivePublicationOperation,
+    CompletedFirstTimeSetupStagedVerificationContext,
+    DatabaseKeyWrapperPublishedFirstTimeSetupOperation, FirstTimeSetupDatabaseKeyPublicationError,
+    FirstTimeSetupPreActivePublicationError, FirstTimeSetupProtectedArtifactStagingError,
+    FirstTimeSetupProtectedArtifactStagingOperation, FirstTimeSetupStagedVerificationContext,
+    FirstTimeSetupStagedVerificationContextError, FirstTimeSetupStagedVerificationError,
+    PreparedFirstTimeSetupActivePublicationOperation,
     StagedVerificationCompletedFirstTimeSetupOperation,
     prepare_first_time_setup_active_publication,
     prepare_first_time_setup_protected_artifact_staging_operation,
     prepare_first_time_setup_staged_verification_context,
-    stage_first_time_setup_protected_artifacts, verify_all_staged_first_time_setup_operation,
-    verify_first_time_setup_staged_context,
+    publish_first_time_setup_database_key_wrapper, stage_first_time_setup_protected_artifacts,
+    verify_all_staged_first_time_setup_operation, verify_first_time_setup_staged_context,
 };
 
 pub(crate) use identity_bound_staged_key_open::{
@@ -98,6 +100,7 @@ pub(crate) use prepared_first_time_setup_publication_materials::{
 };
 #[allow(unused_imports)]
 pub(crate) use protected_artifact_directories::{
+    DatabaseKeyWrapperPublicationFilesystemError,
     FirstTimeSetupProtectedArtifactDirectoryPreparationError,
     PreparedFirstTimeSetupProtectedArtifactDirectories, StagedProtectedWrapperWriteError,
     prepare_first_time_setup_protected_artifact_directories,

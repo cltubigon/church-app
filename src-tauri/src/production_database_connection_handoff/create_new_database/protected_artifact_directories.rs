@@ -19,8 +19,12 @@ use super::{
     validate_local_ntfs, validate_parent,
 };
 
+mod database_key_wrapper_publication;
 mod staged_protected_wrapper_writer;
 
+pub(crate) use database_key_wrapper_publication::{
+    DatabaseKeyWrapperPublicationFilesystemError, publish_staged_database_key_wrapper,
+};
 pub(crate) use staged_protected_wrapper_writer::{
     StagedProtectedWrapperWriteError, write_staged_authenticated_evidence_wrapper,
     write_staged_authenticated_freshness_anchor_wrapper, write_staged_database_key_wrapper,

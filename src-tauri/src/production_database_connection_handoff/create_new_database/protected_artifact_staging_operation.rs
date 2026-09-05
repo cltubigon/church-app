@@ -16,8 +16,9 @@ use crate::{
 
 use super::{
     super::protected_artifact_directories::{
+        DatabaseKeyWrapperPublicationFilesystemError,
         PreparedFirstTimeSetupProtectedArtifactDirectories, StagedProtectedWrapperWriteError,
-        write_staged_authenticated_evidence_wrapper,
+        publish_staged_database_key_wrapper, write_staged_authenticated_evidence_wrapper,
         write_staged_authenticated_freshness_anchor_wrapper, write_staged_database_key_wrapper,
         write_staged_evidence_authentication_key_wrapper,
         write_staged_freshness_authentication_key_wrapper,
@@ -108,6 +109,34 @@ impl fmt::Debug for PreparedFirstTimeSetupActivePublicationOperation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("PreparedFirstTimeSetupActivePublicationOperation([REDACTED])")
     }
+}
+
+/// The same sealed lineage after only the database-key wrapper was published.
+/// The other four wrappers remain staged and no active wrapper was reloaded.
+pub(crate) struct DatabaseKeyWrapperPublishedFirstTimeSetupOperation {
+    pending_publication: PendingSetupPublicationPayloads,
+    database_metadata: DatabaseMetadataContractV1,
+    installation_evidence_paths: InstallationEvidencePersistencePaths,
+    database_key_paths: DatabaseKeyPersistencePaths,
+    freshness_anchor_paths: FreshnessAnchorPersistencePaths,
+    directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
+    machine: FirstTimeSetupPublicationStateMachine,
+    authority: ProtectedArtifactStagingAuthority,
+}
+
+impl fmt::Debug for DatabaseKeyWrapperPublishedFirstTimeSetupOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DatabaseKeyWrapperPublishedFirstTimeSetupOperation([REDACTED])")
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FirstTimeSetupDatabaseKeyPublicationError {
+    PrepublicationRejected,
+    RenameOutcomeUnconfirmed,
+    PostRenameFlushFailed,
+    PostRenameValidationFailed,
+    InternalStateAfterPublication,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -282,6 +311,77 @@ pub(crate) fn prepare_first_time_setup_active_publication(
     >(&authority, machine)
     .map_err(|_| FirstTimeSetupPreActivePublicationError::InternalState)?;
     Ok(PreparedFirstTimeSetupActivePublicationOperation {
+        pending_publication,
+        database_metadata,
+        installation_evidence_paths,
+        database_key_paths,
+        freshness_anchor_paths,
+        directories,
+        machine,
+        authority,
+    })
+}
+
+/// Publish exactly the staged database-key wrapper through the same validated
+/// live source handle, then advance the retained machine. Every error consumes
+/// the operation; no cleanup, rollback, retry owner, or later publication runs.
+pub(crate) fn publish_first_time_setup_database_key_wrapper(
+    operation: PreparedFirstTimeSetupActivePublicationOperation,
+) -> Result<
+    DatabaseKeyWrapperPublishedFirstTimeSetupOperation,
+    FirstTimeSetupDatabaseKeyPublicationError,
+> {
+    publish_first_time_setup_database_key_wrapper_using(
+        operation,
+        publish_staged_database_key_wrapper,
+    )
+}
+
+fn publish_first_time_setup_database_key_wrapper_using(
+    operation: PreparedFirstTimeSetupActivePublicationOperation,
+    publish: impl FnOnce(
+        &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+        &DatabaseKeyPersistencePaths,
+        &crate::installation_evidence_protection::EncodedProtectedWrapper,
+    ) -> Result<(), DatabaseKeyWrapperPublicationFilesystemError>,
+) -> Result<
+    DatabaseKeyWrapperPublishedFirstTimeSetupOperation,
+    FirstTimeSetupDatabaseKeyPublicationError,
+> {
+    let PreparedFirstTimeSetupActivePublicationOperation {
+        pending_publication,
+        database_metadata,
+        installation_evidence_paths,
+        database_key_paths,
+        freshness_anchor_paths,
+        mut directories,
+        machine,
+        authority,
+    } = operation;
+    publish(
+        &mut directories,
+        &database_key_paths,
+        &pending_publication.protected_database_key_wrapper,
+    )
+    .map_err(|error| match error {
+        DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected => {
+            FirstTimeSetupDatabaseKeyPublicationError::PrepublicationRejected
+        }
+        DatabaseKeyWrapperPublicationFilesystemError::RenameOutcomeUnconfirmed => {
+            FirstTimeSetupDatabaseKeyPublicationError::RenameOutcomeUnconfirmed
+        }
+        DatabaseKeyWrapperPublicationFilesystemError::PostRenameFlushFailed => {
+            FirstTimeSetupDatabaseKeyPublicationError::PostRenameFlushFailed
+        }
+        DatabaseKeyWrapperPublicationFilesystemError::PostRenameValidationFailed => {
+            FirstTimeSetupDatabaseKeyPublicationError::PostRenameValidationFailed
+        }
+    })?;
+    let machine = protected_artifact_staging::advance_database_key_wrapper_published::<
+        FirstTimeSetupPublicationStateMachine,
+    >(&authority, machine)
+    .map_err(|_| FirstTimeSetupDatabaseKeyPublicationError::InternalStateAfterPublication)?;
+    Ok(DatabaseKeyWrapperPublishedFirstTimeSetupOperation {
         pending_publication,
         database_metadata,
         installation_evidence_paths,

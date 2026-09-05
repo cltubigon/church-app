@@ -688,6 +688,12 @@ fn source_locks_only_consuming_entry_exact_branch_order_dataflow_and_terminal_cl
     );
     assert_eq!(operation.matches("staged_key,").count(), 1);
     assert_eq!(operation.matches(".clone()").count(), 1); // Only the canonical typed database path.
+    assert_eq!(
+        production
+            .matches("publish_first_time_setup_database_key_wrapper")
+            .count(),
+        1
+    ); // Re-export only; the verified operation body above remains publication-free.
     for forbidden in [
         "write_staged_",
         "load_active_",
@@ -696,7 +702,6 @@ fn source_locks_only_consuming_entry_exact_branch_order_dataflow_and_terminal_cl
         "remove_file",
         "remove_dir",
         "rename",
-        "publish_",
         "AllStagedArtifactsReloadVerified",
         "FirstTimeSetupPublicationState",
         "first_time_setup_publication",
