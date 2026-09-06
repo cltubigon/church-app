@@ -16,11 +16,15 @@ use crate::{
 
 use super::{
     super::protected_artifact_directories::{
+        AuthenticatedEvidenceWrapperPublicationFilesystemError,
         AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError,
         DatabaseKeyWrapperPublicationFilesystemError,
+        EvidenceAuthenticationKeyWrapperPublicationFilesystemError,
         FreshnessAuthenticationKeyWrapperPublicationFilesystemError,
         PreparedFirstTimeSetupProtectedArtifactDirectories, StagedProtectedWrapperWriteError,
+        publish_staged_authenticated_evidence_wrapper,
         publish_staged_authenticated_freshness_anchor_wrapper, publish_staged_database_key_wrapper,
+        publish_staged_evidence_authentication_key_wrapper,
         publish_staged_freshness_authentication_key_wrapper,
         write_staged_authenticated_evidence_wrapper,
         write_staged_authenticated_freshness_anchor_wrapper, write_staged_database_key_wrapper,
@@ -177,6 +181,47 @@ impl fmt::Debug for AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation
     }
 }
 
+/// The same sealed lineage after the evidence authentication-key wrapper was
+/// published structurally. Authenticated evidence remains staged and unpublished.
+pub(crate) struct EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
+    pending_publication: PendingSetupPublicationPayloads,
+    database_metadata: DatabaseMetadataContractV1,
+    installation_evidence_paths: InstallationEvidencePersistencePaths,
+    database_key_paths: DatabaseKeyPersistencePaths,
+    freshness_anchor_paths: FreshnessAnchorPersistencePaths,
+    directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
+    machine: FirstTimeSetupPublicationStateMachine,
+    authority: ProtectedArtifactStagingAuthority,
+}
+
+impl fmt::Debug for EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation([REDACTED])",
+        )
+    }
+}
+
+/// The same sealed lineage after authenticated evidence crossed the fifth and
+/// final protected-wrapper publication boundary. No active wrapper was loaded
+/// or authenticated, and final active verification has not begun.
+pub(crate) struct AuthenticatedEvidencePublishedFirstTimeSetupOperation {
+    pending_publication: PendingSetupPublicationPayloads,
+    database_metadata: DatabaseMetadataContractV1,
+    installation_evidence_paths: InstallationEvidencePersistencePaths,
+    database_key_paths: DatabaseKeyPersistencePaths,
+    freshness_anchor_paths: FreshnessAnchorPersistencePaths,
+    directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
+    machine: FirstTimeSetupPublicationStateMachine,
+    authority: ProtectedArtifactStagingAuthority,
+}
+
+impl fmt::Debug for AuthenticatedEvidencePublishedFirstTimeSetupOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthenticatedEvidencePublishedFirstTimeSetupOperation([REDACTED])")
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum FirstTimeSetupDatabaseKeyPublicationError {
     PrepublicationRejected,
@@ -197,6 +242,24 @@ pub(crate) enum FirstTimeSetupFreshnessAuthenticationKeyPublicationError {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError {
+    PrepublicationRejected,
+    RenameOutcomeUnconfirmed,
+    PostRenameFlushFailed,
+    PostRenameValidationFailed,
+    InternalStateAfterPublication,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FirstTimeSetupEvidenceAuthenticationKeyPublicationError {
+    PrepublicationRejected,
+    RenameOutcomeUnconfirmed,
+    PostRenameFlushFailed,
+    PostRenameValidationFailed,
+    InternalStateAfterPublication,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FirstTimeSetupAuthenticatedEvidencePublicationError {
     PrepublicationRejected,
     RenameOutcomeUnconfirmed,
     PostRenameFlushFailed,
@@ -609,6 +672,155 @@ fn publish_first_time_setup_authenticated_freshness_anchor_wrapper_using(
             authority,
         },
     )
+}
+
+/// Publish only the staged evidence authentication-key wrapper through the
+/// shared validated live-source engine, then advance the retained machine.
+/// Authenticated evidence remains staged; no active wrapper is loaded.
+pub(crate) fn publish_first_time_setup_evidence_authentication_key_wrapper(
+    operation: AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
+) -> Result<
+    EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
+    FirstTimeSetupEvidenceAuthenticationKeyPublicationError,
+> {
+    publish_first_time_setup_evidence_authentication_key_wrapper_using(
+        operation,
+        publish_staged_evidence_authentication_key_wrapper,
+    )
+}
+
+fn publish_first_time_setup_evidence_authentication_key_wrapper_using(
+    operation: AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
+    publish: impl FnOnce(
+        &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+        &InstallationEvidencePersistencePaths,
+        &crate::installation_evidence_protection::EncodedProtectedWrapper,
+    ) -> Result<(), EvidenceAuthenticationKeyWrapperPublicationFilesystemError>,
+) -> Result<
+    EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
+    FirstTimeSetupEvidenceAuthenticationKeyPublicationError,
+> {
+    let AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation {
+        pending_publication,
+        database_metadata,
+        installation_evidence_paths,
+        database_key_paths,
+        freshness_anchor_paths,
+        mut directories,
+        machine,
+        authority,
+    } = operation;
+    publish(
+        &mut directories,
+        &installation_evidence_paths,
+        &pending_publication.protected_evidence_authentication_key_wrapper,
+    )
+    .map_err(|error| match error {
+        EvidenceAuthenticationKeyWrapperPublicationFilesystemError::PrepublicationRejected => {
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PrepublicationRejected
+        }
+        EvidenceAuthenticationKeyWrapperPublicationFilesystemError::RenameOutcomeUnconfirmed => {
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::RenameOutcomeUnconfirmed
+        }
+        EvidenceAuthenticationKeyWrapperPublicationFilesystemError::PostRenameFlushFailed => {
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PostRenameFlushFailed
+        }
+        EvidenceAuthenticationKeyWrapperPublicationFilesystemError::PostRenameValidationFailed => {
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PostRenameValidationFailed
+        }
+    })?;
+    let machine =
+        protected_artifact_staging::advance_evidence_authentication_key_wrapper_published::<
+            FirstTimeSetupPublicationStateMachine,
+        >(&authority, machine)
+        .map_err(|_| {
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::InternalStateAfterPublication
+        })?;
+    Ok(
+        EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
+            pending_publication,
+            database_metadata,
+            installation_evidence_paths,
+            database_key_paths,
+            freshness_anchor_paths,
+            directories,
+            machine,
+            authority,
+        },
+    )
+}
+
+/// Publish authenticated evidence only after its authentication-key wrapper,
+/// making it the fifth and final protected-wrapper publication. Success does
+/// not perform or authorize final active verification or setup completion.
+pub(crate) fn publish_first_time_setup_authenticated_evidence_wrapper(
+    operation: EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
+) -> Result<
+    AuthenticatedEvidencePublishedFirstTimeSetupOperation,
+    FirstTimeSetupAuthenticatedEvidencePublicationError,
+> {
+    publish_first_time_setup_authenticated_evidence_wrapper_using(
+        operation,
+        publish_staged_authenticated_evidence_wrapper,
+    )
+}
+
+fn publish_first_time_setup_authenticated_evidence_wrapper_using(
+    operation: EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
+    publish: impl FnOnce(
+        &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+        &InstallationEvidencePersistencePaths,
+        &crate::installation_evidence_protection::EncodedProtectedWrapper,
+    ) -> Result<(), AuthenticatedEvidenceWrapperPublicationFilesystemError>,
+) -> Result<
+    AuthenticatedEvidencePublishedFirstTimeSetupOperation,
+    FirstTimeSetupAuthenticatedEvidencePublicationError,
+> {
+    let EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
+        pending_publication,
+        database_metadata,
+        installation_evidence_paths,
+        database_key_paths,
+        freshness_anchor_paths,
+        mut directories,
+        machine,
+        authority,
+    } = operation;
+    publish(
+        &mut directories,
+        &installation_evidence_paths,
+        &pending_publication.protected_authenticated_evidence_wrapper,
+    )
+    .map_err(|error| match error {
+        AuthenticatedEvidenceWrapperPublicationFilesystemError::PrepublicationRejected => {
+            FirstTimeSetupAuthenticatedEvidencePublicationError::PrepublicationRejected
+        }
+        AuthenticatedEvidenceWrapperPublicationFilesystemError::RenameOutcomeUnconfirmed => {
+            FirstTimeSetupAuthenticatedEvidencePublicationError::RenameOutcomeUnconfirmed
+        }
+        AuthenticatedEvidenceWrapperPublicationFilesystemError::PostRenameFlushFailed => {
+            FirstTimeSetupAuthenticatedEvidencePublicationError::PostRenameFlushFailed
+        }
+        AuthenticatedEvidenceWrapperPublicationFilesystemError::PostRenameValidationFailed => {
+            FirstTimeSetupAuthenticatedEvidencePublicationError::PostRenameValidationFailed
+        }
+    })?;
+    let machine = protected_artifact_staging::advance_authenticated_evidence_published::<
+        FirstTimeSetupPublicationStateMachine,
+    >(&authority, machine)
+    .map_err(|_| {
+        FirstTimeSetupAuthenticatedEvidencePublicationError::InternalStateAfterPublication
+    })?;
+    Ok(AuthenticatedEvidencePublishedFirstTimeSetupOperation {
+        pending_publication,
+        database_metadata,
+        installation_evidence_paths,
+        database_key_paths,
+        freshness_anchor_paths,
+        directories,
+        machine,
+        authority,
+    })
 }
 
 #[cfg(test)]

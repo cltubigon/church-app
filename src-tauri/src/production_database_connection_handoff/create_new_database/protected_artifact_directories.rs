@@ -23,10 +23,14 @@ mod database_key_wrapper_publication;
 mod staged_protected_wrapper_writer;
 
 pub(crate) use database_key_wrapper_publication::{
+    AuthenticatedEvidenceWrapperPublicationFilesystemError,
     AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError,
     DatabaseKeyWrapperPublicationFilesystemError,
+    EvidenceAuthenticationKeyWrapperPublicationFilesystemError,
     FreshnessAuthenticationKeyWrapperPublicationFilesystemError,
+    publish_staged_authenticated_evidence_wrapper,
     publish_staged_authenticated_freshness_anchor_wrapper, publish_staged_database_key_wrapper,
+    publish_staged_evidence_authentication_key_wrapper,
     publish_staged_freshness_authentication_key_wrapper,
 };
 pub(crate) use staged_protected_wrapper_writer::{

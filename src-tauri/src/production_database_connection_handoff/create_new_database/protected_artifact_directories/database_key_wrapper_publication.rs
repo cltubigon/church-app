@@ -23,10 +23,13 @@ use crate::{
     },
     installation_evidence_protection::EncodedProtectedWrapper,
     storage_foundation::{
-        ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME, ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME, ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+        ACTIVE_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME, ACTIVE_AUTHENTICATION_KEY_FILENAME,
         ACTIVE_DATABASE_KEY_FILENAME, DATABASE_KEY_DIRECTORY_NAME, DatabaseKeyPersistencePaths,
         FRESHNESS_ANCHOR_DIRECTORY_NAME, FreshnessAnchorPersistencePaths,
-        STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME, STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME,
+        INSTALLATION_EVIDENCE_DIRECTORY_NAME, InstallationEvidencePersistencePaths,
+        STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME, STAGED_AUTHENTICATED_EVIDENCE_FILENAME,
+        STAGED_AUTHENTICATED_FRESHNESS_ANCHOR_FILENAME, STAGED_AUTHENTICATION_KEY_FILENAME,
         STAGED_DATABASE_KEY_FILENAME,
     },
 };
@@ -88,6 +91,44 @@ pub(crate) enum AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError {
     PostRenameValidationFailed,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum EvidenceAuthenticationKeyWrapperPublicationFilesystemError {
+    PrepublicationRejected,
+    RenameOutcomeUnconfirmed,
+    PostRenameFlushFailed,
+    PostRenameValidationFailed,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AuthenticatedEvidenceWrapperPublicationFilesystemError {
+    PrepublicationRejected,
+    RenameOutcomeUnconfirmed,
+    PostRenameFlushFailed,
+    PostRenameValidationFailed,
+}
+
+impl std::fmt::Debug for AuthenticatedEvidenceWrapperPublicationFilesystemError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PrepublicationRejected => "PrepublicationRejected",
+            Self::RenameOutcomeUnconfirmed => "RenameOutcomeUnconfirmed",
+            Self::PostRenameFlushFailed => "PostRenameFlushFailed",
+            Self::PostRenameValidationFailed => "PostRenameValidationFailed",
+        })
+    }
+}
+
+impl std::fmt::Debug for EvidenceAuthenticationKeyWrapperPublicationFilesystemError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PrepublicationRejected => "PrepublicationRejected",
+            Self::RenameOutcomeUnconfirmed => "RenameOutcomeUnconfirmed",
+            Self::PostRenameFlushFailed => "PostRenameFlushFailed",
+            Self::PostRenameValidationFailed => "PostRenameValidationFailed",
+        })
+    }
+}
+
 impl std::fmt::Debug for AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -129,6 +170,22 @@ pub(crate) fn publish_staged_authenticated_freshness_anchor_wrapper(
     expected: &EncodedProtectedWrapper,
 ) -> Result<(), AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError> {
     publish_authenticated_freshness_anchor_using(directories, paths, expected, |_| false)
+}
+
+pub(crate) fn publish_staged_evidence_authentication_key_wrapper(
+    directories: &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+    paths: &InstallationEvidencePersistencePaths,
+    expected: &EncodedProtectedWrapper,
+) -> Result<(), EvidenceAuthenticationKeyWrapperPublicationFilesystemError> {
+    publish_evidence_authentication_key_using(directories, paths, expected, |_| false)
+}
+
+pub(crate) fn publish_staged_authenticated_evidence_wrapper(
+    directories: &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+    paths: &InstallationEvidencePersistencePaths,
+    expected: &EncodedProtectedWrapper,
+) -> Result<(), AuthenticatedEvidenceWrapperPublicationFilesystemError> {
+    publish_authenticated_evidence_using(directories, paths, expected, |_| false)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -196,6 +253,46 @@ fn publish_authenticated_freshness_anchor_using(
     };
     publish_fixed_protected_wrapper(&directories.root, fixed, expected, &mut fail_at)
         .map_err(AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError::from)
+}
+
+fn publish_evidence_authentication_key_using(
+    directories: &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+    paths: &InstallationEvidencePersistencePaths,
+    expected: &EncodedProtectedWrapper,
+    mut fail_at: impl FnMut(PublicationCheckpoint) -> bool,
+) -> Result<(), EvidenceAuthenticationKeyWrapperPublicationFilesystemError> {
+    let fixed = FixedProtectedWrapperPublication {
+        retained_directory: &directories.installation_evidence,
+        typed_directory: paths.evidence_directory.as_path(),
+        staged_path: paths.staged_authentication_key.as_path(),
+        active_path: paths.active_authentication_key.as_path(),
+        directory_name: INSTALLATION_EVIDENCE_DIRECTORY_NAME,
+        staged_name: STAGED_AUTHENTICATION_KEY_FILENAME,
+        active_name: ACTIVE_AUTHENTICATION_KEY_FILENAME,
+        validate_wrapper: validate_evidence_authentication_key_wrapper,
+    };
+    publish_fixed_protected_wrapper(&directories.root, fixed, expected, &mut fail_at)
+        .map_err(EvidenceAuthenticationKeyWrapperPublicationFilesystemError::from)
+}
+
+fn publish_authenticated_evidence_using(
+    directories: &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+    paths: &InstallationEvidencePersistencePaths,
+    expected: &EncodedProtectedWrapper,
+    mut fail_at: impl FnMut(PublicationCheckpoint) -> bool,
+) -> Result<(), AuthenticatedEvidenceWrapperPublicationFilesystemError> {
+    let fixed = FixedProtectedWrapperPublication {
+        retained_directory: &directories.installation_evidence,
+        typed_directory: paths.evidence_directory.as_path(),
+        staged_path: paths.staged_authenticated_evidence.as_path(),
+        active_path: paths.active_authenticated_evidence.as_path(),
+        directory_name: INSTALLATION_EVIDENCE_DIRECTORY_NAME,
+        staged_name: STAGED_AUTHENTICATED_EVIDENCE_FILENAME,
+        active_name: ACTIVE_AUTHENTICATED_EVIDENCE_FILENAME,
+        validate_wrapper: validate_authenticated_evidence_wrapper,
+    };
+    publish_fixed_protected_wrapper(&directories.root, fixed, expected, &mut fail_at)
+        .map_err(AuthenticatedEvidenceWrapperPublicationFilesystemError::from)
 }
 
 #[derive(Clone, Copy)]
@@ -516,6 +613,14 @@ fn validate_authenticated_freshness_anchor_wrapper(bytes: &[u8]) -> bool {
     EncodedProtectedWrapper::validate_authenticated_freshness_anchor_bytes(bytes).is_ok()
 }
 
+fn validate_evidence_authentication_key_wrapper(bytes: &[u8]) -> bool {
+    EncodedProtectedWrapper::validate_authentication_key_bytes(bytes).is_ok()
+}
+
+fn validate_authenticated_evidence_wrapper(bytes: &[u8]) -> bool {
+    EncodedProtectedWrapper::validate_authenticated_evidence_bytes(bytes).is_ok()
+}
+
 macro_rules! map_fixed_publication_error {
     ($role_error:ty) => {
         impl From<FixedProtectedWrapperPublicationError> for $role_error {
@@ -542,6 +647,8 @@ macro_rules! map_fixed_publication_error {
 map_fixed_publication_error!(DatabaseKeyWrapperPublicationFilesystemError);
 map_fixed_publication_error!(FreshnessAuthenticationKeyWrapperPublicationFilesystemError);
 map_fixed_publication_error!(AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError);
+map_fixed_publication_error!(EvidenceAuthenticationKeyWrapperPublicationFilesystemError);
+map_fixed_publication_error!(AuthenticatedEvidenceWrapperPublicationFilesystemError);
 
 #[cfg(test)]
 mod tests {
@@ -565,6 +672,7 @@ mod tests {
         root: PathBuf,
         paths: DatabaseKeyPersistencePaths,
         freshness_paths: FreshnessAnchorPersistencePaths,
+        evidence_paths: InstallationEvidencePersistencePaths,
         directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
     }
 
@@ -597,6 +705,7 @@ mod tests {
                 root,
                 paths,
                 freshness_paths: freshness,
+                evidence_paths: evidence,
                 directories,
             }
         }
@@ -655,6 +764,34 @@ mod tests {
             &fixture
                 .freshness_paths
                 .staged_authenticated_freshness_anchor,
+            value,
+        )
+        .unwrap();
+    }
+
+    fn evidence_authentication_key_wrapper(byte: u8) -> EncodedProtectedWrapper {
+        EncodedProtectedWrapper::synthetic_authentication_key_for_publication_test(vec![byte; 32])
+            .unwrap()
+    }
+
+    fn stage_evidence_authentication_key(fixture: &mut Fixture, value: &EncodedProtectedWrapper) {
+        super::super::write_staged_evidence_authentication_key_wrapper(
+            &mut fixture.directories,
+            &fixture.evidence_paths.staged_authentication_key,
+            value,
+        )
+        .unwrap();
+    }
+
+    fn authenticated_evidence_wrapper(byte: u8) -> EncodedProtectedWrapper {
+        EncodedProtectedWrapper::synthetic_authenticated_evidence_for_loader_test(vec![byte; 32])
+            .unwrap()
+    }
+
+    fn stage_authenticated_evidence(fixture: &mut Fixture, value: &EncodedProtectedWrapper) {
+        super::super::write_staged_authenticated_evidence_wrapper(
+            &mut fixture.directories,
+            &fixture.evidence_paths.staged_authenticated_evidence,
             value,
         )
         .unwrap();
@@ -1422,6 +1559,363 @@ mod tests {
     }
 
     #[test]
+    fn evidence_authentication_key_wrapper_publication_moves_only_exact_role_bytes() {
+        let mut fixture = Fixture::new();
+        let expected = evidence_authentication_key_wrapper(0x3f);
+        let authenticated_evidence =
+            EncodedProtectedWrapper::synthetic_authenticated_evidence_for_loader_test(vec![
+                0x40;
+                32
+            ])
+            .unwrap();
+        stage_evidence_authentication_key(&mut fixture, &expected);
+        super::super::write_staged_authenticated_evidence_wrapper(
+            &mut fixture.directories,
+            &fixture.evidence_paths.staged_authenticated_evidence,
+            &authenticated_evidence,
+        )
+        .unwrap();
+
+        publish_staged_evidence_authentication_key_wrapper(
+            &mut fixture.directories,
+            &fixture.evidence_paths,
+            &expected,
+        )
+        .unwrap();
+
+        assert!(
+            !fixture
+                .evidence_paths
+                .staged_authentication_key
+                .as_path()
+                .exists()
+        );
+        assert_eq!(
+            fs::read(fixture.evidence_paths.active_authentication_key.as_path()).unwrap(),
+            expected.as_bytes()
+        );
+        assert_eq!(
+            fs::read(
+                fixture
+                    .evidence_paths
+                    .staged_authenticated_evidence
+                    .as_path()
+            )
+            .unwrap(),
+            authenticated_evidence.as_bytes()
+        );
+        assert!(
+            !fixture
+                .evidence_paths
+                .active_authenticated_evidence
+                .as_path()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn evidence_authentication_key_wrapper_publication_rejects_missing_destination_and_wrong_kind()
+    {
+        use EvidenceAuthenticationKeyWrapperPublicationFilesystemError::PrepublicationRejected;
+
+        let expected = evidence_authentication_key_wrapper(0x41);
+        let mut missing = Fixture::new();
+        assert_eq!(
+            publish_staged_evidence_authentication_key_wrapper(
+                &mut missing.directories,
+                &missing.evidence_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+
+        let mut destination = Fixture::new();
+        stage_evidence_authentication_key(&mut destination, &expected);
+        fs::write(
+            destination
+                .evidence_paths
+                .active_authentication_key
+                .as_path(),
+            b"synthetic-existing-destination",
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_evidence_authentication_key_wrapper(
+                &mut destination.directories,
+                &destination.evidence_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+
+        let mut wrong_kind = Fixture::new();
+        let wrong = authenticated_freshness_anchor_wrapper(0x42);
+        fs::write(
+            wrong_kind
+                .evidence_paths
+                .staged_authentication_key
+                .as_path(),
+            wrong.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_evidence_authentication_key_wrapper(
+                &mut wrong_kind.directories,
+                &wrong_kind.evidence_paths,
+                &wrong,
+            ),
+            Err(PrepublicationRejected)
+        );
+        assert!(
+            wrong_kind
+                .evidence_paths
+                .staged_authentication_key
+                .as_path()
+                .exists()
+        );
+        assert!(
+            !wrong_kind
+                .evidence_paths
+                .active_authentication_key
+                .as_path()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn evidence_authentication_key_wrapper_publication_phase_failures_preserve_locked_residue() {
+        let expected = evidence_authentication_key_wrapper(0x43);
+        let mut rename = Fixture::new();
+        stage_evidence_authentication_key(&mut rename, &expected);
+        assert_eq!(
+            publish_evidence_authentication_key_using(
+                &mut rename.directories,
+                &rename.evidence_paths,
+                &expected,
+                |point| point == PublicationCheckpoint::Rename,
+            ),
+            Err(
+                EvidenceAuthenticationKeyWrapperPublicationFilesystemError::RenameOutcomeUnconfirmed
+            )
+        );
+        assert!(
+            rename
+                .evidence_paths
+                .staged_authentication_key
+                .as_path()
+                .exists()
+        );
+        assert!(
+            !rename
+                .evidence_paths
+                .active_authentication_key
+                .as_path()
+                .exists()
+        );
+        drop(rename);
+
+        for (point, error) in [
+            (
+                PublicationCheckpoint::PostRenameFlush,
+                EvidenceAuthenticationKeyWrapperPublicationFilesystemError::PostRenameFlushFailed,
+            ),
+            (
+                PublicationCheckpoint::PostRenameValidation,
+                EvidenceAuthenticationKeyWrapperPublicationFilesystemError::PostRenameValidationFailed,
+            ),
+        ] {
+            let mut fixture = Fixture::new();
+            stage_evidence_authentication_key(&mut fixture, &expected);
+            assert_eq!(
+                publish_evidence_authentication_key_using(
+                    &mut fixture.directories,
+                    &fixture.evidence_paths,
+                    &expected,
+                    |current| current == point,
+                ),
+                Err(error)
+            );
+            assert!(!fixture.evidence_paths.staged_authentication_key.as_path().exists());
+            assert_eq!(
+                fs::read(fixture.evidence_paths.active_authentication_key.as_path()).unwrap(),
+                expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_evidence_wrapper_publication_moves_exact_final_role_bytes() {
+        let mut fixture = Fixture::new();
+        let evidence_key = evidence_authentication_key_wrapper(0x44);
+        let expected = authenticated_evidence_wrapper(0x45);
+        stage_evidence_authentication_key(&mut fixture, &evidence_key);
+        publish_staged_evidence_authentication_key_wrapper(
+            &mut fixture.directories,
+            &fixture.evidence_paths,
+            &evidence_key,
+        )
+        .unwrap();
+        stage_authenticated_evidence(&mut fixture, &expected);
+
+        publish_staged_authenticated_evidence_wrapper(
+            &mut fixture.directories,
+            &fixture.evidence_paths,
+            &expected,
+        )
+        .unwrap();
+
+        assert!(
+            !fixture
+                .evidence_paths
+                .staged_authenticated_evidence
+                .as_path()
+                .exists()
+        );
+        assert_eq!(
+            fs::read(
+                fixture
+                    .evidence_paths
+                    .active_authenticated_evidence
+                    .as_path()
+            )
+            .unwrap(),
+            expected.as_bytes()
+        );
+        assert_eq!(
+            fs::read(fixture.evidence_paths.active_authentication_key.as_path()).unwrap(),
+            evidence_key.as_bytes()
+        );
+    }
+
+    #[test]
+    fn authenticated_evidence_wrapper_publication_rejects_existing_destination_and_wrong_kind() {
+        use AuthenticatedEvidenceWrapperPublicationFilesystemError::PrepublicationRejected;
+        let expected = authenticated_evidence_wrapper(0x46);
+        let mut destination = Fixture::new();
+        stage_authenticated_evidence(&mut destination, &expected);
+        fs::write(
+            destination
+                .evidence_paths
+                .active_authenticated_evidence
+                .as_path(),
+            b"synthetic-existing-destination",
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_authenticated_evidence_wrapper(
+                &mut destination.directories,
+                &destination.evidence_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+
+        let mut wrong_kind = Fixture::new();
+        let wrong = evidence_authentication_key_wrapper(0x47);
+        fs::write(
+            wrong_kind
+                .evidence_paths
+                .staged_authenticated_evidence
+                .as_path(),
+            wrong.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_authenticated_evidence_wrapper(
+                &mut wrong_kind.directories,
+                &wrong_kind.evidence_paths,
+                &wrong,
+            ),
+            Err(PrepublicationRejected)
+        );
+        assert!(
+            wrong_kind
+                .evidence_paths
+                .staged_authenticated_evidence
+                .as_path()
+                .exists()
+        );
+        assert!(
+            !wrong_kind
+                .evidence_paths
+                .active_authenticated_evidence
+                .as_path()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn authenticated_evidence_wrapper_publication_phase_failures_are_distinct() {
+        let expected = authenticated_evidence_wrapper(0x48);
+        let mut rename = Fixture::new();
+        stage_authenticated_evidence(&mut rename, &expected);
+        assert_eq!(
+            publish_authenticated_evidence_using(
+                &mut rename.directories,
+                &rename.evidence_paths,
+                &expected,
+                |point| point == PublicationCheckpoint::Rename,
+            ),
+            Err(AuthenticatedEvidenceWrapperPublicationFilesystemError::RenameOutcomeUnconfirmed)
+        );
+        assert!(
+            rename
+                .evidence_paths
+                .staged_authenticated_evidence
+                .as_path()
+                .exists()
+        );
+        assert!(
+            !rename
+                .evidence_paths
+                .active_authenticated_evidence
+                .as_path()
+                .exists()
+        );
+        drop(rename);
+
+        for (point, error) in [
+            (
+                PublicationCheckpoint::PostRenameFlush,
+                AuthenticatedEvidenceWrapperPublicationFilesystemError::PostRenameFlushFailed,
+            ),
+            (
+                PublicationCheckpoint::PostRenameValidation,
+                AuthenticatedEvidenceWrapperPublicationFilesystemError::PostRenameValidationFailed,
+            ),
+        ] {
+            let mut fixture = Fixture::new();
+            stage_authenticated_evidence(&mut fixture, &expected);
+            assert_eq!(
+                publish_authenticated_evidence_using(
+                    &mut fixture.directories,
+                    &fixture.evidence_paths,
+                    &expected,
+                    |current| current == point,
+                ),
+                Err(error)
+            );
+            assert!(
+                !fixture
+                    .evidence_paths
+                    .staged_authenticated_evidence
+                    .as_path()
+                    .exists()
+            );
+            assert_eq!(
+                fs::read(
+                    fixture
+                        .evidence_paths
+                        .active_authenticated_evidence
+                        .as_path()
+                )
+                .unwrap(),
+                expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
     fn fixed_protected_wrapper_publication_engine_is_single_private_and_role_fixed() {
         let source = include_str!("database_key_wrapper_publication.rs")
             .split("#[cfg(test)]\nmod tests")
@@ -1455,8 +1949,16 @@ mod tests {
         assert!(source.contains(
             "EncodedProtectedWrapper::validate_authenticated_freshness_anchor_bytes(bytes)"
         ));
+        assert!(
+            source.contains("EncodedProtectedWrapper::validate_authentication_key_bytes(bytes)")
+        );
+        assert!(
+            source
+                .contains("EncodedProtectedWrapper::validate_authenticated_evidence_bytes(bytes)")
+        );
         assert!(source.contains("retained_directory: &directories.database_key"));
         assert!(source.contains("retained_directory: &directories.freshness_anchor"));
+        assert!(source.contains("retained_directory: &directories.installation_evidence"));
         for forbidden in [
             "pub(crate) fn publish_fixed_protected_wrapper",
             "MoveFileExW",

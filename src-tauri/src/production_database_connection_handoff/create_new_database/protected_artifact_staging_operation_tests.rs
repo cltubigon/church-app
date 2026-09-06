@@ -259,6 +259,16 @@ fn pre_active_publication_owners_are_non_clone_non_copy_non_serializable_and_hav
         AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
         Default
     );
+    assert_sealed!(EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation);
+    assert_not_impl!(
+        EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
+        Default
+    );
+    assert_sealed!(AuthenticatedEvidencePublishedFirstTimeSetupOperation);
+    assert_not_impl!(
+        AuthenticatedEvidencePublishedFirstTimeSetupOperation,
+        Default
+    );
 }
 
 fn production() -> &'static str {
@@ -305,9 +315,9 @@ fn authority_is_zero_sized_private_and_bound_only_to_the_publication_machine() {
         "modsealed{pubtraitMachine{}implMachineforsuper::FirstTimeSetupPublicationStateMachine{}}"
     ));
     assert!(bridge.contains("traitAuthorityBinding:sealed::Machine{typeAuthority;}"));
-    assert_eq!(bridge.matches("pub(crate)fn").count(), 10);
-    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 10);
-    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 10);
+    assert_eq!(bridge.matches("pub(crate)fn").count(), 12);
+    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 12);
+    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 12);
     assert!(!bridge.contains("pub(crate)modsealed"));
 }
 
@@ -385,8 +395,8 @@ fn source_seals_inputs_fields_and_construction_without_machine_pairing_or_replac
             )
         );
     }
-    assert_eq!(source.matches("pub(crate) fn ").count(), 7);
-    assert_eq!(source.matches("impl ").count(), 11); // Binding, Debug, and fixed callbacks.
+    assert_eq!(source.matches("pub(crate) fn ").count(), 9);
+    assert_eq!(source.matches("impl ").count(), 15); // Binding, Debug, and fixed callbacks.
     let construction = source
         .split_once("pub(crate) fn prepare_")
         .unwrap()
@@ -494,8 +504,6 @@ fn source_has_no_publication_retry_cleanup_or_detachable_authority() {
         "revalidate_",
         "open_identity_",
         "close_and_preserve_",
-        "EvidenceAuthenticationKeyWrapperPublished",
-        "AuthenticatedEvidencePublished",
         "FinalActiveArtifactsVerified",
         "FirstTimeSetupPublicationEvent",
         "ReadyForSetupCompletion",
@@ -1478,6 +1486,441 @@ fn first_time_setup_authenticated_freshness_anchor_publication_owner_and_boundar
         assert!(!debug.contains('\\'));
         assert!(!debug.contains("dpapi"));
     }
+}
+
+#[test]
+fn first_time_setup_evidence_authentication_key_publication_moves_only_fourth_wrapper_and_preserves_ownership()
+ {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    let database_published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+    let freshness_key_published =
+        publish_first_time_setup_freshness_authentication_key_wrapper(database_published).unwrap();
+    let predecessor =
+        publish_first_time_setup_authenticated_freshness_anchor_wrapper(freshness_key_published)
+            .unwrap();
+    assert_boundary(
+        &predecessor.machine,
+        "AuthenticatedFreshnessAnchorPublished",
+    );
+
+    let allocations =
+        pending_wrappers(&predecessor.pending_publication).map(|bytes| bytes.as_ptr());
+    let expected_database_key =
+        fs::read(predecessor.database_key_paths.active_database_key.as_path()).unwrap();
+    let expected_freshness_key = fs::read(
+        predecessor
+            .freshness_anchor_paths
+            .active_anchor_authentication_key
+            .as_path(),
+    )
+    .unwrap();
+    let expected_anchor = fs::read(
+        predecessor
+            .freshness_anchor_paths
+            .active_authenticated_freshness_anchor
+            .as_path(),
+    )
+    .unwrap();
+    let expected_evidence_key = predecessor
+        .pending_publication
+        .protected_evidence_authentication_key_wrapper
+        .as_bytes()
+        .to_vec();
+    let authenticated_evidence_stage = fs::read(
+        predecessor
+            .installation_evidence_paths
+            .staged_authenticated_evidence
+            .as_path(),
+    )
+    .unwrap();
+    let metadata = predecessor.database_metadata;
+    let evidence_paths = predecessor.installation_evidence_paths.clone();
+    let key_paths = predecessor.database_key_paths.clone();
+    let freshness_paths = predecessor.freshness_anchor_paths.clone();
+    let published =
+        publish_first_time_setup_evidence_authentication_key_wrapper(predecessor).unwrap();
+    assert_boundary(
+        &published.machine,
+        "EvidenceAuthenticationKeyWrapperPublished",
+    );
+    assert_eq!(
+        format!("{published:?}"),
+        "EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation([REDACTED])"
+    );
+    assert_eq!(
+        pending_wrappers(&published.pending_publication).map(|bytes| bytes.as_ptr()),
+        allocations
+    );
+    assert_eq!(published.database_metadata, metadata);
+    assert_eq!(published.installation_evidence_paths, evidence_paths);
+    assert_eq!(published.database_key_paths, key_paths);
+    assert_eq!(published.freshness_anchor_paths, freshness_paths);
+    assert_eq!(
+        format!("{:?}", published.directories),
+        "PreparedFirstTimeSetupProtectedArtifactDirectories([REDACTED])"
+    );
+    assert_eq!(size_of_val(&published.authority), 0);
+
+    assert_eq!(
+        fs::read(key_paths.active_database_key.as_path()).unwrap(),
+        expected_database_key
+    );
+    assert_eq!(
+        fs::read(freshness_paths.active_anchor_authentication_key.as_path()).unwrap(),
+        expected_freshness_key
+    );
+    assert_eq!(
+        fs::read(
+            freshness_paths
+                .active_authenticated_freshness_anchor
+                .as_path()
+        )
+        .unwrap(),
+        expected_anchor
+    );
+    assert!(!evidence_paths.staged_authentication_key.as_path().exists());
+    assert_eq!(
+        fs::read(evidence_paths.active_authentication_key.as_path()).unwrap(),
+        expected_evidence_key
+    );
+    assert_eq!(
+        fs::read(evidence_paths.staged_authenticated_evidence.as_path()).unwrap(),
+        authenticated_evidence_stage
+    );
+    assert!(
+        !evidence_paths
+            .active_authenticated_evidence
+            .as_path()
+            .exists()
+    );
+    fixture.assert_write_access(true);
+}
+
+#[test]
+fn first_time_setup_evidence_authentication_key_publication_maps_each_filesystem_phase_without_advancing()
+ {
+    use EvidenceAuthenticationKeyWrapperPublicationFilesystemError as Filesystem;
+    for (filesystem, operation_error) in [
+        (
+            Filesystem::PrepublicationRejected,
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PrepublicationRejected,
+        ),
+        (
+            Filesystem::RenameOutcomeUnconfirmed,
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::RenameOutcomeUnconfirmed,
+        ),
+        (
+            Filesystem::PostRenameFlushFailed,
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PostRenameFlushFailed,
+        ),
+        (
+            Filesystem::PostRenameValidationFailed,
+            FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PostRenameValidationFailed,
+        ),
+    ] {
+        let mut fixture = VerificationFixture::new_unstaged();
+        let staged = stage_real_fixture(&mut fixture);
+        let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+        let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+        let database_published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+        let freshness_key_published =
+            publish_first_time_setup_freshness_authentication_key_wrapper(database_published)
+                .unwrap();
+        let predecessor = publish_first_time_setup_authenticated_freshness_anchor_wrapper(
+            freshness_key_published,
+        )
+        .unwrap();
+        let before = fixture.snapshot();
+        assert_eq!(
+            publish_first_time_setup_evidence_authentication_key_wrapper_using(
+                predecessor,
+                |_, _, _| Err(filesystem),
+            )
+            .unwrap_err(),
+            operation_error
+        );
+        assert_eq!(fixture.snapshot(), before);
+    }
+}
+
+#[test]
+fn first_time_setup_evidence_authentication_key_publication_machine_failure_is_post_mutation_without_rollback()
+ {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    let database_published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+    let freshness_key_published =
+        publish_first_time_setup_freshness_authentication_key_wrapper(database_published).unwrap();
+    let mut predecessor =
+        publish_first_time_setup_authenticated_freshness_anchor_wrapper(freshness_key_published)
+            .unwrap();
+    let evidence_paths = predecessor.installation_evidence_paths.clone();
+    predecessor.machine = protected_artifact_staging::begin::<FirstTimeSetupPublicationStateMachine>(
+        &predecessor.authority,
+    );
+    assert_eq!(
+        publish_first_time_setup_evidence_authentication_key_wrapper(predecessor).unwrap_err(),
+        FirstTimeSetupEvidenceAuthenticationKeyPublicationError::InternalStateAfterPublication
+    );
+    assert!(!evidence_paths.staged_authentication_key.as_path().exists());
+    assert!(evidence_paths.active_authentication_key.as_path().exists());
+    assert!(
+        evidence_paths
+            .staged_authenticated_evidence
+            .as_path()
+            .exists()
+    );
+    assert!(
+        !evidence_paths
+            .active_authenticated_evidence
+            .as_path()
+            .exists()
+    );
+}
+
+#[test]
+fn first_time_setup_evidence_authentication_key_publication_owner_and_boundary_are_exact_and_sealed()
+ {
+    let source = production();
+    let fields = source
+        .split_once(
+            "pub(crate) struct EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {",
+        )
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    for field in [
+        "pending_publication: PendingSetupPublicationPayloads",
+        "database_metadata: DatabaseMetadataContractV1",
+        "installation_evidence_paths: InstallationEvidencePersistencePaths",
+        "database_key_paths: DatabaseKeyPersistencePaths",
+        "freshness_anchor_paths: FreshnessAnchorPersistencePaths",
+        "directories: PreparedFirstTimeSetupProtectedArtifactDirectories",
+        "machine: FirstTimeSetupPublicationStateMachine",
+        "authority: ProtectedArtifactStagingAuthority",
+    ] {
+        assert_eq!(fields.matches(field).count(), 1);
+    }
+    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 8);
+    let compact_source = compact(source);
+    assert!(compact_source.contains(
+        "publish_first_time_setup_evidence_authentication_key_wrapper(operation:AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,)->Result<EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,FirstTimeSetupEvidenceAuthenticationKeyPublicationError,>"
+    ));
+    assert_eq!(
+        source
+            .matches("ProtectedArtifactStagingAuthority { _private: () }")
+            .count(),
+        1
+    );
+    assert!(!source.contains("load_active_installation_evidence_wrapper_pair"));
+    for error in [
+        FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PrepublicationRejected,
+        FirstTimeSetupEvidenceAuthenticationKeyPublicationError::RenameOutcomeUnconfirmed,
+        FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PostRenameFlushFailed,
+        FirstTimeSetupEvidenceAuthenticationKeyPublicationError::PostRenameValidationFailed,
+        FirstTimeSetupEvidenceAuthenticationKeyPublicationError::InternalStateAfterPublication,
+    ] {
+        let debug = format!("{error:?}");
+        assert!(!debug.contains('\\'));
+        assert!(!debug.contains("dpapi"));
+    }
+}
+
+fn evidence_key_predecessor(
+    fixture: &mut VerificationFixture,
+) -> EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
+    let staged = stage_real_fixture(fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    let database_published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+    let freshness_key_published =
+        publish_first_time_setup_freshness_authentication_key_wrapper(database_published).unwrap();
+    let freshness_anchor_published =
+        publish_first_time_setup_authenticated_freshness_anchor_wrapper(freshness_key_published)
+            .unwrap();
+    publish_first_time_setup_evidence_authentication_key_wrapper(freshness_anchor_published)
+        .unwrap()
+}
+
+#[test]
+fn first_time_setup_authenticated_evidence_publication_is_last_and_preserves_ownership() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let predecessor = evidence_key_predecessor(&mut fixture);
+    assert_boundary(
+        &predecessor.machine,
+        "EvidenceAuthenticationKeyWrapperPublished",
+    );
+    let allocations =
+        pending_wrappers(&predecessor.pending_publication).map(|bytes| bytes.as_ptr());
+    let expected = predecessor
+        .pending_publication
+        .protected_authenticated_evidence_wrapper
+        .as_bytes()
+        .to_vec();
+    let metadata = predecessor.database_metadata;
+    let evidence_paths = predecessor.installation_evidence_paths.clone();
+    let key_paths = predecessor.database_key_paths.clone();
+    let freshness_paths = predecessor.freshness_anchor_paths.clone();
+    let existing_active = [
+        key_paths.active_database_key.as_path(),
+        freshness_paths.active_anchor_authentication_key.as_path(),
+        freshness_paths
+            .active_authenticated_freshness_anchor
+            .as_path(),
+        evidence_paths.active_authentication_key.as_path(),
+    ]
+    .map(|path| fs::read(path).unwrap());
+
+    let published = publish_first_time_setup_authenticated_evidence_wrapper(predecessor).unwrap();
+    assert_boundary(&published.machine, "AuthenticatedEvidencePublished");
+    assert_eq!(
+        format!("{published:?}"),
+        "AuthenticatedEvidencePublishedFirstTimeSetupOperation([REDACTED])"
+    );
+    assert_eq!(
+        pending_wrappers(&published.pending_publication).map(|bytes| bytes.as_ptr()),
+        allocations
+    );
+    assert_eq!(published.database_metadata, metadata);
+    assert_eq!(published.installation_evidence_paths, evidence_paths);
+    assert_eq!(published.database_key_paths, key_paths);
+    assert_eq!(published.freshness_anchor_paths, freshness_paths);
+    assert_eq!(
+        format!("{:?}", published.directories),
+        "PreparedFirstTimeSetupProtectedArtifactDirectories([REDACTED])"
+    );
+    assert_eq!(size_of_val(&published.authority), 0);
+
+    assert_eq!(
+        fs::read(evidence_paths.active_authenticated_evidence.as_path()).unwrap(),
+        expected
+    );
+    assert!(
+        !evidence_paths
+            .staged_authenticated_evidence
+            .as_path()
+            .exists()
+    );
+    let all_active = [
+        key_paths.active_database_key.as_path(),
+        freshness_paths.active_anchor_authentication_key.as_path(),
+        freshness_paths
+            .active_authenticated_freshness_anchor
+            .as_path(),
+        evidence_paths.active_authentication_key.as_path(),
+        evidence_paths.active_authenticated_evidence.as_path(),
+    ];
+    for active in all_active {
+        assert!(active.exists());
+    }
+    for (active, bytes) in all_active[..4].iter().zip(existing_active) {
+        assert_eq!(fs::read(active).unwrap(), bytes);
+    }
+    assert!(fixture.staged_paths().iter().all(|path| !path.exists()));
+}
+
+#[test]
+fn first_time_setup_authenticated_evidence_publication_maps_each_filesystem_phase() {
+    use AuthenticatedEvidenceWrapperPublicationFilesystemError as Filesystem;
+    for (filesystem, operation_error) in [
+        (
+            Filesystem::PrepublicationRejected,
+            FirstTimeSetupAuthenticatedEvidencePublicationError::PrepublicationRejected,
+        ),
+        (
+            Filesystem::RenameOutcomeUnconfirmed,
+            FirstTimeSetupAuthenticatedEvidencePublicationError::RenameOutcomeUnconfirmed,
+        ),
+        (
+            Filesystem::PostRenameFlushFailed,
+            FirstTimeSetupAuthenticatedEvidencePublicationError::PostRenameFlushFailed,
+        ),
+        (
+            Filesystem::PostRenameValidationFailed,
+            FirstTimeSetupAuthenticatedEvidencePublicationError::PostRenameValidationFailed,
+        ),
+    ] {
+        let mut fixture = VerificationFixture::new_unstaged();
+        let predecessor = evidence_key_predecessor(&mut fixture);
+        let before = fixture.snapshot();
+        assert_eq!(
+            publish_first_time_setup_authenticated_evidence_wrapper_using(
+                predecessor,
+                |_, _, _| Err(filesystem),
+            )
+            .unwrap_err(),
+            operation_error
+        );
+        assert_eq!(fixture.snapshot(), before);
+    }
+}
+
+#[test]
+fn first_time_setup_authenticated_evidence_machine_failure_does_not_roll_back() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let mut predecessor = evidence_key_predecessor(&mut fixture);
+    let evidence_paths = predecessor.installation_evidence_paths.clone();
+    predecessor.machine = protected_artifact_staging::begin::<FirstTimeSetupPublicationStateMachine>(
+        &predecessor.authority,
+    );
+    assert_eq!(
+        publish_first_time_setup_authenticated_evidence_wrapper(predecessor).unwrap_err(),
+        FirstTimeSetupAuthenticatedEvidencePublicationError::InternalStateAfterPublication
+    );
+    assert!(
+        !evidence_paths
+            .staged_authenticated_evidence
+            .as_path()
+            .exists()
+    );
+    assert!(
+        evidence_paths
+            .active_authenticated_evidence
+            .as_path()
+            .exists()
+    );
+}
+
+#[test]
+fn authenticated_evidence_publication_owner_predecessor_and_scope_are_exact() {
+    let source = production();
+    let fields = source
+        .split_once("pub(crate) struct AuthenticatedEvidencePublishedFirstTimeSetupOperation {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    for field in [
+        "pending_publication: PendingSetupPublicationPayloads",
+        "database_metadata: DatabaseMetadataContractV1",
+        "installation_evidence_paths: InstallationEvidencePersistencePaths",
+        "database_key_paths: DatabaseKeyPersistencePaths",
+        "freshness_anchor_paths: FreshnessAnchorPersistencePaths",
+        "directories: PreparedFirstTimeSetupProtectedArtifactDirectories",
+        "machine: FirstTimeSetupPublicationStateMachine",
+        "authority: ProtectedArtifactStagingAuthority",
+    ] {
+        assert_eq!(fields.matches(field).count(), 1);
+    }
+    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 8);
+    let compact_source = compact(source);
+    assert!(compact_source.contains(
+        "publish_first_time_setup_authenticated_evidence_wrapper(operation:EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,)->Result<AuthenticatedEvidencePublishedFirstTimeSetupOperation,FirstTimeSetupAuthenticatedEvidencePublicationError,>"
+    ));
+    assert!(!source.contains("FinalActiveArtifactsVerified"));
+    assert!(!source.contains("ReadyForSetupCompletion"));
+    assert!(!source.contains("load_active_installation_evidence_wrapper_pair"));
+    assert!(!source.contains("recover_and_validate_loaded_installation_evidence"));
+    assert!(!source.contains("setup_complete"));
+    assert!(!source.contains("startup_author"));
 }
 
 #[test]
