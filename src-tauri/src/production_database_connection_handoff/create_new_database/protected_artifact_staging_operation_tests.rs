@@ -686,7 +686,7 @@ fn pre_active_publication_source_locks_consumption_proof_retirement_and_only_one
             } = operation;
             let CompletedFirstTimeSetupStagedVerificationContext {
                 installation_evidence, freshness_anchor, closed_database,
-                pending_publication, database_metadata, installation_evidence_paths,
+                pending_publication, database_identity_proof, database_metadata, installation_evidence_paths,
                 database_key_paths, freshness_anchor_paths,
             } = completed_context;
             {
@@ -699,7 +699,7 @@ fn pre_active_publication_source_locks_consumption_proof_retirement_and_only_one
             >(&authority, machine)
             .map_err(|_| FirstTimeSetupPreActivePublicationError::InternalState)?;
             Ok(PreparedFirstTimeSetupActivePublicationOperation {
-                pending_publication, database_metadata, installation_evidence_paths,
+                pending_publication, database_identity_proof, database_metadata, installation_evidence_paths,
                 database_key_paths, freshness_anchor_paths, directories, machine, authority,
             })
         }"
@@ -740,6 +740,7 @@ fn pre_active_publication_source_locks_exact_opaque_owner_and_coarse_error() {
         compact(fields),
         compact(
             "pending_publication: PendingSetupPublicationPayloads,
+        database_identity_proof: SetupDatabaseIdentityProof,
         database_metadata: DatabaseMetadataContractV1,
         installation_evidence_paths: InstallationEvidencePersistencePaths,
         database_key_paths: DatabaseKeyPersistencePaths,
@@ -827,6 +828,7 @@ fn pre_active_publication_real_chain_preserves_payload_allocations_paths_metadat
     let allocations = pending_wrappers(&context.pending_publication).map(|bytes| bytes.as_ptr());
     let bytes = pending_wrappers(&context.pending_publication).map(|bytes| bytes.to_vec());
     let metadata = context.database_metadata;
+    let database_identity = context.database_identity_proof.created_leaf_identity;
     // Test-only expected values; production moves all three families unchanged.
     let evidence_paths = context.installation_evidence_paths.clone();
     let key_paths = context.database_key_paths.clone();
@@ -849,6 +851,7 @@ fn pre_active_publication_real_chain_preserves_payload_allocations_paths_metadat
         bytes
     );
     assert_eq!(prepared.database_metadata, metadata);
+    assert!(prepared.database_identity_proof.created_leaf_identity == database_identity);
     assert_eq!(prepared.installation_evidence_paths, evidence_paths);
     assert_eq!(prepared.database_key_paths, key_paths);
     assert_eq!(prepared.freshness_anchor_paths, freshness_paths);
@@ -992,6 +995,7 @@ fn database_key_publication_owner_and_errors_are_sealed_and_redacted() {
         .0;
     for field in [
         "pending_publication: PendingSetupPublicationPayloads",
+        "database_identity_proof: SetupDatabaseIdentityProof",
         "database_metadata: DatabaseMetadataContractV1",
         "installation_evidence_paths: InstallationEvidencePersistencePaths",
         "database_key_paths: DatabaseKeyPersistencePaths",
@@ -1219,6 +1223,7 @@ fn first_time_setup_freshness_authentication_key_publication_owner_and_boundary_
         .0;
     for field in [
         "pending_publication: PendingSetupPublicationPayloads",
+        "database_identity_proof: SetupDatabaseIdentityProof",
         "database_metadata: DatabaseMetadataContractV1",
         "installation_evidence_paths: InstallationEvidencePersistencePaths",
         "database_key_paths: DatabaseKeyPersistencePaths",
@@ -1229,7 +1234,7 @@ fn first_time_setup_freshness_authentication_key_publication_owner_and_boundary_
     ] {
         assert_eq!(fields.matches(field).count(), 1);
     }
-    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 8);
+    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 9);
     assert_eq!(
         source
             .matches("ProtectedArtifactStagingAuthority { _private: () }")
@@ -1455,6 +1460,7 @@ fn first_time_setup_authenticated_freshness_anchor_publication_owner_and_boundar
         .0;
     for field in [
         "pending_publication: PendingSetupPublicationPayloads",
+        "database_identity_proof: SetupDatabaseIdentityProof",
         "database_metadata: DatabaseMetadataContractV1",
         "installation_evidence_paths: InstallationEvidencePersistencePaths",
         "database_key_paths: DatabaseKeyPersistencePaths",
@@ -1465,7 +1471,7 @@ fn first_time_setup_authenticated_freshness_anchor_publication_owner_and_boundar
     ] {
         assert_eq!(fields.matches(field).count(), 1);
     }
-    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 8);
+    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 9);
     assert_eq!(
         source
             .matches("ProtectedArtifactStagingAuthority { _private: () }")
@@ -1698,6 +1704,7 @@ fn first_time_setup_evidence_authentication_key_publication_owner_and_boundary_a
         .0;
     for field in [
         "pending_publication: PendingSetupPublicationPayloads",
+        "database_identity_proof: SetupDatabaseIdentityProof",
         "database_metadata: DatabaseMetadataContractV1",
         "installation_evidence_paths: InstallationEvidencePersistencePaths",
         "database_key_paths: DatabaseKeyPersistencePaths",
@@ -1708,7 +1715,7 @@ fn first_time_setup_evidence_authentication_key_publication_owner_and_boundary_a
     ] {
         assert_eq!(fields.matches(field).count(), 1);
     }
-    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 8);
+    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 9);
     let compact_source = compact(source);
     assert!(compact_source.contains(
         "publish_first_time_setup_evidence_authentication_key_wrapper(operation:AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,)->Result<EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,FirstTimeSetupEvidenceAuthenticationKeyPublicationError,>"
@@ -1900,6 +1907,7 @@ fn authenticated_evidence_publication_owner_predecessor_and_scope_are_exact() {
         .0;
     for field in [
         "pending_publication: PendingSetupPublicationPayloads",
+        "database_identity_proof: SetupDatabaseIdentityProof",
         "database_metadata: DatabaseMetadataContractV1",
         "installation_evidence_paths: InstallationEvidencePersistencePaths",
         "database_key_paths: DatabaseKeyPersistencePaths",
@@ -1910,7 +1918,7 @@ fn authenticated_evidence_publication_owner_predecessor_and_scope_are_exact() {
     ] {
         assert_eq!(fields.matches(field).count(), 1);
     }
-    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 8);
+    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 9);
     let compact_source = compact(source);
     assert!(compact_source.contains(
         "publish_first_time_setup_authenticated_evidence_wrapper(operation:EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,)->Result<AuthenticatedEvidencePublishedFirstTimeSetupOperation,FirstTimeSetupAuthenticatedEvidencePublicationError,>"
@@ -1921,6 +1929,91 @@ fn authenticated_evidence_publication_owner_predecessor_and_scope_are_exact() {
     assert!(!source.contains("recover_and_validate_loaded_installation_evidence"));
     assert!(!source.contains("setup_complete"));
     assert!(!source.contains("startup_author"));
+}
+
+#[test]
+fn database_identity_proof_moves_unchanged_through_every_active_publication_owner() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    let expected_identity = completed
+        .completed_context
+        .database_identity_proof
+        .created_leaf_identity;
+
+    let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    assert!(prepared.database_identity_proof.created_leaf_identity == expected_identity);
+    let database_published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+    assert!(
+        database_published
+            .database_identity_proof
+            .created_leaf_identity
+            == expected_identity
+    );
+    let freshness_key_published =
+        publish_first_time_setup_freshness_authentication_key_wrapper(database_published).unwrap();
+    assert!(
+        freshness_key_published
+            .database_identity_proof
+            .created_leaf_identity
+            == expected_identity
+    );
+    let freshness_anchor_published =
+        publish_first_time_setup_authenticated_freshness_anchor_wrapper(freshness_key_published)
+            .unwrap();
+    assert!(
+        freshness_anchor_published
+            .database_identity_proof
+            .created_leaf_identity
+            == expected_identity
+    );
+    let evidence_key_published =
+        publish_first_time_setup_evidence_authentication_key_wrapper(freshness_anchor_published)
+            .unwrap();
+    assert!(
+        evidence_key_published
+            .database_identity_proof
+            .created_leaf_identity
+            == expected_identity
+    );
+    let evidence_published =
+        publish_first_time_setup_authenticated_evidence_wrapper(evidence_key_published).unwrap();
+    assert!(
+        evidence_published
+            .database_identity_proof
+            .created_leaf_identity
+            == expected_identity
+    );
+
+    let source = production();
+    assert_eq!(
+        source
+            .matches("database_identity_proof: SetupDatabaseIdentityProof")
+            .count(),
+        6
+    );
+    assert_eq!(source.matches("database_identity_proof,").count(), 12);
+    assert!(!source.contains("SetupDatabaseIdentityProof {"));
+    assert!(!source.contains("database_identity_proof.clone"));
+    assert!(!source.contains("fn database_identity_proof"));
+    let identity_source = include_str!("../create_new_database.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap();
+    assert!(!identity_source.contains("impl SetupDatabaseIdentityProof {"));
+    for forbidden in [
+        "impl Clone for SetupDatabaseIdentityProof",
+        "impl Copy for SetupDatabaseIdentityProof",
+        "impl Default for SetupDatabaseIdentityProof",
+        "Serialize for SetupDatabaseIdentityProof",
+        "Deserialize for SetupDatabaseIdentityProof",
+        "impl Deref for SetupDatabaseIdentityProof",
+    ] {
+        assert!(
+            !identity_source.contains(forbidden),
+            "forbidden proof trait: {forbidden}"
+        );
+    }
 }
 
 #[test]

@@ -33,7 +33,7 @@ use super::{
     },
     CompletedFirstTimeSetupStagedVerificationContext, FirstTimeSetupStagedVerificationContext,
     FirstTimeSetupStagedVerificationError, PendingSetupPublicationPayloads,
-    verify_first_time_setup_staged_context,
+    SetupDatabaseIdentityProof, verify_first_time_setup_staged_context,
 };
 
 /// Payload-free authority, constructible only in this sealed module. The
@@ -104,6 +104,7 @@ pub(crate) enum FirstTimeSetupPreActivePublicationError {
 /// filesystem correctness nor cross-process exclusivity or setup completion.
 pub(crate) struct PreparedFirstTimeSetupActivePublicationOperation {
     pending_publication: PendingSetupPublicationPayloads,
+    database_identity_proof: SetupDatabaseIdentityProof,
     database_metadata: DatabaseMetadataContractV1,
     installation_evidence_paths: InstallationEvidencePersistencePaths,
     database_key_paths: DatabaseKeyPersistencePaths,
@@ -123,6 +124,7 @@ impl fmt::Debug for PreparedFirstTimeSetupActivePublicationOperation {
 /// The other four wrappers remain staged and no active wrapper was reloaded.
 pub(crate) struct DatabaseKeyWrapperPublishedFirstTimeSetupOperation {
     pending_publication: PendingSetupPublicationPayloads,
+    database_identity_proof: SetupDatabaseIdentityProof,
     database_metadata: DatabaseMetadataContractV1,
     installation_evidence_paths: InstallationEvidencePersistencePaths,
     database_key_paths: DatabaseKeyPersistencePaths,
@@ -143,6 +145,7 @@ impl fmt::Debug for DatabaseKeyWrapperPublishedFirstTimeSetupOperation {
 /// anchor and both evidence wrappers remain staged; no active wrapper was loaded.
 pub(crate) struct FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
     pending_publication: PendingSetupPublicationPayloads,
+    database_identity_proof: SetupDatabaseIdentityProof,
     database_metadata: DatabaseMetadataContractV1,
     installation_evidence_paths: InstallationEvidencePersistencePaths,
     database_key_paths: DatabaseKeyPersistencePaths,
@@ -165,6 +168,7 @@ impl fmt::Debug for FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOper
 /// both evidence wrappers remain staged.
 pub(crate) struct AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation {
     pending_publication: PendingSetupPublicationPayloads,
+    database_identity_proof: SetupDatabaseIdentityProof,
     database_metadata: DatabaseMetadataContractV1,
     installation_evidence_paths: InstallationEvidencePersistencePaths,
     database_key_paths: DatabaseKeyPersistencePaths,
@@ -185,6 +189,7 @@ impl fmt::Debug for AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation
 /// published structurally. Authenticated evidence remains staged and unpublished.
 pub(crate) struct EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
     pending_publication: PendingSetupPublicationPayloads,
+    database_identity_proof: SetupDatabaseIdentityProof,
     database_metadata: DatabaseMetadataContractV1,
     installation_evidence_paths: InstallationEvidencePersistencePaths,
     database_key_paths: DatabaseKeyPersistencePaths,
@@ -207,6 +212,7 @@ impl fmt::Debug for EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOpera
 /// or authenticated, and final active verification has not begun.
 pub(crate) struct AuthenticatedEvidencePublishedFirstTimeSetupOperation {
     pending_publication: PendingSetupPublicationPayloads,
+    database_identity_proof: SetupDatabaseIdentityProof,
     database_metadata: DatabaseMetadataContractV1,
     installation_evidence_paths: InstallationEvidencePersistencePaths,
     database_key_paths: DatabaseKeyPersistencePaths,
@@ -422,6 +428,7 @@ pub(crate) fn prepare_first_time_setup_active_publication(
         freshness_anchor,
         closed_database,
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,
@@ -440,6 +447,7 @@ pub(crate) fn prepare_first_time_setup_active_publication(
     .map_err(|_| FirstTimeSetupPreActivePublicationError::InternalState)?;
     Ok(PreparedFirstTimeSetupActivePublicationOperation {
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,
@@ -478,6 +486,7 @@ fn publish_first_time_setup_database_key_wrapper_using(
 > {
     let PreparedFirstTimeSetupActivePublicationOperation {
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,
@@ -511,6 +520,7 @@ fn publish_first_time_setup_database_key_wrapper_using(
     .map_err(|_| FirstTimeSetupDatabaseKeyPublicationError::InternalStateAfterPublication)?;
     Ok(DatabaseKeyWrapperPublishedFirstTimeSetupOperation {
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,
@@ -550,6 +560,7 @@ fn publish_first_time_setup_freshness_authentication_key_wrapper_using(
 > {
     let DatabaseKeyWrapperPublishedFirstTimeSetupOperation {
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,
@@ -587,6 +598,7 @@ fn publish_first_time_setup_freshness_authentication_key_wrapper_using(
     Ok(
         FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
             pending_publication,
+            database_identity_proof,
             database_metadata,
             installation_evidence_paths,
             database_key_paths,
@@ -627,6 +639,7 @@ fn publish_first_time_setup_authenticated_freshness_anchor_wrapper_using(
 > {
     let FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,
@@ -663,6 +676,7 @@ fn publish_first_time_setup_authenticated_freshness_anchor_wrapper_using(
     Ok(
         AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation {
             pending_publication,
+            database_identity_proof,
             database_metadata,
             installation_evidence_paths,
             database_key_paths,
@@ -702,6 +716,7 @@ fn publish_first_time_setup_evidence_authentication_key_wrapper_using(
 > {
     let AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation {
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,
@@ -739,6 +754,7 @@ fn publish_first_time_setup_evidence_authentication_key_wrapper_using(
     Ok(
         EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
             pending_publication,
+            database_identity_proof,
             database_metadata,
             installation_evidence_paths,
             database_key_paths,
@@ -778,6 +794,7 @@ fn publish_first_time_setup_authenticated_evidence_wrapper_using(
 > {
     let EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,
@@ -813,6 +830,7 @@ fn publish_first_time_setup_authenticated_evidence_wrapper_using(
     })?;
     Ok(AuthenticatedEvidencePublishedFirstTimeSetupOperation {
         pending_publication,
+        database_identity_proof,
         database_metadata,
         installation_evidence_paths,
         database_key_paths,

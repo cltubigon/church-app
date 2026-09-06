@@ -155,8 +155,11 @@ pub(crate) struct CompletedFirstTimeSetupStagedVerificationContext {
     freshness_anchor: ReloadVerifiedStagedFreshnessAnchorForSetup,
     closed_database: ClosedPreparedMetadataValidatedProductionDatabaseForSetup,
     pending_publication: PendingSetupPublicationPayloads,
-    // Preserve the single metadata anchor for future final verification. Move
-    // the existing path families intact for the future publication continuation.
+    // Preserve the historical native identity only for the future final active
+    // canonical-database identity recheck. It is not continuing path correctness.
+    database_identity_proof: SetupDatabaseIdentityProof,
+    // Preserve the single metadata anchor for future final verification. Move the
+    // existing path families intact for the future publication continuation.
     database_metadata: DatabaseMetadataContractV1,
     installation_evidence_paths: InstallationEvidencePersistencePaths,
     database_key_paths: DatabaseKeyPersistencePaths,
@@ -238,13 +241,12 @@ pub(crate) fn verify_first_time_setup_staged_context(
             }
         };
 
-    // Historical identity was needed only by the open. It is not a continuing
-    // path guarantee and is deliberately not retained after successful close.
     Ok(CompletedFirstTimeSetupStagedVerificationContext {
         installation_evidence,
         freshness_anchor,
         closed_database,
         pending_publication,
+        database_identity_proof: verification_core.database_identity_proof,
         database_metadata: verification_core.database_metadata,
         installation_evidence_paths: verification_core.installation_evidence_paths,
         database_key_paths: verification_core.database_key_paths,

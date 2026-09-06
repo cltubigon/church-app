@@ -272,6 +272,7 @@ fn real_sealed_context_retains_exact_proofs_wrappers_paths_and_one_metadata_anch
     let mut fixture = Fixture::new();
     let core = &fixture.context().verification_core;
     let metadata = core.database_metadata;
+    let database_identity = core.database_identity_proof.created_leaf_identity;
     let evidence_paths = core.installation_evidence_paths.clone();
     let key_paths = core.database_key_paths.clone();
     let freshness_paths = core.freshness_anchor_paths.clone();
@@ -288,6 +289,7 @@ fn real_sealed_context_retains_exact_proofs_wrappers_paths_and_one_metadata_anch
     let _: &ReloadVerifiedStagedFreshnessAnchorForSetup = &completed.freshness_anchor;
     let _: &ClosedPreparedMetadataValidatedProductionDatabaseForSetup = &completed.closed_database;
     assert_eq!(std::mem::size_of_val(&completed.closed_database), 0);
+    assert!(completed.database_identity_proof.created_leaf_identity == database_identity);
     assert_eq!(completed.database_metadata, metadata);
     assert_eq!(
         completed
@@ -665,6 +667,7 @@ fn source_locks_only_consuming_entry_exact_branch_order_dataflow_and_terminal_cl
             };
             Ok(CompletedFirstTimeSetupStagedVerificationContext {
                 installation_evidence, freshness_anchor, closed_database, pending_publication,
+                database_identity_proof: verification_core.database_identity_proof,
                 database_metadata: verification_core.database_metadata,
                 installation_evidence_paths: verification_core.installation_evidence_paths,
                 database_key_paths: verification_core.database_key_paths,
@@ -732,7 +735,7 @@ fn source_locks_only_consuming_entry_exact_branch_order_dataflow_and_terminal_cl
 }
 
 #[test]
-fn source_locks_completed_private_fields_no_key_or_identity_and_unchanged_branch_proofs() {
+fn source_locks_completed_private_fields_retained_identity_and_unchanged_branch_proofs() {
     let production = include_str!("first_time_setup_staged_verification_context.rs")
         .split("#[cfg(test)]")
         .next()
@@ -751,13 +754,29 @@ fn source_locks_completed_private_fields_no_key_or_identity_and_unchanged_branch
          freshness_anchor: ReloadVerifiedStagedFreshnessAnchorForSetup,
          closed_database: ClosedPreparedMetadataValidatedProductionDatabaseForSetup,
          pending_publication: PendingSetupPublicationPayloads,
+         database_identity_proof: SetupDatabaseIdentityProof,
          database_metadata: DatabaseMetadataContractV1,
          installation_evidence_paths: InstallationEvidencePersistencePaths,
          database_key_paths: DatabaseKeyPersistencePaths,
          freshness_anchor_paths: FreshnessAnchorPersistencePaths,"
         )
     );
+    assert_eq!(fields.matches("SetupDatabaseIdentityProof").count(), 1);
     assert_eq!(fields.matches("DatabaseMetadataContractV1").count(), 1);
+    assert!(!production.contains("impl CompletedFirstTimeSetupStagedVerificationContext"));
+    for forbidden in [
+        "impl Clone for SetupDatabaseIdentityProof",
+        "impl Copy for SetupDatabaseIdentityProof",
+        "impl Default for SetupDatabaseIdentityProof",
+        "Serialize for SetupDatabaseIdentityProof",
+        "Deserialize for SetupDatabaseIdentityProof",
+        "impl Deref for SetupDatabaseIdentityProof",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "forbidden proof trait: {forbidden}"
+        );
+    }
     for (source, name, fields) in [
         (
             include_str!(
