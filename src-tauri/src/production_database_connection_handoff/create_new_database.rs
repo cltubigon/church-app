@@ -75,8 +75,11 @@ pub(crate) use current_canonical_database_identity::{
 #[allow(unused_imports)]
 pub(crate) use first_time_setup_staged_verification_context::{
     AllProtectedArtifactsStagedFirstTimeSetupOperation,
+    AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
     CompletedFirstTimeSetupStagedVerificationContext,
-    DatabaseKeyWrapperPublishedFirstTimeSetupOperation, FirstTimeSetupDatabaseKeyPublicationError,
+    DatabaseKeyWrapperPublishedFirstTimeSetupOperation,
+    FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError,
+    FirstTimeSetupDatabaseKeyPublicationError,
     FirstTimeSetupFreshnessAuthenticationKeyPublicationError,
     FirstTimeSetupPreActivePublicationError, FirstTimeSetupProtectedArtifactStagingError,
     FirstTimeSetupProtectedArtifactStagingOperation, FirstTimeSetupStagedVerificationContext,
@@ -87,6 +90,7 @@ pub(crate) use first_time_setup_staged_verification_context::{
     prepare_first_time_setup_active_publication,
     prepare_first_time_setup_protected_artifact_staging_operation,
     prepare_first_time_setup_staged_verification_context,
+    publish_first_time_setup_authenticated_freshness_anchor_wrapper,
     publish_first_time_setup_database_key_wrapper,
     publish_first_time_setup_freshness_authentication_key_wrapper,
     stage_first_time_setup_protected_artifacts, verify_all_staged_first_time_setup_operation,
@@ -104,6 +108,7 @@ pub(crate) use prepared_first_time_setup_publication_materials::{
 };
 #[allow(unused_imports)]
 pub(crate) use protected_artifact_directories::{
+    AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError,
     DatabaseKeyWrapperPublicationFilesystemError,
     FirstTimeSetupProtectedArtifactDirectoryPreparationError,
     PreparedFirstTimeSetupProtectedArtifactDirectories, StagedProtectedWrapperWriteError,

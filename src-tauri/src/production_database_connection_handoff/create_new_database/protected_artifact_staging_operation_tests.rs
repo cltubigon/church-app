@@ -254,6 +254,11 @@ fn pre_active_publication_owners_are_non_clone_non_copy_non_serializable_and_hav
         FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
         Default
     );
+    assert_sealed!(AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation);
+    assert_not_impl!(
+        AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
+        Default
+    );
 }
 
 fn production() -> &'static str {
@@ -300,9 +305,9 @@ fn authority_is_zero_sized_private_and_bound_only_to_the_publication_machine() {
         "modsealed{pubtraitMachine{}implMachineforsuper::FirstTimeSetupPublicationStateMachine{}}"
     ));
     assert!(bridge.contains("traitAuthorityBinding:sealed::Machine{typeAuthority;}"));
-    assert_eq!(bridge.matches("pub(crate)fn").count(), 9);
-    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 9);
-    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 9);
+    assert_eq!(bridge.matches("pub(crate)fn").count(), 10);
+    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 10);
+    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 10);
     assert!(!bridge.contains("pub(crate)modsealed"));
 }
 
@@ -380,8 +385,8 @@ fn source_seals_inputs_fields_and_construction_without_machine_pairing_or_replac
             )
         );
     }
-    assert_eq!(source.matches("pub(crate) fn ").count(), 6);
-    assert_eq!(source.matches("impl ").count(), 9); // Binding, Debug, and two fixed callbacks.
+    assert_eq!(source.matches("pub(crate) fn ").count(), 7);
+    assert_eq!(source.matches("impl ").count(), 11); // Binding, Debug, and fixed callbacks.
     let construction = source
         .split_once("pub(crate) fn prepare_")
         .unwrap()
@@ -489,7 +494,6 @@ fn source_has_no_publication_retry_cleanup_or_detachable_authority() {
         "revalidate_",
         "open_identity_",
         "close_and_preserve_",
-        "AuthenticatedFreshnessAnchorPublished",
         "EvidenceAuthenticationKeyWrapperPublished",
         "AuthenticatedEvidencePublished",
         "FinalActiveArtifactsVerified",
@@ -1232,6 +1236,243 @@ fn first_time_setup_freshness_authentication_key_publication_owner_and_boundary_
         FirstTimeSetupFreshnessAuthenticationKeyPublicationError::PostRenameFlushFailed,
         FirstTimeSetupFreshnessAuthenticationKeyPublicationError::PostRenameValidationFailed,
         FirstTimeSetupFreshnessAuthenticationKeyPublicationError::InternalStateAfterPublication,
+    ] {
+        let debug = format!("{error:?}");
+        assert!(!debug.contains('\\'));
+        assert!(!debug.contains("dpapi"));
+    }
+}
+
+#[test]
+fn first_time_setup_authenticated_freshness_anchor_publication_moves_only_third_wrapper_and_preserves_ownership()
+ {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    let database_published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+    let freshness_key_published =
+        publish_first_time_setup_freshness_authentication_key_wrapper(database_published).unwrap();
+    assert_boundary(
+        &freshness_key_published.machine,
+        "FreshnessAuthenticationKeyWrapperPublished",
+    );
+
+    let allocations =
+        pending_wrappers(&freshness_key_published.pending_publication).map(|bytes| bytes.as_ptr());
+    let expected_database_key = fs::read(
+        freshness_key_published
+            .database_key_paths
+            .active_database_key
+            .as_path(),
+    )
+    .unwrap();
+    let expected_freshness_key = fs::read(
+        freshness_key_published
+            .freshness_anchor_paths
+            .active_anchor_authentication_key
+            .as_path(),
+    )
+    .unwrap();
+    let expected_anchor = freshness_key_published
+        .pending_publication
+        .protected_authenticated_freshness_anchor_wrapper
+        .as_bytes()
+        .to_vec();
+    let metadata = freshness_key_published.database_metadata;
+    let evidence_paths = freshness_key_published.installation_evidence_paths.clone();
+    let key_paths = freshness_key_published.database_key_paths.clone();
+    let freshness_paths = freshness_key_published.freshness_anchor_paths.clone();
+    let evidence_key_stage = fs::read(evidence_paths.staged_authentication_key.as_path()).unwrap();
+    let evidence_stage = fs::read(evidence_paths.staged_authenticated_evidence.as_path()).unwrap();
+
+    let published =
+        publish_first_time_setup_authenticated_freshness_anchor_wrapper(freshness_key_published)
+            .unwrap();
+    assert_boundary(&published.machine, "AuthenticatedFreshnessAnchorPublished");
+    assert_eq!(
+        format!("{published:?}"),
+        "AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation([REDACTED])"
+    );
+    assert_eq!(
+        pending_wrappers(&published.pending_publication).map(|bytes| bytes.as_ptr()),
+        allocations
+    );
+    assert_eq!(published.database_metadata, metadata);
+    assert_eq!(published.installation_evidence_paths, evidence_paths);
+    assert_eq!(published.database_key_paths, key_paths);
+    assert_eq!(published.freshness_anchor_paths, freshness_paths);
+    assert_eq!(
+        format!("{:?}", published.directories),
+        "PreparedFirstTimeSetupProtectedArtifactDirectories([REDACTED])"
+    );
+    assert_eq!(size_of_val(&published.authority), 0);
+
+    assert_eq!(
+        fs::read(key_paths.active_database_key.as_path()).unwrap(),
+        expected_database_key
+    );
+    assert!(!key_paths.staged_database_key.as_path().exists());
+    assert_eq!(
+        fs::read(freshness_paths.active_anchor_authentication_key.as_path()).unwrap(),
+        expected_freshness_key
+    );
+    assert!(
+        !freshness_paths
+            .staged_anchor_authentication_key
+            .as_path()
+            .exists()
+    );
+    assert!(
+        !freshness_paths
+            .staged_authenticated_freshness_anchor
+            .as_path()
+            .exists()
+    );
+    assert_eq!(
+        fs::read(
+            freshness_paths
+                .active_authenticated_freshness_anchor
+                .as_path()
+        )
+        .unwrap(),
+        expected_anchor
+    );
+    assert_eq!(
+        fs::read(evidence_paths.staged_authentication_key.as_path()).unwrap(),
+        evidence_key_stage
+    );
+    assert_eq!(
+        fs::read(evidence_paths.staged_authenticated_evidence.as_path()).unwrap(),
+        evidence_stage
+    );
+    assert!(!evidence_paths.active_authentication_key.as_path().exists());
+    assert!(
+        !evidence_paths
+            .active_authenticated_evidence
+            .as_path()
+            .exists()
+    );
+    fixture.assert_write_access(true);
+}
+
+#[test]
+fn first_time_setup_authenticated_freshness_anchor_publication_maps_each_filesystem_phase_without_advancing()
+ {
+    use AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError as Filesystem;
+    for (filesystem, operation_error) in [
+        (
+            Filesystem::PrepublicationRejected,
+            FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PrepublicationRejected,
+        ),
+        (
+            Filesystem::RenameOutcomeUnconfirmed,
+            FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::RenameOutcomeUnconfirmed,
+        ),
+        (
+            Filesystem::PostRenameFlushFailed,
+            FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PostRenameFlushFailed,
+        ),
+        (
+            Filesystem::PostRenameValidationFailed,
+            FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PostRenameValidationFailed,
+        ),
+    ] {
+        let mut fixture = VerificationFixture::new_unstaged();
+        let staged = stage_real_fixture(&mut fixture);
+        let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+        let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+        let database_published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+        let freshness_key_published =
+            publish_first_time_setup_freshness_authentication_key_wrapper(database_published)
+                .unwrap();
+        let before = fixture.snapshot();
+        assert_eq!(
+            publish_first_time_setup_authenticated_freshness_anchor_wrapper_using(
+                freshness_key_published,
+                |_, _, _| Err(filesystem),
+            )
+            .unwrap_err(),
+            operation_error
+        );
+        assert_eq!(fixture.snapshot(), before);
+    }
+}
+
+#[test]
+fn first_time_setup_authenticated_freshness_anchor_publication_machine_failure_is_post_mutation_without_rollback()
+ {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let staged = stage_real_fixture(&mut fixture);
+    let completed = verify_all_staged_first_time_setup_operation(staged).unwrap();
+    let prepared = prepare_first_time_setup_active_publication(completed).unwrap();
+    let database_published = publish_first_time_setup_database_key_wrapper(prepared).unwrap();
+    let mut freshness_key_published =
+        publish_first_time_setup_freshness_authentication_key_wrapper(database_published).unwrap();
+    let freshness_paths = freshness_key_published.freshness_anchor_paths.clone();
+    freshness_key_published.machine = protected_artifact_staging::begin::<
+        FirstTimeSetupPublicationStateMachine,
+    >(&freshness_key_published.authority);
+    assert_eq!(
+        publish_first_time_setup_authenticated_freshness_anchor_wrapper(freshness_key_published)
+            .unwrap_err(),
+        FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::InternalStateAfterPublication
+    );
+    assert!(
+        !freshness_paths
+            .staged_authenticated_freshness_anchor
+            .as_path()
+            .exists()
+    );
+    assert!(
+        freshness_paths
+            .active_authenticated_freshness_anchor
+            .as_path()
+            .exists()
+    );
+}
+
+#[test]
+fn first_time_setup_authenticated_freshness_anchor_publication_owner_and_boundary_are_exact_and_sealed()
+ {
+    let source = production();
+    let fields = source
+        .split_once(
+            "pub(crate) struct AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation {",
+        )
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    for field in [
+        "pending_publication: PendingSetupPublicationPayloads",
+        "database_metadata: DatabaseMetadataContractV1",
+        "installation_evidence_paths: InstallationEvidencePersistencePaths",
+        "database_key_paths: DatabaseKeyPersistencePaths",
+        "freshness_anchor_paths: FreshnessAnchorPersistencePaths",
+        "directories: PreparedFirstTimeSetupProtectedArtifactDirectories",
+        "machine: FirstTimeSetupPublicationStateMachine",
+        "authority: ProtectedArtifactStagingAuthority",
+    ] {
+        assert_eq!(fields.matches(field).count(), 1);
+    }
+    assert_eq!(fields.lines().filter(|line| line.contains(':')).count(), 8);
+    assert_eq!(
+        source
+            .matches("ProtectedArtifactStagingAuthority { _private: () }")
+            .count(),
+        1
+    );
+    assert!(!source.contains("load_active_freshness_anchor_wrapper_pair"));
+    assert!(!source.contains("recover_and_validate_loaded_freshness_anchor_pair"));
+    assert!(!source.contains("AuthenticatedActiveFreshnessAnchor"));
+    for error in [
+        FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PrepublicationRejected,
+        FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::RenameOutcomeUnconfirmed,
+        FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PostRenameFlushFailed,
+        FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PostRenameValidationFailed,
+        FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::InternalStateAfterPublication,
     ] {
         let debug = format!("{error:?}");
         assert!(!debug.contains('\\'));

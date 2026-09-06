@@ -16,10 +16,12 @@ use crate::{
 
 use super::{
     super::protected_artifact_directories::{
+        AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError,
         DatabaseKeyWrapperPublicationFilesystemError,
         FreshnessAuthenticationKeyWrapperPublicationFilesystemError,
         PreparedFirstTimeSetupProtectedArtifactDirectories, StagedProtectedWrapperWriteError,
-        publish_staged_database_key_wrapper, publish_staged_freshness_authentication_key_wrapper,
+        publish_staged_authenticated_freshness_anchor_wrapper, publish_staged_database_key_wrapper,
+        publish_staged_freshness_authentication_key_wrapper,
         write_staged_authenticated_evidence_wrapper,
         write_staged_authenticated_freshness_anchor_wrapper, write_staged_database_key_wrapper,
         write_staged_evidence_authentication_key_wrapper,
@@ -154,6 +156,27 @@ impl fmt::Debug for FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOper
     }
 }
 
+/// The same sealed lineage after the complete freshness wrapper pair was
+/// published structurally. Neither wrapper was loaded or authenticated, and
+/// both evidence wrappers remain staged.
+pub(crate) struct AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation {
+    pending_publication: PendingSetupPublicationPayloads,
+    database_metadata: DatabaseMetadataContractV1,
+    installation_evidence_paths: InstallationEvidencePersistencePaths,
+    database_key_paths: DatabaseKeyPersistencePaths,
+    freshness_anchor_paths: FreshnessAnchorPersistencePaths,
+    directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
+    machine: FirstTimeSetupPublicationStateMachine,
+    authority: ProtectedArtifactStagingAuthority,
+}
+
+impl fmt::Debug for AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .write_str("AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation([REDACTED])")
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum FirstTimeSetupDatabaseKeyPublicationError {
     PrepublicationRejected,
@@ -165,6 +188,15 @@ pub(crate) enum FirstTimeSetupDatabaseKeyPublicationError {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum FirstTimeSetupFreshnessAuthenticationKeyPublicationError {
+    PrepublicationRejected,
+    RenameOutcomeUnconfirmed,
+    PostRenameFlushFailed,
+    PostRenameValidationFailed,
+    InternalStateAfterPublication,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError {
     PrepublicationRejected,
     RenameOutcomeUnconfirmed,
     PostRenameFlushFailed,
@@ -491,6 +523,82 @@ fn publish_first_time_setup_freshness_authentication_key_wrapper_using(
         })?;
     Ok(
         FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
+            pending_publication,
+            database_metadata,
+            installation_evidence_paths,
+            database_key_paths,
+            freshness_anchor_paths,
+            directories,
+            machine,
+            authority,
+        },
+    )
+}
+
+/// Publish only the staged authenticated freshness-anchor wrapper through the
+/// shared validated live-source engine, then advance the retained machine.
+/// Publication proves neither authentication nor acceptance of the active pair.
+pub(crate) fn publish_first_time_setup_authenticated_freshness_anchor_wrapper(
+    operation: FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
+) -> Result<
+    AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
+    FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError,
+> {
+    publish_first_time_setup_authenticated_freshness_anchor_wrapper_using(
+        operation,
+        publish_staged_authenticated_freshness_anchor_wrapper,
+    )
+}
+
+fn publish_first_time_setup_authenticated_freshness_anchor_wrapper_using(
+    operation: FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
+    publish: impl FnOnce(
+        &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+        &FreshnessAnchorPersistencePaths,
+        &crate::installation_evidence_protection::EncodedProtectedWrapper,
+    )
+        -> Result<(), AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError>,
+) -> Result<
+    AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
+    FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError,
+> {
+    let FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation {
+        pending_publication,
+        database_metadata,
+        installation_evidence_paths,
+        database_key_paths,
+        freshness_anchor_paths,
+        mut directories,
+        machine,
+        authority,
+    } = operation;
+    publish(
+        &mut directories,
+        &freshness_anchor_paths,
+        &pending_publication.protected_authenticated_freshness_anchor_wrapper,
+    )
+    .map_err(|error| match error {
+        AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError::PrepublicationRejected => {
+            FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PrepublicationRejected
+        }
+        AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError::RenameOutcomeUnconfirmed => {
+            FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::RenameOutcomeUnconfirmed
+        }
+        AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError::PostRenameFlushFailed => {
+            FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PostRenameFlushFailed
+        }
+        AuthenticatedFreshnessAnchorWrapperPublicationFilesystemError::PostRenameValidationFailed => {
+            FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::PostRenameValidationFailed
+        }
+    })?;
+    let machine = protected_artifact_staging::advance_authenticated_freshness_anchor_published::<
+        FirstTimeSetupPublicationStateMachine,
+    >(&authority, machine)
+    .map_err(|_| {
+        FirstTimeSetupAuthenticatedFreshnessAnchorPublicationError::InternalStateAfterPublication
+    })?;
+    Ok(
+        AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation {
             pending_publication,
             database_metadata,
             installation_evidence_paths,
