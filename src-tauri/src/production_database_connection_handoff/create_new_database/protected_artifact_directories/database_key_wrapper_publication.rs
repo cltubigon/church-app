@@ -1,4 +1,4 @@
-//! Fixed-purpose publication of the staged database-key wrapper only.
+//! Fixed-purpose publication of staged protected wrappers at approved setup boundaries.
 
 use std::{
     ffi::{OsStr, c_void},
@@ -23,14 +23,16 @@ use crate::{
     },
     installation_evidence_protection::EncodedProtectedWrapper,
     storage_foundation::{
-        ACTIVE_DATABASE_KEY_FILENAME, DATABASE_KEY_DIRECTORY_NAME, DatabaseKeyPersistencePaths,
+        ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME, ACTIVE_DATABASE_KEY_FILENAME,
+        DATABASE_KEY_DIRECTORY_NAME, DatabaseKeyPersistencePaths, FRESHNESS_ANCHOR_DIRECTORY_NAME,
+        FreshnessAnchorPersistencePaths, STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
         STAGED_DATABASE_KEY_FILENAME,
     },
 };
 
 use super::super::{
-    RetainedObservation, exact_named_child, open_native_handle, open_retained_parent,
-    query_observation, validate_parent,
+    RetainedEntry, RetainedObservation, exact_named_child, open_native_handle,
+    open_retained_parent, query_observation, validate_parent,
 };
 use super::PreparedFirstTimeSetupProtectedArtifactDirectories;
 
@@ -58,12 +60,47 @@ impl std::fmt::Debug for DatabaseKeyWrapperPublicationFilesystemError {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum FreshnessAuthenticationKeyWrapperPublicationFilesystemError {
+    PrepublicationRejected,
+    RenameOutcomeUnconfirmed,
+    PostRenameFlushFailed,
+    PostRenameValidationFailed,
+}
+
+impl std::fmt::Debug for FreshnessAuthenticationKeyWrapperPublicationFilesystemError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PrepublicationRejected => "PrepublicationRejected",
+            Self::RenameOutcomeUnconfirmed => "RenameOutcomeUnconfirmed",
+            Self::PostRenameFlushFailed => "PostRenameFlushFailed",
+            Self::PostRenameValidationFailed => "PostRenameValidationFailed",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FixedProtectedWrapperPublicationError {
+    PrepublicationRejected,
+    RenameOutcomeUnconfirmed,
+    PostRenameFlushFailed,
+    PostRenameValidationFailed,
+}
+
 pub(crate) fn publish_staged_database_key_wrapper(
     directories: &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
     paths: &DatabaseKeyPersistencePaths,
     expected: &EncodedProtectedWrapper,
 ) -> Result<(), DatabaseKeyWrapperPublicationFilesystemError> {
     publish_using(directories, paths, expected, |_| false)
+}
+
+pub(crate) fn publish_staged_freshness_authentication_key_wrapper(
+    directories: &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+    paths: &FreshnessAnchorPersistencePaths,
+    expected: &EncodedProtectedWrapper,
+) -> Result<(), FreshnessAuthenticationKeyWrapperPublicationFilesystemError> {
+    publish_freshness_using(directories, paths, expected, |_| false)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -79,106 +116,153 @@ fn publish_using(
     expected: &EncodedProtectedWrapper,
     mut fail_at: impl FnMut(PublicationCheckpoint) -> bool,
 ) -> Result<(), DatabaseKeyWrapperPublicationFilesystemError> {
+    let fixed = FixedProtectedWrapperPublication {
+        retained_directory: &directories.database_key,
+        typed_directory: paths.database_key_directory.as_path(),
+        staged_path: paths.staged_database_key.as_path(),
+        active_path: paths.active_database_key.as_path(),
+        directory_name: DATABASE_KEY_DIRECTORY_NAME,
+        staged_name: STAGED_DATABASE_KEY_FILENAME,
+        active_name: ACTIVE_DATABASE_KEY_FILENAME,
+        validate_wrapper: validate_database_key_wrapper,
+    };
+    publish_fixed_protected_wrapper(&directories.root, fixed, expected, &mut fail_at)
+        .map_err(DatabaseKeyWrapperPublicationFilesystemError::from)
+}
+
+fn publish_freshness_using(
+    directories: &mut PreparedFirstTimeSetupProtectedArtifactDirectories,
+    paths: &FreshnessAnchorPersistencePaths,
+    expected: &EncodedProtectedWrapper,
+    mut fail_at: impl FnMut(PublicationCheckpoint) -> bool,
+) -> Result<(), FreshnessAuthenticationKeyWrapperPublicationFilesystemError> {
+    let fixed = FixedProtectedWrapperPublication {
+        retained_directory: &directories.freshness_anchor,
+        typed_directory: paths.freshness_anchor_directory.as_path(),
+        staged_path: paths.staged_anchor_authentication_key.as_path(),
+        active_path: paths.active_anchor_authentication_key.as_path(),
+        directory_name: FRESHNESS_ANCHOR_DIRECTORY_NAME,
+        staged_name: STAGED_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+        active_name: ACTIVE_ANCHOR_AUTHENTICATION_KEY_FILENAME,
+        validate_wrapper: validate_freshness_authentication_key_wrapper,
+    };
+    publish_fixed_protected_wrapper(&directories.root, fixed, expected, &mut fail_at)
+        .map_err(FreshnessAuthenticationKeyWrapperPublicationFilesystemError::from)
+}
+
+#[derive(Clone, Copy)]
+struct FixedProtectedWrapperPublication<'a> {
+    retained_directory: &'a RetainedEntry,
+    typed_directory: &'a Path,
+    staged_path: &'a Path,
+    active_path: &'a Path,
+    directory_name: &'static str,
+    staged_name: &'static str,
+    active_name: &'static str,
+    validate_wrapper: fn(&[u8]) -> bool,
+}
+
+fn publish_fixed_protected_wrapper(
+    retained_root: &RetainedEntry,
+    fixed: FixedProtectedWrapperPublication<'_>,
+    expected: &EncodedProtectedWrapper,
+    fail_at: &mut impl FnMut(PublicationCheckpoint) -> bool,
+) -> Result<(), FixedProtectedWrapperPublicationError> {
     // Selection begins when this handle is opened. A byte-identical source
     // replacement completed before this point is therefore accepted; after
     // this point, every check, flush, and rename uses this same live handle.
-    validate_fixed_paths_and_anchor(directories, paths)?;
-    require_destination_absent(paths)?;
+    validate_fixed_paths_and_anchor(retained_root, fixed)?;
+    require_destination_absent(fixed.active_path)?;
     let source = open_native_handle(
-        paths.staged_database_key.as_path(),
+        fixed.staged_path,
         PUBLICATION_SOURCE_ACCESS,
         PUBLICATION_SOURCE_SHARE,
         OPEN_EXISTING,
         PUBLICATION_SOURCE_FLAGS,
     )
-    .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
-    let initial = validate_source(directories, paths, &source, expected)?;
-    flush(&source)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
-    revalidate_before_rename(directories, &source, &initial)?;
+    .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
+    let initial = validate_source(retained_root, fixed, &source, expected)?;
+    flush(&source).map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
+    revalidate_before_rename(retained_root, fixed, &source, &initial)?;
 
     let rename_result = if fail_at(PublicationCheckpoint::Rename) {
         false
     } else {
-        rename_to_active(&source, paths.active_database_key.as_path())
+        rename_to_active(&source, fixed.active_path)
     };
     if !rename_result {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::RenameOutcomeUnconfirmed);
+        return Err(FixedProtectedWrapperPublicationError::RenameOutcomeUnconfirmed);
     }
     if fail_at(PublicationCheckpoint::PostRenameFlush) || flush(&source).is_err() {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::PostRenameFlushFailed);
+        return Err(FixedProtectedWrapperPublicationError::PostRenameFlushFailed);
     }
     if fail_at(PublicationCheckpoint::PostRenameValidation)
-        || validate_after_rename(directories, paths, &source, &initial).is_err()
+        || validate_after_rename(retained_root, fixed, &source, &initial).is_err()
     {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::PostRenameValidationFailed);
+        return Err(FixedProtectedWrapperPublicationError::PostRenameValidationFailed);
     }
     Ok(())
 }
 
 fn validate_fixed_paths_and_anchor(
-    directories: &PreparedFirstTimeSetupProtectedArtifactDirectories,
-    paths: &DatabaseKeyPersistencePaths,
-) -> Result<(), DatabaseKeyWrapperPublicationFilesystemError> {
-    let staged = paths.staged_database_key.as_path();
-    let active = paths.active_database_key.as_path();
-    let directory = paths.database_key_directory.as_path();
-    if staged.file_name() != Some(OsStr::new(STAGED_DATABASE_KEY_FILENAME))
-        || active.file_name() != Some(OsStr::new(ACTIVE_DATABASE_KEY_FILENAME))
-        || staged.parent() != Some(directory)
-        || active.parent() != Some(directory)
+    retained_root: &RetainedEntry,
+    fixed: FixedProtectedWrapperPublication<'_>,
+) -> Result<(), FixedProtectedWrapperPublicationError> {
+    if fixed.staged_path.file_name() != Some(OsStr::new(fixed.staged_name))
+        || fixed.active_path.file_name() != Some(OsStr::new(fixed.active_name))
+        || fixed.staged_path.parent() != Some(fixed.typed_directory)
+        || fixed.active_path.parent() != Some(fixed.typed_directory)
     {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected);
+        return Err(FixedProtectedWrapperPublicationError::PrepublicationRejected);
     }
-    let supplied = open_retained_parent(directory)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
-    let (root, retained) = current_anchor(directories)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
+    let supplied = open_retained_parent(fixed.typed_directory)
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
+    let (root, retained) = current_anchor(retained_root, fixed)
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
     if supplied.initial != retained
-        || root != directories.root.initial
-        || retained != directories.database_key.initial
+        || root != retained_root.initial
+        || retained != fixed.retained_directory.initial
     {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected);
+        return Err(FixedProtectedWrapperPublicationError::PrepublicationRejected);
     }
     Ok(())
 }
 
 fn require_destination_absent(
-    paths: &DatabaseKeyPersistencePaths,
-) -> Result<(), DatabaseKeyWrapperPublicationFilesystemError> {
-    match fs::symlink_metadata(paths.active_database_key.as_path()) {
+    active_path: &Path,
+) -> Result<(), FixedProtectedWrapperPublicationError> {
+    match fs::symlink_metadata(active_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        _ => Err(DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected),
+        _ => Err(FixedProtectedWrapperPublicationError::PrepublicationRejected),
     }
 }
 
 fn validate_source(
-    directories: &PreparedFirstTimeSetupProtectedArtifactDirectories,
-    paths: &DatabaseKeyPersistencePaths,
+    retained_root: &RetainedEntry,
+    fixed: FixedProtectedWrapperPublication<'_>,
     source: &std::os::windows::io::OwnedHandle,
     expected: &EncodedProtectedWrapper,
-) -> Result<RetainedObservation, DatabaseKeyWrapperPublicationFilesystemError> {
+) -> Result<RetainedObservation, FixedProtectedWrapperPublicationError> {
     let observation = query_observation(source)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
     validate_safe_source(&observation)?;
-    let (_, directory) = current_anchor(directories)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
-    exact_named_child(&directory, &observation, STAGED_DATABASE_KEY_FILENAME)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
+    let (_, directory) = current_anchor(retained_root, fixed)
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
+    exact_named_child(&directory, &observation, fixed.staged_name)
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
     let bytes = read_source(source, observation.size)?;
     if bytes != expected.as_bytes()
-        || EncodedProtectedWrapper::validate_database_key_bytes(&bytes).is_err()
-        || paths.staged_database_key.as_path().parent()
-            != Some(paths.database_key_directory.as_path())
+        || !(fixed.validate_wrapper)(&bytes)
+        || fixed.staged_path.parent() != Some(fixed.typed_directory)
     {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected);
+        return Err(FixedProtectedWrapperPublicationError::PrepublicationRejected);
     }
     Ok(observation)
 }
 
 fn validate_safe_source(
     observation: &RetainedObservation,
-) -> Result<(), DatabaseKeyWrapperPublicationFilesystemError> {
+) -> Result<(), FixedProtectedWrapperPublicationError> {
     if !observation.disk_entry
         || observation.directory
         || observation.delete_pending
@@ -188,7 +272,7 @@ fn validate_safe_source(
         || !(MINIMUM_PROTECTED_WRAPPER_LENGTH..=MAXIMUM_PROTECTED_WRAPPER_LENGTH)
             .contains(&observation.size)
     {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected);
+        return Err(FixedProtectedWrapperPublicationError::PrepublicationRejected);
     }
     Ok(())
 }
@@ -196,13 +280,13 @@ fn validate_safe_source(
 fn read_source(
     source: &std::os::windows::io::OwnedHandle,
     size: u64,
-) -> Result<Vec<u8>, DatabaseKeyWrapperPublicationFilesystemError> {
+) -> Result<Vec<u8>, FixedProtectedWrapperPublicationError> {
     let length = usize::try_from(size)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
     let mut bytes = vec![0_u8; length];
     let mut read = 0_u32;
     let requested = u32::try_from(length)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
     // SAFETY: the source handle and writable buffer remain live for this
     // synchronous call; the request exactly matches the allocated buffer.
     if unsafe {
@@ -216,7 +300,7 @@ fn read_source(
     } == 0
         || read != requested
     {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected);
+        return Err(FixedProtectedWrapperPublicationError::PrepublicationRejected);
     }
     Ok(bytes)
 }
@@ -230,18 +314,17 @@ fn flush(source: &std::os::windows::io::OwnedHandle) -> Result<(), ()> {
 }
 
 fn revalidate_before_rename(
-    directories: &PreparedFirstTimeSetupProtectedArtifactDirectories,
+    retained_root: &RetainedEntry,
+    fixed: FixedProtectedWrapperPublication<'_>,
     source: &std::os::windows::io::OwnedHandle,
     initial: &RetainedObservation,
-) -> Result<(), DatabaseKeyWrapperPublicationFilesystemError> {
-    let (_, directory) = current_anchor(directories)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
+) -> Result<(), FixedProtectedWrapperPublicationError> {
+    let (_, directory) = current_anchor(retained_root, fixed)
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
     let current = query_observation(source)
-        .map_err(|_| DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected)?;
-    if current != *initial
-        || exact_named_child(&directory, &current, STAGED_DATABASE_KEY_FILENAME).is_err()
-    {
-        return Err(DatabaseKeyWrapperPublicationFilesystemError::PrepublicationRejected);
+        .map_err(|_| FixedProtectedWrapperPublicationError::PrepublicationRejected)?;
+    if current != *initial || exact_named_child(&directory, &current, fixed.staged_name).is_err() {
+        return Err(FixedProtectedWrapperPublicationError::PrepublicationRejected);
     }
     Ok(())
 }
@@ -309,12 +392,12 @@ impl RenameInformationBuffer {
 }
 
 fn validate_after_rename(
-    directories: &PreparedFirstTimeSetupProtectedArtifactDirectories,
-    paths: &DatabaseKeyPersistencePaths,
+    retained_root: &RetainedEntry,
+    fixed: FixedProtectedWrapperPublication<'_>,
     source: &std::os::windows::io::OwnedHandle,
     initial: &RetainedObservation,
 ) -> Result<(), ()> {
-    let (_, directory) = current_anchor(directories)?;
+    let (_, directory) = current_anchor(retained_root, fixed)?;
     let current = query_observation(source)?;
     validate_safe_source(&current).map_err(|_| ())?;
     if current.identity != initial.identity
@@ -328,13 +411,13 @@ fn validate_after_rename(
     {
         return Err(());
     }
-    exact_named_child(&directory, &current, ACTIVE_DATABASE_KEY_FILENAME)?;
+    exact_named_child(&directory, &current, fixed.active_name)?;
     let mut staged = false;
     let mut active = false;
-    for entry in fs::read_dir(paths.database_key_directory.as_path()).map_err(|_| ())? {
+    for entry in fs::read_dir(fixed.typed_directory).map_err(|_| ())? {
         let name = entry.map_err(|_| ())?.file_name();
-        staged |= name == OsStr::new(STAGED_DATABASE_KEY_FILENAME);
-        active |= name == OsStr::new(ACTIVE_DATABASE_KEY_FILENAME);
+        staged |= name == OsStr::new(fixed.staged_name);
+        active |= name == OsStr::new(fixed.active_name);
     }
     if staged || !active {
         return Err(());
@@ -343,18 +426,53 @@ fn validate_after_rename(
 }
 
 fn current_anchor(
-    directories: &PreparedFirstTimeSetupProtectedArtifactDirectories,
+    retained_root: &RetainedEntry,
+    fixed: FixedProtectedWrapperPublication<'_>,
 ) -> Result<(RetainedObservation, RetainedObservation), ()> {
-    let root = query_observation(&directories.root.handle)
+    let root = query_observation(&retained_root.handle)
         .and_then(|value| validate_parent(&value).map(|()| value))?;
-    let directory = query_observation(&directories.database_key.handle)
+    let directory = query_observation(&fixed.retained_directory.handle)
         .and_then(|value| validate_parent(&value).map(|()| value))?;
-    exact_named_child(&root, &directory, DATABASE_KEY_DIRECTORY_NAME)?;
-    if root != directories.root.initial || directory != directories.database_key.initial {
+    exact_named_child(&root, &directory, fixed.directory_name)?;
+    if root != retained_root.initial || directory != fixed.retained_directory.initial {
         return Err(());
     }
     Ok((root, directory))
 }
+
+fn validate_database_key_wrapper(bytes: &[u8]) -> bool {
+    EncodedProtectedWrapper::validate_database_key_bytes(bytes).is_ok()
+}
+
+fn validate_freshness_authentication_key_wrapper(bytes: &[u8]) -> bool {
+    EncodedProtectedWrapper::validate_anchor_authentication_key_bytes(bytes).is_ok()
+}
+
+macro_rules! map_fixed_publication_error {
+    ($role_error:ty) => {
+        impl From<FixedProtectedWrapperPublicationError> for $role_error {
+            fn from(error: FixedProtectedWrapperPublicationError) -> Self {
+                match error {
+                    FixedProtectedWrapperPublicationError::PrepublicationRejected => {
+                        Self::PrepublicationRejected
+                    }
+                    FixedProtectedWrapperPublicationError::RenameOutcomeUnconfirmed => {
+                        Self::RenameOutcomeUnconfirmed
+                    }
+                    FixedProtectedWrapperPublicationError::PostRenameFlushFailed => {
+                        Self::PostRenameFlushFailed
+                    }
+                    FixedProtectedWrapperPublicationError::PostRenameValidationFailed => {
+                        Self::PostRenameValidationFailed
+                    }
+                }
+            }
+        }
+    };
+}
+
+map_fixed_publication_error!(DatabaseKeyWrapperPublicationFilesystemError);
+map_fixed_publication_error!(FreshnessAuthenticationKeyWrapperPublicationFilesystemError);
 
 #[cfg(test)]
 mod tests {
@@ -377,6 +495,7 @@ mod tests {
     struct Fixture {
         root: PathBuf,
         paths: DatabaseKeyPersistencePaths,
+        freshness_paths: FreshnessAnchorPersistencePaths,
         directories: PreparedFirstTimeSetupProtectedArtifactDirectories,
     }
 
@@ -408,6 +527,7 @@ mod tests {
             Self {
                 root,
                 paths,
+                freshness_paths: freshness,
                 directories,
             }
         }
@@ -431,6 +551,458 @@ mod tests {
             value,
         )
         .unwrap();
+    }
+
+    fn freshness_wrapper(byte: u8) -> EncodedProtectedWrapper {
+        EncodedProtectedWrapper::synthetic_anchor_authentication_key_for_staged_writer_test(vec![
+            byte;
+            32
+        ])
+        .unwrap()
+    }
+
+    fn stage_freshness(fixture: &mut Fixture, value: &EncodedProtectedWrapper) {
+        super::super::write_staged_freshness_authentication_key_wrapper(
+            &mut fixture.directories,
+            &fixture.freshness_paths.staged_anchor_authentication_key,
+            value,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fixed_protected_wrapper_publication_moves_freshness_key_with_exact_role_validation() {
+        let mut fixture = Fixture::new();
+        let expected = freshness_wrapper(0x31);
+        stage_freshness(&mut fixture, &expected);
+        publish_staged_freshness_authentication_key_wrapper(
+            &mut fixture.directories,
+            &fixture.freshness_paths,
+            &expected,
+        )
+        .unwrap();
+        assert!(
+            !fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path()
+                .exists()
+        );
+        assert_eq!(
+            fs::read(
+                fixture
+                    .freshness_paths
+                    .active_anchor_authentication_key
+                    .as_path()
+            )
+            .unwrap(),
+            expected.as_bytes()
+        );
+        assert!(!fixture.paths.active_database_key.as_path().exists());
+    }
+
+    #[test]
+    fn fixed_protected_wrapper_publication_freshness_rejects_missing_existing_wrong_kind_malformed_oversize_and_hard_link()
+     {
+        use FreshnessAuthenticationKeyWrapperPublicationFilesystemError::PrepublicationRejected;
+
+        let expected = freshness_wrapper(0x32);
+        let mut fixture = Fixture::new();
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+        stage_freshness(&mut fixture, &expected);
+        fs::write(
+            fixture
+                .freshness_paths
+                .active_anchor_authentication_key
+                .as_path(),
+            b"sentinel",
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+        assert_eq!(
+            fs::read(
+                fixture
+                    .freshness_paths
+                    .active_anchor_authentication_key
+                    .as_path()
+            )
+            .unwrap(),
+            b"sentinel"
+        );
+        drop(fixture);
+
+        let mut fixture = Fixture::new();
+        let different = freshness_wrapper(0x33);
+        stage_freshness(&mut fixture, &different);
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+        drop(fixture);
+
+        let mut fixture = Fixture::new();
+        let wrong_kind = wrapper(0x34);
+        fs::write(
+            fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path(),
+            wrong_kind.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &wrong_kind,
+            ),
+            Err(PrepublicationRejected)
+        );
+        drop(fixture);
+
+        let mut fixture = Fixture::new();
+        fs::write(
+            fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path(),
+            b"malformed",
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+        drop(fixture);
+
+        let mut fixture = Fixture::new();
+        fs::write(
+            fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path(),
+            vec![0_u8; (MAXIMUM_PROTECTED_WRAPPER_LENGTH + 1) as usize],
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+        drop(fixture);
+
+        let mut fixture = Fixture::new();
+        stage_freshness(&mut fixture, &expected);
+        fs::hard_link(
+            fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path(),
+            fixture.root.join("freshness-alias.synthetic"),
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &expected,
+            ),
+            Err(PrepublicationRejected)
+        );
+    }
+
+    #[test]
+    fn fixed_protected_wrapper_publication_freshness_rejects_retained_directory_mismatch() {
+        let expected = freshness_wrapper(0x34);
+        let mut retained = Fixture::new();
+        let mut different = Fixture::new();
+        stage_freshness(&mut different, &expected);
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut retained.directories,
+                &different.freshness_paths,
+                &expected,
+            ),
+            Err(
+                FreshnessAuthenticationKeyWrapperPublicationFilesystemError::PrepublicationRejected
+            )
+        );
+        assert!(
+            different
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn fixed_protected_wrapper_publication_freshness_phase_failures_leave_locked_residue() {
+        let expected = freshness_wrapper(0x35);
+        let mut fixture = Fixture::new();
+        stage_freshness(&mut fixture, &expected);
+        assert_eq!(
+            publish_freshness_using(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &expected,
+                |point| point == PublicationCheckpoint::Rename,
+            ),
+            Err(FreshnessAuthenticationKeyWrapperPublicationFilesystemError::RenameOutcomeUnconfirmed)
+        );
+        assert!(
+            fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path()
+                .exists()
+        );
+        drop(fixture);
+
+        for (point, error) in [
+            (
+                PublicationCheckpoint::PostRenameFlush,
+                FreshnessAuthenticationKeyWrapperPublicationFilesystemError::PostRenameFlushFailed,
+            ),
+            (
+                PublicationCheckpoint::PostRenameValidation,
+                FreshnessAuthenticationKeyWrapperPublicationFilesystemError::PostRenameValidationFailed,
+            ),
+        ] {
+            let mut fixture = Fixture::new();
+            stage_freshness(&mut fixture, &expected);
+            assert_eq!(
+                publish_freshness_using(
+                    &mut fixture.directories,
+                    &fixture.freshness_paths,
+                    &expected,
+                    |current| current == point,
+                ),
+                Err(error)
+            );
+            assert!(
+                !fixture
+                    .freshness_paths
+                    .staged_anchor_authentication_key
+                    .as_path()
+                    .exists()
+            );
+            assert_eq!(
+                fs::read(
+                    fixture
+                        .freshness_paths
+                        .active_anchor_authentication_key
+                        .as_path()
+                )
+                .unwrap(),
+                expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_protected_wrapper_publication_freshness_rejects_destination_and_source_reparse_entries()
+     {
+        let expected = freshness_wrapper(0x36);
+        let mut fixture = Fixture::new();
+        stage_freshness(&mut fixture, &expected);
+        fs::create_dir(
+            fixture
+                .freshness_paths
+                .active_anchor_authentication_key
+                .as_path(),
+        )
+        .unwrap();
+        assert_eq!(
+            publish_staged_freshness_authentication_key_wrapper(
+                &mut fixture.directories,
+                &fixture.freshness_paths,
+                &expected,
+            ),
+            Err(
+                FreshnessAuthenticationKeyWrapperPublicationFilesystemError::PrepublicationRejected
+            )
+        );
+        assert!(
+            fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path()
+                .exists()
+        );
+        drop(fixture);
+
+        let mut fixture = Fixture::new();
+        stage_freshness(&mut fixture, &expected);
+        let destination_target = fixture.root.join("freshness-destination-reparse.synthetic");
+        fs::write(&destination_target, b"synthetic-destination-target").unwrap();
+        if std::os::windows::fs::symlink_file(
+            &destination_target,
+            fixture
+                .freshness_paths
+                .active_anchor_authentication_key
+                .as_path(),
+        )
+        .is_ok()
+        {
+            assert_eq!(
+                publish_staged_freshness_authentication_key_wrapper(
+                    &mut fixture.directories,
+                    &fixture.freshness_paths,
+                    &expected,
+                ),
+                Err(
+                    FreshnessAuthenticationKeyWrapperPublicationFilesystemError::PrepublicationRejected
+                )
+            );
+            assert!(
+                fixture
+                    .freshness_paths
+                    .staged_anchor_authentication_key
+                    .as_path()
+                    .exists()
+            );
+        }
+        drop(fixture);
+
+        let mut fixture = Fixture::new();
+        stage_freshness(&mut fixture, &expected);
+        let target = fixture.root.join("freshness-source-reparse.synthetic");
+        fs::rename(
+            fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path(),
+            &target,
+        )
+        .unwrap();
+        if std::os::windows::fs::symlink_file(
+            &target,
+            fixture
+                .freshness_paths
+                .staged_anchor_authentication_key
+                .as_path(),
+        )
+        .is_ok()
+        {
+            assert_eq!(
+                publish_staged_freshness_authentication_key_wrapper(
+                    &mut fixture.directories,
+                    &fixture.freshness_paths,
+                    &expected,
+                ),
+                Err(
+                    FreshnessAuthenticationKeyWrapperPublicationFilesystemError::PrepublicationRejected
+                )
+            );
+            assert!(
+                !fixture
+                    .freshness_paths
+                    .active_anchor_authentication_key
+                    .as_path()
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_protected_wrapper_publication_freshness_live_handle_excludes_mutation_delete_and_rename()
+     {
+        let mut fixture = Fixture::new();
+        let expected = freshness_wrapper(0x37);
+        stage_freshness(&mut fixture, &expected);
+        let staged = fixture
+            .freshness_paths
+            .staged_anchor_authentication_key
+            .as_path()
+            .to_owned();
+        let alternate = fixture.root.join("freshness-alternate.synthetic");
+        publish_freshness_using(
+            &mut fixture.directories,
+            &fixture.freshness_paths,
+            &expected,
+            |checkpoint| {
+                if checkpoint == PublicationCheckpoint::Rename {
+                    assert!(fs::OpenOptions::new().write(true).open(&staged).is_err());
+                    assert!(fs::remove_file(&staged).is_err());
+                    assert!(fs::rename(&staged, &alternate).is_err());
+                }
+                false
+            },
+        )
+        .unwrap();
+        assert!(!staged.exists());
+        assert!(!alternate.exists());
+    }
+
+    #[test]
+    fn fixed_protected_wrapper_publication_engine_is_single_private_and_role_fixed() {
+        let source = include_str!("database_key_wrapper_publication.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(
+            source
+                .matches("fn publish_fixed_protected_wrapper(")
+                .count(),
+            1
+        );
+        assert_eq!(source.matches("SetFileInformationByHandle(").count(), 1);
+        for field in [
+            "retained_directory",
+            "typed_directory",
+            "staged_path",
+            "active_path",
+            "directory_name",
+            "staged_name",
+            "active_name",
+            "validate_wrapper",
+        ] {
+            assert!(source.contains(field));
+        }
+        assert!(source.contains("EncodedProtectedWrapper::validate_database_key_bytes(bytes)"));
+        assert!(
+            source.contains(
+                "EncodedProtectedWrapper::validate_anchor_authentication_key_bytes(bytes)"
+            )
+        );
+        assert!(source.contains("retained_directory: &directories.database_key"));
+        assert!(source.contains("retained_directory: &directories.freshness_anchor"));
+        for forbidden in [
+            "pub(crate) fn publish_fixed_protected_wrapper",
+            "MoveFileExW",
+            "ReplaceFileW",
+            "MOVEFILE_COPY_ALLOWED",
+            "load_active_freshness_anchor_wrapper_pair",
+            "recover_and_validate_loaded_freshness_anchor_pair",
+        ] {
+            assert!(!source.contains(forbidden));
+        }
     }
 
     #[test]
