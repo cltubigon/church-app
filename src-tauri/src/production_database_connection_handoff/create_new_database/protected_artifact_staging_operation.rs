@@ -36,8 +36,15 @@ use super::{
     SetupDatabaseIdentityProof, verify_first_time_setup_staged_context,
 };
 
+#[path = "identity_bound_active_setup_database_open.rs"]
+mod identity_bound_active_setup_database_open;
 #[path = "prepared_final_active_setup_trust_material.rs"]
 mod prepared_final_active_setup_trust_material;
+
+pub(crate) use identity_bound_active_setup_database_open::{
+    FirstTimeSetupActiveDatabaseOpenError, IdentityBoundActiveSetupDatabase,
+    open_identity_bound_active_setup_database,
+};
 
 pub(crate) use prepared_final_active_setup_trust_material::{
     FirstTimeSetupActiveTrustMaterialPreparationError, PreparedFinalActiveSetupTrustMaterial,
