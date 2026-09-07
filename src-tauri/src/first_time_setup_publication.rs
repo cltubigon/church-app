@@ -500,6 +500,18 @@ pub(crate) mod protected_artifact_staging {
         ))
     }
 
+    pub(crate) fn advance_final_active_artifacts_verified<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(machine.advance(
+            FirstTimeSetupPublicationEvent::FinalActiveArtifactsVerified(
+                FinalActiveArtifactsVerified { _private: () },
+            ),
+        ))
+    }
+
     fn in_progress(
         advance: Result<FirstTimeSetupPublicationAdvance, FirstTimeSetupPublicationTransitionError>,
     ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
@@ -529,9 +541,9 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap();
-        assert_eq!(source.matches("pub(crate) fn ").count(), 12);
-        assert_eq!(source.matches("_private: ()").count(), 12);
-        assert_eq!(source.matches("machine.advance(").count(), 11);
+        assert_eq!(source.matches("pub(crate) fn ").count(), 13);
+        assert_eq!(source.matches("_private: ()").count(), 13);
+        assert_eq!(source.matches("machine.advance(").count(), 12);
         assert_eq!(
             source
                 .matches("FirstTimeSetupPublicationStateMachine::begin(")
@@ -539,8 +551,8 @@ mod tests {
             1
         );
         for forbidden in [
-            "FinalActiveArtifactsVerified",
             "CanonicalInstallation",
+            "ReadyForSetupCompletion",
             "synthetic()",
             "pub(crate) fn in_progress",
             "panic!",
@@ -550,6 +562,54 @@ mod tests {
             assert!(
                 !source.contains(forbidden),
                 "forbidden bridge authority: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn final_active_artifacts_verified_bridge_has_exact_bound_surface() {
+        type BoundAuthority = <FirstTimeSetupPublicationStateMachine as protected_artifact_staging::AuthorityBinding>::Authority;
+        let _bridge: fn(
+            &BoundAuthority,
+            FirstTimeSetupPublicationStateMachine,
+        ) -> Result<
+            FirstTimeSetupPublicationStateMachine,
+            FirstTimeSetupPublicationTransitionError,
+        > = protected_artifact_staging::advance_final_active_artifacts_verified::<
+            FirstTimeSetupPublicationStateMachine,
+        >;
+
+        let source = include_str!("first_time_setup_publication.rs")
+            .split_once(
+                "pub(crate) fn advance_final_active_artifacts_verified<M: AuthorityBinding>(",
+            )
+            .unwrap()
+            .1
+            .split_once("\n    fn in_progress(")
+            .unwrap()
+            .0;
+
+        assert!(source.contains("_authority: &M::Authority"));
+        assert_eq!(source.matches("machine.advance(").count(), 1);
+        assert_eq!(
+            source
+                .matches("FirstTimeSetupPublicationEvent::FinalActiveArtifactsVerified(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            source
+                .matches("FinalActiveArtifactsVerified { _private: () }")
+                .count(),
+            1
+        );
+        for forbidden in [
+            "CanonicalInstallationObservationAccepted",
+            "ReadyForSetupCompletion",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "forbidden later authority: {forbidden}"
             );
         }
     }
@@ -672,6 +732,42 @@ mod tests {
             };
         }
         machine
+    }
+
+    #[test]
+    fn authenticated_evidence_published_advances_exactly_to_final_active_artifacts_verified() {
+        let predecessor = machine_after(11);
+        assert_eq!(
+            predecessor.confirmed_boundary(),
+            FirstTimeSetupPublicationBoundary::AuthenticatedEvidencePublished
+        );
+
+        let outcome = predecessor
+            .advance(event(SuccessEventKind::FinalActiveArtifactsVerified))
+            .unwrap();
+        let FirstTimeSetupPublicationAdvance::InProgress(machine) = outcome else {
+            panic!("final active verification must remain in progress")
+        };
+        assert_eq!(
+            machine.confirmed_boundary(),
+            FirstTimeSetupPublicationBoundary::FinalActiveArtifactsVerified
+        );
+    }
+
+    #[test]
+    fn final_active_artifacts_verified_rejects_every_wrong_predecessor() {
+        for completed in 0..11 {
+            assert!(matches!(
+                machine_after(completed)
+                    .advance(event(SuccessEventKind::FinalActiveArtifactsVerified)),
+                Err(FirstTimeSetupPublicationTransitionError::OutOfOrder)
+            ));
+        }
+
+        assert!(matches!(
+            machine_after(12).advance(event(SuccessEventKind::FinalActiveArtifactsVerified)),
+            Err(FirstTimeSetupPublicationTransitionError::OutOfOrder)
+        ));
     }
 
     #[test]
