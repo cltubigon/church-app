@@ -42,6 +42,7 @@ mod live_metadata_and_header_validation;
 
 #[allow(unused_imports)]
 pub(crate) use create_new_database::{
+    ActiveSetupDatabaseValidationError, ActiveSetupPreparedMetadataMismatchCloseFailure,
     ClosedIntegrityValidatedInitializedNewProductionDatabase,
     CompletedFirstTimeSetupStagedVerificationContext,
     CurrentCanonicalDatabaseIdentityComparisonError,
@@ -64,8 +65,9 @@ pub(crate) use create_new_database::{
     NewProductionDatabaseIntegrityValidationCloseRetryOutcome,
     NewProductionDatabaseIntegrityValidationError, NewlyCreatedKeyedProductionDatabaseConnection,
     PreparedFirstTimeSetupProtectedArtifactDirectories, PreparedFirstTimeSetupPublicationMaterials,
-    PreparedFirstTimeSetupPublicationMaterialsError, SetupDatabaseIdentityProof,
-    SetupProductionDatabaseOpenError, ValidatedInitializedNewProductionDatabaseConnection,
+    PreparedFirstTimeSetupPublicationMaterialsError, PreparedMetadataValidatedActiveSetupDatabase,
+    SetupDatabaseIdentityProof, SetupProductionDatabaseOpenError,
+    ValidatedInitializedNewProductionDatabaseConnection,
     close_and_preserve_integrity_validated_initialized_new_production_database,
     compare_current_canonical_database_identity, create_new_keyed_production_database,
     initialize_new_production_database,
@@ -73,7 +75,7 @@ pub(crate) use create_new_database::{
     prepare_first_time_setup_protected_artifact_directories,
     prepare_first_time_setup_publication_materials,
     prepare_first_time_setup_staged_verification_context,
-    validate_initialized_new_production_database,
+    validate_identity_bound_active_setup_database, validate_initialized_new_production_database,
     validate_initialized_new_production_database_integrity, verify_first_time_setup_staged_context,
 };
 

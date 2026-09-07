@@ -42,8 +42,10 @@ mod identity_bound_active_setup_database_open;
 mod prepared_final_active_setup_trust_material;
 
 pub(crate) use identity_bound_active_setup_database_open::{
+    ActiveSetupDatabaseValidationError, ActiveSetupPreparedMetadataMismatchCloseFailure,
     FirstTimeSetupActiveDatabaseOpenError, IdentityBoundActiveSetupDatabase,
-    open_identity_bound_active_setup_database,
+    PreparedMetadataValidatedActiveSetupDatabase, open_identity_bound_active_setup_database,
+    validate_identity_bound_active_setup_database,
 };
 
 pub(crate) use prepared_final_active_setup_trust_material::{

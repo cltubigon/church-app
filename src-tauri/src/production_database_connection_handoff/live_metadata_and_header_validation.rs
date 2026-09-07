@@ -149,6 +149,15 @@ impl LiveMetadataAndHeaderValidationCloseFailure {
 }
 
 impl LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
+    /// Narrow comparison support for setup compositions that must preserve this
+    /// exact live owner after checking the prepared contract.
+    pub(super) fn matches_prepared_metadata(
+        &self,
+        prepared_metadata: &DatabaseMetadataContractV1,
+    ) -> bool {
+        self.metadata_contract == *prepared_metadata
+    }
+
     /// Discards the validated metadata contract, then explicitly closes the
     /// unchanged connection/guard/inspection lifetime unit.
     pub(crate) fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
@@ -164,7 +173,7 @@ impl LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
     }
 
     #[cfg(test)]
-    fn close_using(
+    pub(super) fn close_using(
         self,
         close: impl FnOnce(Connection) -> Result<(), Connection>,
     ) -> ProductionDatabaseConnectionCloseOutcome {
@@ -201,7 +210,7 @@ pub(crate) fn validate_production_database_live_metadata_and_headers(
     )
 }
 
-fn finish_validation_using(
+pub(super) fn finish_validation_using(
     connection: ReadabilityAndIntegrityValidatedProductionDatabaseConnection,
     validate: impl FnOnce(
         &Connection,

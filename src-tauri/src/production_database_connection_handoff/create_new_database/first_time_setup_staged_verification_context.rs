@@ -13,6 +13,7 @@ mod protected_artifact_staging_operation;
 
 #[allow(unused_imports)]
 pub(crate) use protected_artifact_staging_operation::{
+    ActiveSetupDatabaseValidationError, ActiveSetupPreparedMetadataMismatchCloseFailure,
     AllProtectedArtifactsStagedFirstTimeSetupOperation,
     AuthenticatedEvidencePublishedFirstTimeSetupOperation,
     AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
@@ -28,7 +29,7 @@ pub(crate) use protected_artifact_staging_operation::{
     FirstTimeSetupProtectedArtifactStagingOperation,
     FreshnessAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
     IdentityBoundActiveSetupDatabase, PreparedFinalActiveSetupTrustMaterial,
-    PreparedFirstTimeSetupActivePublicationOperation,
+    PreparedFirstTimeSetupActivePublicationOperation, PreparedMetadataValidatedActiveSetupDatabase,
     StagedVerificationCompletedFirstTimeSetupOperation, open_identity_bound_active_setup_database,
     prepare_final_active_setup_trust_material, prepare_first_time_setup_active_publication,
     prepare_first_time_setup_protected_artifact_staging_operation,
@@ -37,7 +38,8 @@ pub(crate) use protected_artifact_staging_operation::{
     publish_first_time_setup_database_key_wrapper,
     publish_first_time_setup_evidence_authentication_key_wrapper,
     publish_first_time_setup_freshness_authentication_key_wrapper,
-    stage_first_time_setup_protected_artifacts, verify_all_staged_first_time_setup_operation,
+    stage_first_time_setup_protected_artifacts, validate_identity_bound_active_setup_database,
+    verify_all_staged_first_time_setup_operation,
 };
 
 use crate::{

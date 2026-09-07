@@ -29,6 +29,14 @@ use super::{
     PreparedFinalActiveSetupTrustMaterial, ProtectedArtifactStagingAuthority,
 };
 
+#[path = "identity_bound_active_setup_database_open/prepared_metadata_validation.rs"]
+mod prepared_metadata_validation;
+
+pub(crate) use prepared_metadata_validation::{
+    ActiveSetupDatabaseValidationError, ActiveSetupPreparedMetadataMismatchCloseFailure,
+    PreparedMetadataValidatedActiveSetupDatabase, validate_identity_bound_active_setup_database,
+};
+
 /// One keyed-but-unvalidated canonical database lifetime plus the remaining
 /// prepared setup trust and provenance branches.
 #[must_use = "the setup database and retained trust material must remain owned"]
