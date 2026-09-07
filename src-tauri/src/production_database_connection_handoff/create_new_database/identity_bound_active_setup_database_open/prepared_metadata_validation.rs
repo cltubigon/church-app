@@ -30,6 +30,15 @@ use crate::{
 
 use super::{IdentityBoundActiveSetupDatabase, ProtectedArtifactStagingAuthority};
 
+#[path = "prepared_metadata_validation/correspondence_and_freshness_validation.rs"]
+mod correspondence_and_freshness_validation;
+
+pub(crate) use correspondence_and_freshness_validation::{
+    ActiveSetupCorrespondenceAndFreshnessValidationError,
+    CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
+    validate_active_setup_database_correspondence_and_freshness,
+};
+
 /// The same validated live database plus every setup branch needed by the next
 /// correspondence and freshness slice.
 #[must_use = "the validated setup database and retained trust branches must remain owned"]

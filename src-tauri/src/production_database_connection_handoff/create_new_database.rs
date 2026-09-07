@@ -74,11 +74,13 @@ pub(crate) use current_canonical_database_identity::{
 
 #[allow(unused_imports)]
 pub(crate) use first_time_setup_staged_verification_context::{
-    ActiveSetupDatabaseValidationError, ActiveSetupPreparedMetadataMismatchCloseFailure,
+    ActiveSetupCorrespondenceAndFreshnessValidationError, ActiveSetupDatabaseValidationError,
+    ActiveSetupPreparedMetadataMismatchCloseFailure,
     AllProtectedArtifactsStagedFirstTimeSetupOperation,
     AuthenticatedEvidencePublishedFirstTimeSetupOperation,
     AuthenticatedFreshnessAnchorPublishedFirstTimeSetupOperation,
     CompletedFirstTimeSetupStagedVerificationContext,
+    CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
     DatabaseKeyWrapperPublishedFirstTimeSetupOperation,
     EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,
     FirstTimeSetupActiveDatabaseOpenError, FirstTimeSetupActiveTrustMaterialPreparationError,
@@ -102,8 +104,10 @@ pub(crate) use first_time_setup_staged_verification_context::{
     publish_first_time_setup_database_key_wrapper,
     publish_first_time_setup_evidence_authentication_key_wrapper,
     publish_first_time_setup_freshness_authentication_key_wrapper,
-    stage_first_time_setup_protected_artifacts, validate_identity_bound_active_setup_database,
-    verify_all_staged_first_time_setup_operation, verify_first_time_setup_staged_context,
+    stage_first_time_setup_protected_artifacts,
+    validate_active_setup_database_correspondence_and_freshness,
+    validate_identity_bound_active_setup_database, verify_all_staged_first_time_setup_operation,
+    verify_first_time_setup_staged_context,
 };
 
 pub(crate) use identity_bound_staged_key_open::{

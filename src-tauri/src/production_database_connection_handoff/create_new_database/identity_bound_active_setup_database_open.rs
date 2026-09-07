@@ -33,8 +33,12 @@ use super::{
 mod prepared_metadata_validation;
 
 pub(crate) use prepared_metadata_validation::{
-    ActiveSetupDatabaseValidationError, ActiveSetupPreparedMetadataMismatchCloseFailure,
-    PreparedMetadataValidatedActiveSetupDatabase, validate_identity_bound_active_setup_database,
+    ActiveSetupCorrespondenceAndFreshnessValidationError, ActiveSetupDatabaseValidationError,
+    ActiveSetupPreparedMetadataMismatchCloseFailure,
+    CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
+    PreparedMetadataValidatedActiveSetupDatabase,
+    validate_active_setup_database_correspondence_and_freshness,
+    validate_identity_bound_active_setup_database,
 };
 
 /// One keyed-but-unvalidated canonical database lifetime plus the remaining

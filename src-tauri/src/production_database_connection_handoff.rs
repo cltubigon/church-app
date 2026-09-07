@@ -42,9 +42,11 @@ mod live_metadata_and_header_validation;
 
 #[allow(unused_imports)]
 pub(crate) use create_new_database::{
-    ActiveSetupDatabaseValidationError, ActiveSetupPreparedMetadataMismatchCloseFailure,
+    ActiveSetupCorrespondenceAndFreshnessValidationError, ActiveSetupDatabaseValidationError,
+    ActiveSetupPreparedMetadataMismatchCloseFailure,
     ClosedIntegrityValidatedInitializedNewProductionDatabase,
     CompletedFirstTimeSetupStagedVerificationContext,
+    CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
     CurrentCanonicalDatabaseIdentityComparisonError,
     CurrentCanonicalDatabaseIdentityMatchesSetupProof,
     FirstTimeSetupProtectedArtifactDirectoryPreparationError,
@@ -75,6 +77,7 @@ pub(crate) use create_new_database::{
     prepare_first_time_setup_protected_artifact_directories,
     prepare_first_time_setup_publication_materials,
     prepare_first_time_setup_staged_verification_context,
+    validate_active_setup_database_correspondence_and_freshness,
     validate_identity_bound_active_setup_database, validate_initialized_new_production_database,
     validate_initialized_new_production_database_integrity, verify_first_time_setup_staged_context,
 };
