@@ -36,6 +36,14 @@ use super::{
     SetupDatabaseIdentityProof, verify_first_time_setup_staged_context,
 };
 
+#[path = "prepared_final_active_setup_trust_material.rs"]
+mod prepared_final_active_setup_trust_material;
+
+pub(crate) use prepared_final_active_setup_trust_material::{
+    FirstTimeSetupActiveTrustMaterialPreparationError, PreparedFinalActiveSetupTrustMaterial,
+    prepare_final_active_setup_trust_material,
+};
+
 /// Payload-free authority, constructible only in this sealed module. The
 /// associated-type binding exposes no constructor and grants no access to it.
 pub(crate) struct ProtectedArtifactStagingAuthority {

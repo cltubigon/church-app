@@ -1834,6 +1834,49 @@ fn first_time_setup_authenticated_evidence_publication_is_last_and_preserves_own
 }
 
 #[test]
+fn final_active_setup_trust_material_is_reloaded_without_mutating_or_opening_database() {
+    let mut fixture = VerificationFixture::new_unstaged();
+    let predecessor = evidence_key_predecessor(&mut fixture);
+    let expected_metadata = predecessor.database_metadata;
+    let expected_identity = predecessor.database_identity_proof.created_leaf_identity;
+    let expected_evidence_paths = predecessor.installation_evidence_paths.clone();
+    let expected_key_paths = predecessor.database_key_paths.clone();
+    let expected_freshness_paths = predecessor.freshness_anchor_paths.clone();
+    let published = publish_first_time_setup_authenticated_evidence_wrapper(predecessor).unwrap();
+    let before = fixture.snapshot();
+
+    let prepared = prepare_final_active_setup_trust_material(published).unwrap();
+
+    assert_eq!(
+        format!("{prepared:?}"),
+        "PreparedFinalActiveSetupTrustMaterial([REDACTED])"
+    );
+    assert_eq!(prepared.database_metadata, expected_metadata);
+    assert!(prepared.database_identity_proof.created_leaf_identity == expected_identity);
+    assert_eq!(
+        prepared.installation_evidence_paths,
+        expected_evidence_paths
+    );
+    assert_eq!(prepared.database_key_paths, expected_key_paths);
+    assert_eq!(prepared.freshness_anchor_paths, expected_freshness_paths);
+    assert!(matches!(
+        prepared.normalized_freshness_observation,
+        crate::database_freshness_classification::NormalizedFreshnessAnchorObservation::Present(_)
+    ));
+    assert_eq!(
+        format!("{:?}", prepared.trusted_evidence_assessment),
+        "TrustedCurrentInstallationEvidenceAssessment([REDACTED])"
+    );
+    assert_eq!(
+        format!("{:?}", prepared.generation_bound_database_key),
+        "GenerationBoundDatabaseKey([REDACTED])"
+    );
+    assert_boundary(&prepared.machine, "AuthenticatedEvidencePublished");
+    assert_eq!(size_of_val(&prepared.authority), 0);
+    assert_eq!(fixture.snapshot(), before);
+}
+
+#[test]
 fn first_time_setup_authenticated_evidence_publication_maps_each_filesystem_phase() {
     use AuthenticatedEvidenceWrapperPublicationFilesystemError as Filesystem;
     for (filesystem, operation_error) in [
