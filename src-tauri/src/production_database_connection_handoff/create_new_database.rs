@@ -61,11 +61,18 @@ use super::{
     sqlite_main_database_handle,
 };
 
+mod application_root;
 mod current_canonical_database_identity;
 mod first_time_setup_staged_verification_context;
 mod identity_bound_staged_key_open;
 mod prepared_first_time_setup_publication_materials;
 mod protected_artifact_directories;
+
+#[allow(unused_imports)]
+pub(crate) use application_root::{
+    FirstTimeSetupApplicationRootPreparationError, PreparedFirstTimeSetupApplicationRoot,
+    prepare_first_time_setup_application_root,
+};
 
 pub(crate) use current_canonical_database_identity::{
     CurrentCanonicalDatabaseIdentityComparisonError,
