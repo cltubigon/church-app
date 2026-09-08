@@ -33,6 +33,15 @@ use crate::{
 
 use super::{PreparedMetadataValidatedActiveSetupDatabase, ProtectedArtifactStagingAuthority};
 
+#[path = "correspondence_and_freshness_validation/final_active_artifacts_verification.rs"]
+mod final_active_artifacts_verification;
+
+pub(crate) use final_active_artifacts_verification::{
+    FinalActiveArtifactsVerifiedFirstTimeSetupOperation,
+    FirstTimeSetupFinalActiveArtifactsVerificationStateError,
+    advance_final_active_artifacts_verified_for_first_time_setup,
+};
+
 /// The same live canonical database after correspondence and freshness have
 /// both passed, plus the provenance required by the next setup-only boundary.
 #[must_use = "the validated setup database and retained provenance must remain owned"]

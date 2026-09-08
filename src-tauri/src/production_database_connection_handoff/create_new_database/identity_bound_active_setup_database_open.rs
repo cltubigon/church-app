@@ -36,7 +36,10 @@ pub(crate) use prepared_metadata_validation::{
     ActiveSetupCorrespondenceAndFreshnessValidationError, ActiveSetupDatabaseValidationError,
     ActiveSetupPreparedMetadataMismatchCloseFailure,
     CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
+    FinalActiveArtifactsVerifiedFirstTimeSetupOperation,
+    FirstTimeSetupFinalActiveArtifactsVerificationStateError,
     PreparedMetadataValidatedActiveSetupDatabase,
+    advance_final_active_artifacts_verified_for_first_time_setup,
     validate_active_setup_database_correspondence_and_freshness,
     validate_identity_bound_active_setup_database,
 };

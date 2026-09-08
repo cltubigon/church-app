@@ -44,8 +44,11 @@ mod prepared_final_active_setup_trust_material;
 pub(crate) use identity_bound_active_setup_database_open::{
     ActiveSetupCorrespondenceAndFreshnessValidationError, ActiveSetupDatabaseValidationError,
     ActiveSetupPreparedMetadataMismatchCloseFailure,
-    CorrespondenceAndFreshnessValidatedActiveSetupDatabase, FirstTimeSetupActiveDatabaseOpenError,
-    IdentityBoundActiveSetupDatabase, PreparedMetadataValidatedActiveSetupDatabase,
+    CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
+    FinalActiveArtifactsVerifiedFirstTimeSetupOperation, FirstTimeSetupActiveDatabaseOpenError,
+    FirstTimeSetupFinalActiveArtifactsVerificationStateError, IdentityBoundActiveSetupDatabase,
+    PreparedMetadataValidatedActiveSetupDatabase,
+    advance_final_active_artifacts_verified_for_first_time_setup,
     open_identity_bound_active_setup_database,
     validate_active_setup_database_correspondence_and_freshness,
     validate_identity_bound_active_setup_database,
