@@ -46,6 +46,7 @@ milestone_proof!(
     AuthenticatedEvidencePublished,
     FinalActiveArtifactsVerified,
     CanonicalInstallationObservationAccepted,
+    SetupCompletionReadinessAccepted,
 );
 
 #[derive(Debug)]
@@ -63,6 +64,7 @@ pub(crate) enum FirstTimeSetupPublicationEvent {
     AuthenticatedEvidencePublished(AuthenticatedEvidencePublished),
     FinalActiveArtifactsVerified(FinalActiveArtifactsVerified),
     CanonicalInstallationObservationAccepted(CanonicalInstallationObservationAccepted),
+    SetupCompletionReadinessAccepted(SetupCompletionReadinessAccepted),
     StagingFailed,
     StagedReloadVerificationFailed,
     ActivePublicationFailed,
@@ -124,6 +126,7 @@ pub(crate) enum FirstTimeSetupPublicationBoundary {
     EvidenceAuthenticationKeyWrapperPublished,
     AuthenticatedEvidencePublished,
     FinalActiveArtifactsVerified,
+    CanonicalInstallationObservationAccepted,
 }
 
 /// Authority only to approach a future, separately implemented setup-completion
@@ -159,6 +162,7 @@ enum FirstTimeSetupPublicationState {
     EvidenceAuthenticationKeyWrapperPublished,
     AuthenticatedEvidencePublished,
     FinalActiveArtifactsVerified,
+    CanonicalInstallationObservationAccepted,
 }
 
 impl FirstTimeSetupPublicationStateMachine {
@@ -229,6 +233,10 @@ impl FirstTimeSetupPublicationStateMachine {
             (
                 State::FinalActiveArtifactsVerified,
                 Event::CanonicalInstallationObservationAccepted(_),
+            ) => Self::in_progress(State::CanonicalInstallationObservationAccepted),
+            (
+                State::CanonicalInstallationObservationAccepted,
+                Event::SetupCompletionReadinessAccepted(_),
             ) => Ok(FirstTimeSetupPublicationAdvance::Ready(
                 ReadyForSetupCompletion { _private: () },
             )),
@@ -312,6 +320,9 @@ impl FirstTimeSetupPublicationStateMachine {
             }
             State::AuthenticatedEvidencePublished => Boundary::AuthenticatedEvidencePublished,
             State::FinalActiveArtifactsVerified => Boundary::FinalActiveArtifactsVerified,
+            State::CanonicalInstallationObservationAccepted => {
+                Boundary::CanonicalInstallationObservationAccepted
+            }
         }
     }
 
@@ -512,6 +523,35 @@ pub(crate) mod protected_artifact_staging {
         ))
     }
 
+    pub(crate) fn advance_canonical_installation_observation_accepted<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
+    {
+        in_progress(machine.advance(
+            FirstTimeSetupPublicationEvent::CanonicalInstallationObservationAccepted(
+                CanonicalInstallationObservationAccepted { _private: () },
+            ),
+        ))
+    }
+
+    pub(crate) fn advance_ready_for_setup_completion<M: AuthorityBinding>(
+        _authority: &M::Authority,
+        machine: FirstTimeSetupPublicationStateMachine,
+    ) -> Result<ReadyForSetupCompletion, FirstTimeSetupPublicationTransitionError> {
+        match machine.advance(
+            FirstTimeSetupPublicationEvent::SetupCompletionReadinessAccepted(
+                SetupCompletionReadinessAccepted { _private: () },
+            ),
+        )? {
+            FirstTimeSetupPublicationAdvance::Ready(ready) => Ok(ready),
+            FirstTimeSetupPublicationAdvance::InProgress(_)
+            | FirstTimeSetupPublicationAdvance::Interrupted(_) => {
+                Err(FirstTimeSetupPublicationTransitionError::OutOfOrder)
+            }
+        }
+    }
+
     fn in_progress(
         advance: Result<FirstTimeSetupPublicationAdvance, FirstTimeSetupPublicationTransitionError>,
     ) -> Result<FirstTimeSetupPublicationStateMachine, FirstTimeSetupPublicationTransitionError>
@@ -533,7 +573,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protected_artifact_staging_operation_bridge_never_releases_milestones() {
+    fn protected_artifact_staging_operation_bridge_keeps_milestone_construction_private() {
         let source = include_str!("first_time_setup_publication.rs")
             .split_once("pub(crate) mod protected_artifact_staging {")
             .unwrap()
@@ -541,9 +581,9 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap();
-        assert_eq!(source.matches("pub(crate) fn ").count(), 13);
-        assert_eq!(source.matches("_private: ()").count(), 13);
-        assert_eq!(source.matches("machine.advance(").count(), 12);
+        assert_eq!(source.matches("pub(crate) fn ").count(), 15);
+        assert_eq!(source.matches("_private: ()").count(), 15);
+        assert_eq!(source.matches("machine.advance(").count(), 14);
         assert_eq!(
             source
                 .matches("FirstTimeSetupPublicationStateMachine::begin(")
@@ -551,8 +591,6 @@ mod tests {
             1
         );
         for forbidden in [
-            "CanonicalInstallation",
-            "ReadyForSetupCompletion",
             "synthetic()",
             "pub(crate) fn in_progress",
             "panic!",
@@ -585,7 +623,7 @@ mod tests {
             )
             .unwrap()
             .1
-            .split_once("\n    fn in_progress(")
+            .split_once("\n    pub(crate) fn advance_canonical_installation_observation_accepted")
             .unwrap()
             .0;
 
@@ -614,6 +652,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn canonical_observation_and_ready_bridges_have_exact_bound_surfaces() {
+        type BoundAuthority = <FirstTimeSetupPublicationStateMachine as protected_artifact_staging::AuthorityBinding>::Authority;
+        let _canonical_bridge: fn(
+            &BoundAuthority,
+            FirstTimeSetupPublicationStateMachine,
+        ) -> Result<
+            FirstTimeSetupPublicationStateMachine,
+            FirstTimeSetupPublicationTransitionError,
+        > = protected_artifact_staging::advance_canonical_installation_observation_accepted::<
+            FirstTimeSetupPublicationStateMachine,
+        >;
+        let _ready_bridge: fn(
+            &BoundAuthority,
+            FirstTimeSetupPublicationStateMachine,
+        ) -> Result<
+            ReadyForSetupCompletion,
+            FirstTimeSetupPublicationTransitionError,
+        > = protected_artifact_staging::advance_ready_for_setup_completion::<
+            FirstTimeSetupPublicationStateMachine,
+        >;
+
+        let source = include_str!("first_time_setup_publication.rs")
+            .split_once(
+                "pub(crate) fn advance_canonical_installation_observation_accepted<M: AuthorityBinding>(",
+            )
+            .unwrap()
+            .1
+            .split_once("\n    fn in_progress(")
+            .unwrap()
+            .0;
+
+        assert_eq!(source.matches("_authority: &M::Authority").count(), 2);
+        assert_eq!(source.matches("machine.advance(").count(), 2);
+        assert_eq!(
+            source
+                .matches("CanonicalInstallationObservationAccepted { _private: () }")
+                .count(),
+            1
+        );
+        assert_eq!(
+            source
+                .matches("SetupCompletionReadinessAccepted { _private: () }")
+                .count(),
+            1
+        );
+        assert_eq!(source.matches("Result<ReadyForSetupCompletion,").count(), 1);
+        assert!(!source.contains("synthetic()"));
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum SuccessEventKind {
         ProtectedDatabaseKeyWrapperStaged,
@@ -629,9 +717,10 @@ mod tests {
         AuthenticatedEvidencePublished,
         FinalActiveArtifactsVerified,
         CanonicalInstallationObservationAccepted,
+        SetupCompletionReadinessAccepted,
     }
 
-    const HAPPY_PATH: [SuccessEventKind; 13] = [
+    const HAPPY_PATH: [SuccessEventKind; 14] = [
         SuccessEventKind::ProtectedDatabaseKeyWrapperStaged,
         SuccessEventKind::FreshnessAuthenticationKeyWrapperStaged,
         SuccessEventKind::AuthenticatedFreshnessAnchorStaged,
@@ -645,6 +734,7 @@ mod tests {
         SuccessEventKind::AuthenticatedEvidencePublished,
         SuccessEventKind::FinalActiveArtifactsVerified,
         SuccessEventKind::CanonicalInstallationObservationAccepted,
+        SuccessEventKind::SetupCompletionReadinessAccepted,
     ];
 
     fn event(kind: SuccessEventKind) -> FirstTimeSetupPublicationEvent {
@@ -714,6 +804,11 @@ mod tests {
                     CanonicalInstallationObservationAccepted::synthetic(),
                 )
             }
+            SuccessEventKind::SetupCompletionReadinessAccepted => {
+                FirstTimeSetupPublicationEvent::SetupCompletionReadinessAccepted(
+                    SetupCompletionReadinessAccepted::synthetic(),
+                )
+            }
         }
     }
 
@@ -768,6 +863,51 @@ mod tests {
             machine_after(12).advance(event(SuccessEventKind::FinalActiveArtifactsVerified)),
             Err(FirstTimeSetupPublicationTransitionError::OutOfOrder)
         ));
+        assert!(matches!(
+            machine_after(13).advance(event(SuccessEventKind::FinalActiveArtifactsVerified)),
+            Err(FirstTimeSetupPublicationTransitionError::OutOfOrder)
+        ));
+    }
+
+    #[test]
+    fn canonical_observation_is_retained_before_ready_authority() {
+        let predecessor = machine_after(12);
+        assert_eq!(
+            predecessor.confirmed_boundary(),
+            FirstTimeSetupPublicationBoundary::FinalActiveArtifactsVerified
+        );
+
+        let outcome = predecessor
+            .advance(event(
+                SuccessEventKind::CanonicalInstallationObservationAccepted,
+            ))
+            .unwrap();
+        let FirstTimeSetupPublicationAdvance::InProgress(machine) = outcome else {
+            panic!("canonical observation must retain an in-progress machine")
+        };
+        assert_eq!(
+            machine.confirmed_boundary(),
+            FirstTimeSetupPublicationBoundary::CanonicalInstallationObservationAccepted
+        );
+
+        let ready = machine
+            .advance(event(SuccessEventKind::SetupCompletionReadinessAccepted))
+            .unwrap();
+        let FirstTimeSetupPublicationAdvance::Ready(ready) = ready else {
+            panic!("readiness acceptance must be the separate terminal transition")
+        };
+        assert_eq!(format!("{ready:?}"), "ReadyForSetupCompletion");
+    }
+
+    #[test]
+    fn readiness_acceptance_rejects_every_earlier_boundary() {
+        for completed in 0..13 {
+            assert!(matches!(
+                machine_after(completed)
+                    .advance(event(SuccessEventKind::SetupCompletionReadinessAccepted)),
+                Err(FirstTimeSetupPublicationTransitionError::OutOfOrder)
+            ));
+        }
     }
 
     #[test]
@@ -787,6 +927,7 @@ mod tests {
             FirstTimeSetupPublicationBoundary::EvidenceAuthenticationKeyWrapperPublished,
             FirstTimeSetupPublicationBoundary::AuthenticatedEvidencePublished,
             FirstTimeSetupPublicationBoundary::FinalActiveArtifactsVerified,
+            FirstTimeSetupPublicationBoundary::CanonicalInstallationObservationAccepted,
         ];
 
         for (index, kind) in HAPPY_PATH.into_iter().enumerate() {
@@ -899,6 +1040,19 @@ mod tests {
             assert_eq!(interrupted.category(), expected_category);
             assert_eq!(interrupted.last_confirmed_boundary(), expected_boundary);
         }
+
+        for completed_failure in [
+            FirstTimeSetupPublicationEvent::StagingFailed,
+            FirstTimeSetupPublicationEvent::StagedReloadVerificationFailed,
+            FirstTimeSetupPublicationEvent::ActivePublicationFailed,
+            FirstTimeSetupPublicationEvent::FinalActiveVerificationFailed,
+            FirstTimeSetupPublicationEvent::FinalCanonicalObservationFailed,
+        ] {
+            assert!(matches!(
+                machine_after(13).advance(completed_failure),
+                Err(FirstTimeSetupPublicationTransitionError::OutOfOrder)
+            ));
+        }
     }
 
     #[test]
@@ -974,6 +1128,7 @@ mod tests {
         assert_eq!(size_of::<AllStagedArtifactsReloadVerified>(), 0);
         assert_eq!(size_of::<FinalActiveArtifactsVerified>(), 0);
         assert_eq!(size_of::<CanonicalInstallationObservationAccepted>(), 0);
+        assert_eq!(size_of::<SetupCompletionReadinessAccepted>(), 0);
         assert_eq!(size_of::<FirstTimeSetupPublicationStateMachine>(), 1);
     }
 
