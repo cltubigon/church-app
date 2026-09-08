@@ -25,6 +25,15 @@ use super::{
     CorrespondenceAndFreshnessValidatedActiveSetupDatabase, ProtectedArtifactStagingAuthority,
 };
 
+#[path = "final_active_artifacts_verification/canonical_installation_observation.rs"]
+mod canonical_installation_observation;
+
+pub(crate) use canonical_installation_observation::{
+    CanonicalInstallationObservationAcceptedFirstTimeSetupOperation,
+    FirstTimeSetupCanonicalInstallationObservationError,
+    accept_canonical_installation_observation_for_first_time_setup,
+};
+
 /// The setup provenance retained after the validated active database has
 /// explicitly closed and before final-active publication state advances.
 #[must_use = "the closed setup operation and retained provenance must remain owned"]

@@ -35,11 +35,14 @@ mod correspondence_and_freshness_validation;
 
 pub(crate) use correspondence_and_freshness_validation::{
     ActiveSetupCorrespondenceAndFreshnessValidationError,
+    CanonicalInstallationObservationAcceptedFirstTimeSetupOperation,
     CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
     CorrespondenceAndFreshnessValidatedClosedFirstTimeSetupOperation,
     FinalActiveArtifactsVerifiedFirstTimeSetupOperation, FinalActiveSetupDatabaseCloseFailure,
     FinalActiveSetupDatabaseCloseOutcome, FinalActiveSetupDatabaseCloseRetryOutcome,
+    FirstTimeSetupCanonicalInstallationObservationError,
     FirstTimeSetupFinalActiveArtifactsVerificationStateError,
+    accept_canonical_installation_observation_for_first_time_setup,
     advance_final_active_artifacts_verified_for_first_time_setup,
     close_and_preserve_correspondence_and_freshness_validated_active_setup_database,
     validate_active_setup_database_correspondence_and_freshness,

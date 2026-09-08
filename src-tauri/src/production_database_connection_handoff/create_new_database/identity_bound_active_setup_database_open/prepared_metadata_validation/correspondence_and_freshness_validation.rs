@@ -37,10 +37,13 @@ use super::{PreparedMetadataValidatedActiveSetupDatabase, ProtectedArtifactStagi
 mod final_active_artifacts_verification;
 
 pub(crate) use final_active_artifacts_verification::{
+    CanonicalInstallationObservationAcceptedFirstTimeSetupOperation,
     CorrespondenceAndFreshnessValidatedClosedFirstTimeSetupOperation,
     FinalActiveArtifactsVerifiedFirstTimeSetupOperation, FinalActiveSetupDatabaseCloseFailure,
     FinalActiveSetupDatabaseCloseOutcome, FinalActiveSetupDatabaseCloseRetryOutcome,
+    FirstTimeSetupCanonicalInstallationObservationError,
     FirstTimeSetupFinalActiveArtifactsVerificationStateError,
+    accept_canonical_installation_observation_for_first_time_setup,
     advance_final_active_artifacts_verified_for_first_time_setup,
     close_and_preserve_correspondence_and_freshness_validated_active_setup_database,
 };
