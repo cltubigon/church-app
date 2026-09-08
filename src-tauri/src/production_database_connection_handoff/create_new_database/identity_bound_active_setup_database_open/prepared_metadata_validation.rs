@@ -42,8 +42,10 @@ pub(crate) use correspondence_and_freshness_validation::{
     FinalActiveSetupDatabaseCloseOutcome, FinalActiveSetupDatabaseCloseRetryOutcome,
     FirstTimeSetupCanonicalInstallationObservationError,
     FirstTimeSetupFinalActiveArtifactsVerificationStateError,
+    FirstTimeSetupReadyForCompletionError, ReadyForSetupCompletionFirstTimeSetupOperation,
     accept_canonical_installation_observation_for_first_time_setup,
     advance_final_active_artifacts_verified_for_first_time_setup,
+    advance_ready_for_setup_completion_for_first_time_setup,
     close_and_preserve_correspondence_and_freshness_validated_active_setup_database,
     validate_active_setup_database_correspondence_and_freshness,
 };

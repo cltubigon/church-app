@@ -21,6 +21,14 @@ use super::{
     FinalActiveArtifactsVerifiedFirstTimeSetupOperation, ProtectedArtifactStagingAuthority,
 };
 
+#[path = "canonical_installation_observation/ready_for_setup_completion.rs"]
+mod ready_for_setup_completion;
+
+pub(crate) use ready_for_setup_completion::{
+    FirstTimeSetupReadyForCompletionError, ReadyForSetupCompletionFirstTimeSetupOperation,
+    advance_ready_for_setup_completion_for_first_time_setup,
+};
+
 /// Non-live setup provenance retained after the one canonical installation
 /// observation was accepted by the protected publication bridge.
 #[must_use = "the accepted setup operation and retained provenance must remain owned"]
