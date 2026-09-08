@@ -36,7 +36,7 @@ mod correspondence_and_freshness_validation;
 pub(crate) use correspondence_and_freshness_validation::{
     ActiveSetupCorrespondenceAndFreshnessValidationError,
     CanonicalInstallationObservationAcceptedFirstTimeSetupOperation,
-    CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
+    CompletedFirstTimeSetupOperation, CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
     CorrespondenceAndFreshnessValidatedClosedFirstTimeSetupOperation,
     FinalActiveArtifactsVerifiedFirstTimeSetupOperation, FinalActiveSetupDatabaseCloseFailure,
     FinalActiveSetupDatabaseCloseOutcome, FinalActiveSetupDatabaseCloseRetryOutcome,
@@ -47,7 +47,7 @@ pub(crate) use correspondence_and_freshness_validation::{
     advance_final_active_artifacts_verified_for_first_time_setup,
     advance_ready_for_setup_completion_for_first_time_setup,
     close_and_preserve_correspondence_and_freshness_validated_active_setup_database,
-    validate_active_setup_database_correspondence_and_freshness,
+    complete_first_time_setup, validate_active_setup_database_correspondence_and_freshness,
 };
 
 /// The same validated live database plus every setup branch needed by the next

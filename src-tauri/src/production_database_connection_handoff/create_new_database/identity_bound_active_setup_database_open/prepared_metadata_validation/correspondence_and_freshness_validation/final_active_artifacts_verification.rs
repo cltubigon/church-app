@@ -30,10 +30,10 @@ mod canonical_installation_observation;
 
 pub(crate) use canonical_installation_observation::{
     CanonicalInstallationObservationAcceptedFirstTimeSetupOperation,
-    FirstTimeSetupCanonicalInstallationObservationError, FirstTimeSetupReadyForCompletionError,
-    ReadyForSetupCompletionFirstTimeSetupOperation,
+    CompletedFirstTimeSetupOperation, FirstTimeSetupCanonicalInstallationObservationError,
+    FirstTimeSetupReadyForCompletionError, ReadyForSetupCompletionFirstTimeSetupOperation,
     accept_canonical_installation_observation_for_first_time_setup,
-    advance_ready_for_setup_completion_for_first_time_setup,
+    advance_ready_for_setup_completion_for_first_time_setup, complete_first_time_setup,
 };
 
 /// The setup provenance retained after the validated active database has

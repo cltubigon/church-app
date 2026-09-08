@@ -36,7 +36,7 @@ pub(crate) use prepared_metadata_validation::{
     ActiveSetupCorrespondenceAndFreshnessValidationError, ActiveSetupDatabaseValidationError,
     ActiveSetupPreparedMetadataMismatchCloseFailure,
     CanonicalInstallationObservationAcceptedFirstTimeSetupOperation,
-    CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
+    CompletedFirstTimeSetupOperation, CorrespondenceAndFreshnessValidatedActiveSetupDatabase,
     CorrespondenceAndFreshnessValidatedClosedFirstTimeSetupOperation,
     FinalActiveArtifactsVerifiedFirstTimeSetupOperation, FinalActiveSetupDatabaseCloseFailure,
     FinalActiveSetupDatabaseCloseOutcome, FinalActiveSetupDatabaseCloseRetryOutcome,
@@ -48,7 +48,7 @@ pub(crate) use prepared_metadata_validation::{
     advance_final_active_artifacts_verified_for_first_time_setup,
     advance_ready_for_setup_completion_for_first_time_setup,
     close_and_preserve_correspondence_and_freshness_validated_active_setup_database,
-    validate_active_setup_database_correspondence_and_freshness,
+    complete_first_time_setup, validate_active_setup_database_correspondence_and_freshness,
     validate_identity_bound_active_setup_database,
 };
 

@@ -25,8 +25,9 @@ use super::{
 mod ready_for_setup_completion;
 
 pub(crate) use ready_for_setup_completion::{
-    FirstTimeSetupReadyForCompletionError, ReadyForSetupCompletionFirstTimeSetupOperation,
-    advance_ready_for_setup_completion_for_first_time_setup,
+    CompletedFirstTimeSetupOperation, FirstTimeSetupReadyForCompletionError,
+    ReadyForSetupCompletionFirstTimeSetupOperation,
+    advance_ready_for_setup_completion_for_first_time_setup, complete_first_time_setup,
 };
 
 /// Non-live setup provenance retained after the one canonical installation

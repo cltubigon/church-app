@@ -68,7 +68,7 @@ fn prepare_accepted(
 }
 
 #[test]
-fn real_setup_lineage_reaches_ready_owner_and_preserves_exact_provenance() {
+fn real_setup_lineage_reaches_ready_owner_and_completes_without_runtime_change() {
     let mut fixture = VerificationFixture::new_unstaged();
     let accepted = prepare_accepted(&mut fixture);
     let expected_metadata = accepted.prepared_database_metadata;
@@ -94,6 +94,16 @@ fn real_setup_lineage_reaches_ready_owner_and_preserves_exact_provenance() {
     assert_eq!(format!("{:?}", ready.readiness), "ReadyForSetupCompletion");
     assert_eq!(size_of_val(&ready.readiness), 0);
     assert_eq!(size_of_val(&ready.authority), 0);
+    fixture.assert_write_access(true);
+    assert_eq!(fixture.snapshot(), before);
+
+    let completed = complete_first_time_setup(ready);
+
+    assert_eq!(size_of_val(&completed), 0);
+    assert_eq!(
+        format!("{completed:?}"),
+        "CompletedFirstTimeSetupOperation([REDACTED])"
+    );
     fixture.assert_write_access(true);
     assert_eq!(fixture.snapshot(), before);
 }
@@ -140,6 +150,16 @@ fn ready_owner_and_error_are_sealed_coarse_and_exact() {
         ReadyForSetupCompletionFirstTimeSetupOperation,
         serde::Deserialize<'static>
     );
+    assert_not_impl!(CompletedFirstTimeSetupOperation, Clone);
+    assert_not_impl!(CompletedFirstTimeSetupOperation, Copy);
+    assert_not_impl!(CompletedFirstTimeSetupOperation, Default);
+    assert_not_impl!(CompletedFirstTimeSetupOperation, std::ops::Deref);
+    assert_not_impl!(CompletedFirstTimeSetupOperation, serde::Serialize);
+    assert_not_impl!(
+        CompletedFirstTimeSetupOperation,
+        serde::Deserialize<'static>
+    );
+    assert_eq!(size_of::<CompletedFirstTimeSetupOperation>(), 0);
     assert_eq!(size_of::<ProtectedArtifactStagingAuthority>(), 0);
     assert_eq!(
         format!("{:?}", FirstTimeSetupReadyForCompletionError::InternalState),
@@ -196,6 +216,33 @@ fn ready_owner_and_error_are_sealed_coarse_and_exact() {
         1
     );
     assert!(error.contains("InternalState"));
+
+    let completed_owner = production
+        .split_once("pub(crate) struct CompletedFirstTimeSetupOperation {")
+        .unwrap()
+        .1
+        .split_once("\n}")
+        .unwrap()
+        .0;
+    assert_eq!(completed_owner.trim(), "_private: (),");
+    for forbidden in [
+        "DatabaseMetadataContractV1",
+        "InstallationEvidencePersistencePaths",
+        "DatabaseKeyPersistencePaths",
+        "FreshnessAnchorPersistencePaths",
+        "ReadyForSetupCompletion",
+        "ProtectedArtifactStagingAuthority",
+        "FirstTimeSetupPublicationStateMachine",
+        "InstallationEvidence",
+        "Connection",
+        "StartupAuthorizedProductionDatabaseConnection",
+        "OperationalProductionDatabase",
+    ] {
+        assert!(
+            !completed_owner.contains(forbidden),
+            "unexpected completed-owner capability: {forbidden}"
+        );
+    }
 }
 
 #[test]
@@ -264,4 +311,76 @@ fn existing_publication_ready_bridge_remains_the_only_readiness_mechanism() {
     assert!(PUBLICATION_SOURCE.contains(
         "State::CanonicalInstallationObservationAccepted,\n                Event::SetupCompletionReadinessAccepted(_)"
     ));
+}
+
+#[test]
+fn completion_is_an_infallible_consuming_retirement_boundary_only() {
+    const SOURCE: &str = include_str!("ready_for_setup_completion.rs");
+    let production = SOURCE
+        .split("#[cfg(test)]\n#[path = \"ready_for_setup_completion_tests.rs\"]")
+        .next()
+        .unwrap();
+    let completion = production
+        .split_once("pub(crate) fn complete_first_time_setup(")
+        .unwrap()
+        .1;
+    assert!(completion.starts_with(
+        "\n    operation: ReadyForSetupCompletionFirstTimeSetupOperation,\n) -> CompletedFirstTimeSetupOperation"
+    ));
+    assert_eq!(
+        completion
+            .matches("let ReadyForSetupCompletionFirstTimeSetupOperation {")
+            .count(),
+        1
+    );
+    for field in [
+        "prepared_database_metadata: _prepared_database_metadata",
+        "installation_evidence_paths: _installation_evidence_paths",
+        "database_key_paths: _database_key_paths",
+        "freshness_anchor_paths: _freshness_anchor_paths",
+        "readiness: _readiness",
+        "authority: _authority",
+    ] {
+        assert_eq!(completion.matches(field).count(), 1, "{field}");
+    }
+    assert_eq!(
+        completion
+            .matches("CompletedFirstTimeSetupOperation { _private: () }")
+            .count(),
+        1
+    );
+    for forbidden in [
+        "Result<",
+        "FirstTimeSetupReadyForCompletionError",
+        "InternalState",
+        "observe_production_installation_evidence",
+        "std::fs",
+        "fs::",
+        "rusqlite",
+        "Connection",
+        "open_",
+        "read_",
+        "write_",
+        "rename",
+        "remove_",
+        "query",
+        "inspect_",
+        "validate_",
+        "load_",
+        "close",
+        "retry",
+        "repair",
+        "rollback",
+        "authorize_production_database_startup",
+        "activate_production_database_for_operational_use",
+        "StartupAuthorizedProductionDatabaseConnection",
+        "OperationalProductionDatabase",
+        "application_lifecycle",
+        "StartupStatus",
+    ] {
+        assert!(
+            !completion.contains(forbidden),
+            "unexpected completion capability: {forbidden}"
+        );
+    }
 }

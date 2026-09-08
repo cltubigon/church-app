@@ -37,6 +37,17 @@ impl fmt::Debug for ReadyForSetupCompletionFirstTimeSetupOperation {
     }
 }
 
+/// Sealed payload-free proof that the genuine ready setup owner was consumed.
+pub(crate) struct CompletedFirstTimeSetupOperation {
+    _private: (),
+}
+
+impl fmt::Debug for CompletedFirstTimeSetupOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CompletedFirstTimeSetupOperation([REDACTED])")
+    }
+}
+
 /// Coarse setup-local failure for an impossible retained-machine ordering
 /// error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +87,22 @@ pub(crate) fn advance_ready_for_setup_completion_for_first_time_setup(
         readiness,
         authority,
     })
+}
+
+/// Consumes and retires all ready setup provenance without runtime work.
+pub(crate) fn complete_first_time_setup(
+    operation: ReadyForSetupCompletionFirstTimeSetupOperation,
+) -> CompletedFirstTimeSetupOperation {
+    let ReadyForSetupCompletionFirstTimeSetupOperation {
+        prepared_database_metadata: _prepared_database_metadata,
+        installation_evidence_paths: _installation_evidence_paths,
+        database_key_paths: _database_key_paths,
+        freshness_anchor_paths: _freshness_anchor_paths,
+        readiness: _readiness,
+        authority: _authority,
+    } = operation;
+
+    CompletedFirstTimeSetupOperation { _private: () }
 }
 
 #[cfg(test)]
