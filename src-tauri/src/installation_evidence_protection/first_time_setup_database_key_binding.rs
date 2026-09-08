@@ -114,6 +114,13 @@ pub(crate) struct ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {
 }
 
 impl ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {
+    pub(crate) fn lineage(&self) -> (InstallationIdentifier, DatabaseKeyGenerationIdentifier) {
+        (
+            self.installation_identifier,
+            self.database_key_generation_identifier,
+        )
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -200,10 +207,7 @@ impl ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial {
     pub(crate) fn lineage_for_test(
         &self,
     ) -> (InstallationIdentifier, DatabaseKeyGenerationIdentifier) {
-        (
-            self.installation_identifier,
-            self.database_key_generation_identifier,
-        )
+        self.lineage()
     }
 
     pub(crate) fn protected_wrapper_for_test(&self) -> &EncodedProtectedWrapper {
@@ -715,6 +719,39 @@ mod tests {
         assert!(production.contains(
             "formatter.write_str(\"ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial([REDACTED])\")"
         ));
+
+        let lineage_signature = "pub(crate) fn lineage(&self) -> (InstallationIdentifier, DatabaseKeyGenerationIdentifier)";
+        assert_eq!(production.matches(lineage_signature).count(), 1);
+        let lineage = surface
+            .split_once(lineage_signature)
+            .unwrap()
+            .1
+            .split_once("    pub(crate) fn into_parts(")
+            .unwrap()
+            .0;
+        assert_eq!(lineage.matches("self.installation_identifier").count(), 1);
+        assert_eq!(
+            lineage
+                .matches("self.database_key_generation_identifier")
+                .count(),
+            1
+        );
+        for forbidden in [
+            ".clone()",
+            "from_bytes",
+            "write_bytes_into",
+            "protect",
+            "unprotect",
+            "GenerationBoundDatabaseKey",
+            "EncodedProtectedWrapper",
+            "FirstTimeSetupAuthorization",
+            "OperationalProductionDatabase",
+        ] {
+            assert!(
+                !lineage.contains(forbidden),
+                "lineage accessor unexpectedly exposes or constructs authority: {forbidden}"
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -759,10 +796,18 @@ mod tests {
         let authorization = authorization();
         let protected = protect_first_time_setup_database_key_binding(binding(&authorization))
             .expect("CurrentUser DPAPI protection should succeed");
+        let expected_lineage = (
+            protected.installation_identifier,
+            protected.database_key_generation_identifier,
+        );
         let expected_wrapper = protected.protected_database_key_wrapper.as_bytes().to_vec();
         let (creation_key, publication_material) =
             protected.into_database_creation_key_and_publication_material();
         creation_key.expose_key(|key| key.expose_bytes(|bytes| assert_eq!(bytes.len(), 32)));
+        fn require_typed_lineage(_: InstallationIdentifier, _: DatabaseKeyGenerationIdentifier) {}
+        let lineage = publication_material.lineage();
+        require_typed_lineage(lineage.0, lineage.1);
+        assert_eq!(lineage, expected_lineage);
         assert_eq!(
             publication_material.protected_wrapper_for_test().as_bytes(),
             expected_wrapper
@@ -771,6 +816,13 @@ mod tests {
             format!("{publication_material:?}"),
             "ProtectedFirstTimeSetupDatabaseKeyPublicationMaterial([REDACTED])"
         );
+        let (installation_identifier, database_key_generation_identifier, protected_wrapper) =
+            publication_material.into_parts();
+        assert_eq!(
+            (installation_identifier, database_key_generation_identifier),
+            expected_lineage
+        );
+        assert_eq!(protected_wrapper.as_bytes(), expected_wrapper);
     }
 
     #[test]
