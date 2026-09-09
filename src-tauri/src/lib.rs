@@ -13,6 +13,9 @@ mod database_key_protected_payload;
 mod database_metadata_contract;
 mod database_metadata_correspondence;
 mod database_metadata_decoding;
+#[allow(dead_code)]
+#[cfg(windows)]
+mod first_time_setup_exclusivity;
 mod first_time_setup_publication;
 mod freshness_anchor_active_wrapper_loader;
 mod freshness_anchor_authenticated_envelope;
