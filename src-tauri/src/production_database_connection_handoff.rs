@@ -643,12 +643,7 @@ fn close_lifetime_owner_using(
     // Thread-local injection exercises the actual ownership-preserving callers
     // in common-context tests without changing production close behavior.
     #[cfg(test)]
-    if tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| {
-        state.get().is_some_and(|attempts| {
-            state.set(Some(attempts + 1));
-            true
-        })
-    }) {
+    if test_close_failure_is_injected() {
         return ProductionDatabaseConnectionCloseOutcome::Failed(
             ProductionDatabaseConnectionCloseFailure { owner },
         );
@@ -674,6 +669,40 @@ fn close_lifetime_owner_using(
             },
         ),
     }
+}
+
+#[cfg(test)]
+fn test_close_failure_is_injected() -> bool {
+    tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| {
+        state.get().is_some_and(|attempts| {
+            state.set(Some(attempts + 1));
+            true
+        })
+    })
+}
+
+#[cfg(test)]
+struct TestCloseFailureInjectionReset(Option<usize>);
+
+#[cfg(test)]
+impl Drop for TestCloseFailureInjectionReset {
+    fn drop(&mut self) {
+        tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| state.set(self.0));
+    }
+}
+
+/// Runs one test-only operation with deterministic close failure enabled on
+/// the current thread. The operation receives no database capability, and the
+/// prior injection state is restored even if the operation unwinds.
+#[cfg(test)]
+pub(crate) fn with_production_database_close_failure_injected<T>(
+    operation: impl FnOnce() -> T,
+) -> T {
+    let previous = tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| state.replace(Some(0)));
+    let reset = TestCloseFailureInjectionReset(previous);
+    let outcome = operation();
+    drop(reset);
+    outcome
 }
 
 fn encode_guard_path(path: &OsStr) -> Result<Vec<u16>, ProductionDatabaseConnectionOpenError> {
@@ -1796,6 +1825,50 @@ mod tests {
             "ProductionDatabaseConnectionCloseFailure([REDACTED])"
         );
         let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
+        assert!(OpenOptions::new().write(true).open(&database).is_err());
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(OpenOptions::new().write(true).open(&database).is_ok());
+    }
+
+    #[test]
+    fn crate_private_close_failure_injection_is_test_only_and_capability_free() {
+        let source = include_str!("production_database_connection_handoff.rs");
+        let signature = "#[cfg(test)]\npub(crate) fn with_production_database_close_failure_injected<T>(\n    operation: impl FnOnce() -> T,\n) -> T";
+        assert!(source.contains(signature));
+        assert!(!signature.contains("Connection"));
+        assert!(!signature.contains("Path"));
+        assert!(!signature.contains("Key"));
+        assert!(!signature.contains("Metadata"));
+        assert!(!signature.contains("Handle"));
+
+        let root = TestRoot::create();
+        root.create_empty_database();
+        let key_calls = Cell::new(0);
+        let owner = finish_with_successful_test_key(&root, &key_calls).unwrap();
+        let ProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            with_production_database_close_failure_injected(|| owner.close())
+        else {
+            panic!("crate-private injection must return the exact retained close failure");
+        };
+        assert_eq!(
+            format!("{failure:?}"),
+            "ProductionDatabaseConnectionCloseFailure([REDACTED])"
+        );
+        let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
+        assert!(OpenOptions::new().write(true).open(&database).is_err());
+
+        let ProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            with_production_database_close_failure_injected(|| failure.retry_close())
+        else {
+            panic!("repeated injected close failure must retain the exact owner");
+        };
+        assert_eq!(
+            format!("{failure:?}"),
+            "ProductionDatabaseConnectionCloseFailure([REDACTED])"
+        );
         assert!(OpenOptions::new().write(true).open(&database).is_err());
         assert!(matches!(
             failure.retry_close(),

@@ -2131,6 +2131,12 @@ fn close_new_lifetime_owner_using(
     owner: NewlyCreatedConnectionLifetimeOwner,
     close: impl FnOnce(Connection) -> Result<(), Connection>,
 ) -> NewProductionDatabaseConnectionCloseOutcome {
+    #[cfg(test)]
+    if super::test_close_failure_is_injected() {
+        return NewProductionDatabaseConnectionCloseOutcome::Failed(
+            NewProductionDatabaseConnectionCloseFailure { owner },
+        );
+    }
     let NewlyCreatedConnectionLifetimeOwner {
         connection,
         retained,
@@ -2182,6 +2188,16 @@ fn finish_close_and_preserve_using(
     release_leaf: impl FnOnce(RetainedEntry),
     release_parent: impl FnOnce(RetainedEntry),
 ) -> NewProductionDatabaseCloseAndPreserveOutcome {
+    #[cfg(test)]
+    if super::test_close_failure_is_injected() {
+        return NewProductionDatabaseCloseAndPreserveOutcome::Failed(
+            NewProductionDatabaseCloseAndPreserveFailure {
+                owner,
+                observed_metadata_contract,
+                identity_proof,
+            },
+        );
+    }
     let NewlyCreatedConnectionLifetimeOwner {
         connection,
         retained,
@@ -2901,6 +2917,49 @@ mod tests {
         assert!(matches!(
             failure.retry_close(),
             NewProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(database.is_file());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn crate_private_injection_covers_close_and_preserve_without_exposing_connection() {
+        let root = TestRoot::create();
+        let integrity_validated = validate_initialized_new_production_database_integrity(
+            validated_initialized_fixture(&root),
+        )
+        .expect("fixed setup integrity validation should succeed");
+
+        let outcome = super::super::with_production_database_close_failure_injected(|| {
+            close_and_preserve_integrity_validated_initialized_new_production_database(
+                integrity_validated,
+            )
+        });
+        assert_eq!(format!("{outcome:?}"), "Failed([REDACTED])");
+        let NewProductionDatabaseCloseAndPreserveOutcome::Failed(failure) = outcome else {
+            panic!("injected close-and-preserve failure must retain ownership");
+        };
+        assert_eq!(
+            format!("{failure:?}"),
+            "NewProductionDatabaseCloseAndPreserveFailure([REDACTED])"
+        );
+        let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
+        assert!(fs::remove_file(&database).is_err());
+
+        let NewProductionDatabaseCloseAndPreserveRetryOutcome::Failed(failure) =
+            super::super::with_production_database_close_failure_injected(|| failure.retry_close())
+        else {
+            panic!("repeated injected failure must retain close-and-preserve ownership");
+        };
+        assert_eq!(
+            format!("{failure:?}"),
+            "NewProductionDatabaseCloseAndPreserveFailure([REDACTED])"
+        );
+        assert!(fs::remove_file(&database).is_err());
+
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseCloseAndPreserveRetryOutcome::Closed(_)
         ));
         assert!(database.is_file());
         root.assert_exact_cleanup();
