@@ -155,7 +155,13 @@ fn compare_prepared_metadata(
     PreparedMetadataValidatedProductionDatabaseForSetup,
     SetupProductionDatabaseRevalidationError,
 > {
-    if database.metadata_contract == *prepared_metadata {
+    let matches = database.metadata_contract == *prepared_metadata;
+    #[cfg(test)]
+    let matches = matches
+        && !super::super::test_primary_failure_is_injected(
+            super::super::ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison,
+        );
+    if matches {
         Ok(PreparedMetadataValidatedProductionDatabaseForSetup { database })
     } else {
         #[cfg(test)]
@@ -253,6 +259,33 @@ fn preserve_revalidation_close_result(
                 SetupProductionDatabaseRevalidationCloseFailure { failure },
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod primary_failure_selector_tests {
+    use super::*;
+    use crate::production_database_connection_handoff::{
+        ProductionDatabasePrimaryFailureBoundary, ProductionDatabasePrimaryFailureInjection,
+        with_production_database_primary_failure_injected,
+    };
+
+    #[test]
+    fn selected_staged_prepared_comparison_maps_to_existing_mismatch_category() {
+        with_production_database_primary_failure_injected(
+            ProductionDatabasePrimaryFailureInjection::PreparedMetadataComparison { occurrence: 0 },
+            || {
+                let matches = true
+                    && !super::super::super::test_primary_failure_is_injected(
+                        ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison,
+                    );
+                assert!(!matches);
+                assert!(matches!(
+                    mismatch_close_result(ProductionDatabaseConnectionCloseOutcome::Closed),
+                    SetupProductionDatabaseRevalidationError::PreparedMetadataMismatch
+                ));
+            },
+        );
     }
 }
 

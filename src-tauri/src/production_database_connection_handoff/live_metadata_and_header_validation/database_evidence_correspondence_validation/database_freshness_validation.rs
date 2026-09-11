@@ -128,6 +128,14 @@ pub(crate) fn validate_production_database_freshness(
         trusted_assessment.evidence(),
         &anchor_observation,
     );
+    #[cfg(test)]
+    let classification = if super::super::super::test_primary_failure_is_injected(
+        super::super::super::ProductionDatabasePrimaryFailureBoundary::Freshness,
+    ) {
+        DatabaseFreshnessClassification::AnchorMissing
+    } else {
+        classification
+    };
 
     match classification {
         DatabaseFreshnessClassification::Fresh => {
@@ -1088,5 +1096,34 @@ mod tests {
                 "forbidden production capability: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn selected_freshness_boundary_uses_anchor_missing_and_ordinal_close_owner() {
+        let (root, owner) = correspondence_owner(7, 11);
+        let outcome = super::super::super::super::with_production_database_primary_failure_injected(
+            super::super::super::super::ProductionDatabasePrimaryFailureInjection::Freshness,
+            || {
+                super::super::super::super::with_production_database_close_failure_injected_at(
+                    0,
+                    || {
+                        validate_production_database_freshness(
+                            owner,
+                            present(MATCHING_IDENTITY, 7, 11),
+                        )
+                    },
+                )
+            },
+        );
+        let ProductionDatabaseFreshnessValidationOutcome::CloseFailed(failure) = outcome else {
+            panic!("selected freshness and close failures must retain the owner");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseFreshnessValidationCloseRetryOutcome::Closed(
+                DatabaseFreshnessClassification::AnchorMissing
+            )
+        ));
+        root.assert_exact_cleanup();
     }
 }

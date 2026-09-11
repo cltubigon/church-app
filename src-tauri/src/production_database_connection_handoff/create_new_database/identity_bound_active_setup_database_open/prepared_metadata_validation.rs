@@ -7,6 +7,11 @@
 
 use std::fmt;
 
+#[cfg(test)]
+use crate::production_database_connection_handoff::{
+    ProductionDatabasePrimaryFailureBoundary, test_primary_failure_is_injected,
+};
+
 use crate::{
     database_freshness_classification::NormalizedFreshnessAnchorObservation,
     database_metadata_contract::DatabaseMetadataContractV1,
@@ -150,7 +155,13 @@ pub(crate) fn validate_identity_bound_active_setup_database(
         integrity,
     ))?;
 
-    if !live.matches_prepared_metadata(&prepared_database_metadata) {
+    let matches = live.matches_prepared_metadata(&prepared_database_metadata);
+    #[cfg(test)]
+    let matches = matches
+        && !test_primary_failure_is_injected(
+            ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison,
+        );
+    if !matches {
         let _ = (
             prepared_database_metadata,
             installation_evidence_paths,
@@ -228,6 +239,36 @@ fn mismatch_close_result(
                 ActiveSetupPreparedMetadataMismatchCloseFailure { failure },
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod primary_failure_selector_tests {
+    use super::*;
+    use crate::production_database_connection_handoff::{
+        ProductionDatabasePrimaryFailureBoundary, ProductionDatabasePrimaryFailureInjection,
+        test_primary_failure_is_injected, with_production_database_primary_failure_injected,
+    };
+
+    #[test]
+    fn selected_active_prepared_comparison_maps_to_existing_mismatch_category() {
+        with_production_database_primary_failure_injected(
+            ProductionDatabasePrimaryFailureInjection::PreparedMetadataComparison { occurrence: 1 },
+            || {
+                assert!(!test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison,
+                ));
+                let matches = true
+                    && !test_primary_failure_is_injected(
+                        ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison,
+                    );
+                assert!(!matches);
+                assert!(matches!(
+                    mismatch_close_result(ProductionDatabaseConnectionCloseOutcome::Closed),
+                    ActiveSetupDatabaseValidationError::PreparedMetadataMismatch
+                ));
+            },
+        );
     }
 }
 

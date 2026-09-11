@@ -1023,6 +1023,16 @@ fn initialize_new_production_database_using(
     };
 
     let mut owner = connection.owner;
+    #[cfg(test)]
+    if super::test_primary_failure_is_injected(
+        super::ProductionDatabasePrimaryFailureBoundary::NewDatabaseInitialization,
+    ) {
+        return finish_initialization_failure(
+            owner,
+            NewProductionDatabaseInitializationFailure::InitializationPolicyFailed,
+            close_on_failure,
+        );
+    }
     if checkpoint(InitializationCheckpoint::Policy).is_err()
         || establish_and_verify_initialization_policy(&owner.connection).is_err()
     {
@@ -1061,6 +1071,18 @@ fn validate_initialized_new_production_database_using(
         expected_metadata_contract,
     } = connection;
 
+    #[cfg(test)]
+    if super::test_primary_failure_is_injected(
+        super::ProductionDatabasePrimaryFailureBoundary::NewDatabaseImmediateValidation,
+    ) {
+        return finish_immediate_validation_failure_after_discard_using(
+            owner,
+            expected_metadata_contract,
+            NewProductionDatabaseImmediateValidationFailure::ValidationTransactionFailed,
+            close_on_failure,
+        );
+    }
+
     let validation_result = validate_initialized_in_one_read_transaction(
         &mut owner.connection,
         &expected_metadata_contract,
@@ -1095,6 +1117,17 @@ fn validate_initialized_new_production_database_integrity_using(
         owner,
         observed_metadata_contract,
     } = connection;
+    #[cfg(test)]
+    if super::test_primary_failure_is_injected(
+        super::ProductionDatabasePrimaryFailureBoundary::NewDatabaseIntegrityValidation,
+    ) {
+        return finish_integrity_validation_failure_after_discard_using(
+            owner,
+            observed_metadata_contract,
+            NewProductionDatabaseIntegrityValidationFailure::ValidationUnavailable,
+            close_on_failure,
+        );
+    }
     match validate(&owner.connection) {
         Ok(()) => Ok(
             IntegrityValidatedInitializedNewProductionDatabaseConnection {
@@ -2086,7 +2119,19 @@ fn finish_opened_created_connection_using_close(
     apply_key: impl FnOnce(&Connection, &GenerationBoundDatabaseKey) -> Result<(), ()>,
     close_on_failure: impl FnOnce(Connection) -> Result<(), Connection>,
 ) -> Result<NewlyCreatedKeyedProductionDatabaseConnection, NewProductionDatabaseCreationError> {
-    let category = if validate_and_configure(&owner).is_err() {
+    let construction_failed = {
+        #[cfg(test)]
+        if super::test_primary_failure_is_injected(
+            super::ProductionDatabasePrimaryFailureBoundary::NewDatabaseConstruction,
+        ) {
+            true
+        } else {
+            validate_and_configure(&owner).is_err()
+        }
+        #[cfg(not(test))]
+        validate_and_configure(&owner).is_err()
+    };
+    let category = if construction_failed {
         Some(PostCreateConstructionFailure::ConstructionFailedAfterCreation)
     } else if apply_key(&owner.connection, &key).is_err() {
         Some(PostCreateConstructionFailure::DatabaseKeyApplicationFailedAfterCreation)
@@ -4648,5 +4693,110 @@ mod tests {
         assert!(identity_proof.created_leaf_identity == current_identity);
         drop(protected_database_key_wrapper);
         root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn primary_failure_selectors_reach_all_new_database_close_failure_families() {
+        let construction_root = TestRoot::create();
+        let authorization = authorization();
+        let key = setup_key(&authorization);
+        let construction = super::super::with_production_database_primary_failure_injected(
+            super::super::ProductionDatabasePrimaryFailureInjection::NewDatabaseConstruction,
+            || {
+                super::super::with_production_database_close_failure_injected_at(0, || {
+                    create_new_keyed_production_database(
+                        authorization,
+                        construction_root.database_path(),
+                        key,
+                    )
+                })
+            },
+        );
+        let Err(NewProductionDatabaseCreationError::ConstructionCloseFailed(failure)) =
+            construction
+        else {
+            panic!("selected construction and close failures must retain the created owner");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseConnectionConstructionCloseRetryOutcome::Closed(
+                NewProductionDatabaseCreationError::ConstructionFailedAfterCreation
+            )
+        ));
+        construction_root.assert_exact_cleanup();
+
+        let initialization_root = TestRoot::create();
+        let initialization = super::super::with_production_database_primary_failure_injected(
+            super::super::ProductionDatabasePrimaryFailureInjection::NewDatabaseInitialization,
+            || {
+                super::super::with_production_database_close_failure_injected_at(0, || {
+                    initialize_fixture(
+                        real_initialization_fixture(&initialization_root),
+                        1_798_000_000_123,
+                    )
+                })
+            },
+        );
+        let Err(NewProductionDatabaseInitializationError::InitializationCloseFailed(failure)) =
+            initialization
+        else {
+            panic!("selected initialization and close failures must retain the created owner");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseInitializationCloseRetryOutcome::Closed(
+                NewProductionDatabaseInitializationError::InitializationPolicyFailed
+            )
+        ));
+        initialization_root.assert_exact_cleanup();
+
+        let immediate_root = TestRoot::create();
+        let immediate = super::super::with_production_database_primary_failure_injected(
+            super::super::ProductionDatabasePrimaryFailureInjection::NewDatabaseImmediateValidation,
+            || {
+                super::super::with_production_database_close_failure_injected_at(0, || {
+                    validate_initialized_new_production_database(initialized_fixture(
+                        &immediate_root,
+                    ))
+                })
+            },
+        );
+        let Err(NewProductionDatabaseImmediateValidationError::ValidationCloseFailed(failure)) =
+            immediate
+        else {
+            panic!("selected immediate validation and close failures must retain the owner");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseImmediateValidationCloseRetryOutcome::Closed(
+                NewProductionDatabaseImmediateValidationError::ValidationTransactionFailed
+            )
+        ));
+        immediate_root.assert_exact_cleanup();
+
+        let integrity_root = TestRoot::create();
+        let integrity = super::super::with_production_database_primary_failure_injected(
+            super::super::ProductionDatabasePrimaryFailureInjection::NewDatabaseIntegrityValidation,
+            || {
+                super::super::with_production_database_close_failure_injected_at(0, || {
+                    validate_initialized_new_production_database_integrity(
+                        validated_initialized_fixture(&integrity_root),
+                    )
+                })
+            },
+        );
+        let Err(NewProductionDatabaseIntegrityValidationError::IntegrityValidationCloseFailed(
+            failure,
+        )) = integrity
+        else {
+            panic!("selected integrity validation and close failures must retain the owner");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            NewProductionDatabaseIntegrityValidationCloseRetryOutcome::Closed(
+                NewProductionDatabaseIntegrityValidationError::ValidationUnavailable
+            )
+        ));
+        integrity_root.assert_exact_cleanup();
     }
 }

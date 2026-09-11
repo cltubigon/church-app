@@ -40,6 +40,44 @@ mod create_new_database;
 mod fixed_metadata_and_header_observation;
 mod live_metadata_and_header_validation;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ProductionDatabasePrimaryFailureInjection {
+    NewDatabaseConstruction,
+    NewDatabaseInitialization,
+    NewDatabaseImmediateValidation,
+    NewDatabaseIntegrityValidation,
+    ReadOnlyConstruction { occurrence: usize },
+    ReadabilityIntegrity { occurrence: usize },
+    LiveMetadataHeaders { occurrence: usize },
+    PreparedMetadataComparison { occurrence: usize },
+    EvidenceCorrespondence,
+    Freshness,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum ProductionDatabasePrimaryFailureBoundary {
+    NewDatabaseConstruction,
+    NewDatabaseInitialization,
+    NewDatabaseImmediateValidation,
+    NewDatabaseIntegrityValidation,
+    ReadOnlyConstruction,
+    ReadabilityIntegrity,
+    LiveMetadataHeaders,
+    PreparedMetadataComparison,
+    EvidenceCorrespondence,
+    Freshness,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct TestPrimaryFailureInjectionState {
+    selector: ProductionDatabasePrimaryFailureInjection,
+    matching_occurrences: usize,
+    consumed: bool,
+}
+
 #[allow(unused_imports)]
 pub(crate) use create_new_database::{
     ActiveSetupCorrespondenceAndFreshnessValidationError, ActiveSetupDatabaseValidationError,
@@ -397,7 +435,19 @@ fn finish_validation_using(
     close_on_failure: impl FnOnce(Connection) -> Result<(), Connection>,
 ) -> ProductionDatabaseValidationOutcome {
     let owner = connection.owner;
-    match validate(&owner.connection) {
+    let validation_result = {
+        #[cfg(test)]
+        if test_primary_failure_is_injected(
+            ProductionDatabasePrimaryFailureBoundary::ReadabilityIntegrity,
+        ) {
+            Err(ProductionDatabaseValidationError::ValidationUnavailable)
+        } else {
+            validate(&owner.connection)
+        }
+        #[cfg(not(test))]
+        validate(&owner.connection)
+    };
+    match validation_result {
         Ok(()) => ProductionDatabaseValidationOutcome::Validated(
             ReadabilityAndIntegrityValidatedProductionDatabaseConnection { owner },
         ),
@@ -691,9 +741,106 @@ fn test_close_failure_is_injected() -> bool {
 }
 
 #[cfg(test)]
+fn test_primary_failure_is_injected(boundary: ProductionDatabasePrimaryFailureBoundary) -> bool {
+    tests::PRIMARY_FAILURE.with(|state| {
+        let Some(mut injection) = state.get() else {
+            return false;
+        };
+        if injection.consumed {
+            return false;
+        }
+        let selected_occurrence = match (injection.selector, boundary) {
+            (
+                ProductionDatabasePrimaryFailureInjection::NewDatabaseConstruction,
+                ProductionDatabasePrimaryFailureBoundary::NewDatabaseConstruction,
+            )
+            | (
+                ProductionDatabasePrimaryFailureInjection::NewDatabaseInitialization,
+                ProductionDatabasePrimaryFailureBoundary::NewDatabaseInitialization,
+            )
+            | (
+                ProductionDatabasePrimaryFailureInjection::NewDatabaseImmediateValidation,
+                ProductionDatabasePrimaryFailureBoundary::NewDatabaseImmediateValidation,
+            )
+            | (
+                ProductionDatabasePrimaryFailureInjection::NewDatabaseIntegrityValidation,
+                ProductionDatabasePrimaryFailureBoundary::NewDatabaseIntegrityValidation,
+            )
+            | (
+                ProductionDatabasePrimaryFailureInjection::EvidenceCorrespondence,
+                ProductionDatabasePrimaryFailureBoundary::EvidenceCorrespondence,
+            )
+            | (
+                ProductionDatabasePrimaryFailureInjection::Freshness,
+                ProductionDatabasePrimaryFailureBoundary::Freshness,
+            ) => 0,
+            (
+                ProductionDatabasePrimaryFailureInjection::ReadOnlyConstruction { occurrence },
+                ProductionDatabasePrimaryFailureBoundary::ReadOnlyConstruction,
+            )
+            | (
+                ProductionDatabasePrimaryFailureInjection::ReadabilityIntegrity { occurrence },
+                ProductionDatabasePrimaryFailureBoundary::ReadabilityIntegrity,
+            )
+            | (
+                ProductionDatabasePrimaryFailureInjection::LiveMetadataHeaders { occurrence },
+                ProductionDatabasePrimaryFailureBoundary::LiveMetadataHeaders,
+            )
+            | (
+                ProductionDatabasePrimaryFailureInjection::PreparedMetadataComparison {
+                    occurrence,
+                },
+                ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison,
+            ) => occurrence,
+            _ => return false,
+        };
+        let observed_occurrence = injection.matching_occurrences;
+        injection.matching_occurrences += 1;
+        if observed_occurrence == selected_occurrence {
+            injection.consumed = true;
+        }
+        state.set(Some(injection));
+        observed_occurrence == selected_occurrence
+    })
+}
+
+#[cfg(test)]
 struct TestCloseFailureInjectionReset {
     every: Option<usize>,
     at: Option<(usize, usize)>,
+}
+
+#[cfg(test)]
+struct TestPrimaryFailureInjectionReset {
+    prior: Option<TestPrimaryFailureInjectionState>,
+}
+
+#[cfg(test)]
+impl Drop for TestPrimaryFailureInjectionReset {
+    fn drop(&mut self) {
+        tests::PRIMARY_FAILURE.with(|state| state.set(self.prior));
+    }
+}
+
+/// Runs one test-only operation with one semantic primary-failure boundary
+/// selected on the current thread. The operation receives no database
+/// capability, and the prior selector is restored even if it unwinds.
+#[cfg(test)]
+pub(crate) fn with_production_database_primary_failure_injected<T>(
+    selector: ProductionDatabasePrimaryFailureInjection,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let prior = tests::PRIMARY_FAILURE.with(|state| {
+        state.replace(Some(TestPrimaryFailureInjectionState {
+            selector,
+            matching_occurrences: 0,
+            consumed: false,
+        }))
+    });
+    let reset = TestPrimaryFailureInjectionReset { prior };
+    let outcome = operation();
+    drop(reset);
+    outcome
 }
 
 #[cfg(test)]
@@ -841,10 +988,24 @@ fn finish_opened_connection_using_close(
     enable_query_only: impl FnOnce(&Connection) -> Result<(), ProductionDatabaseConnectionOpenError>,
     close_on_failure: impl FnOnce(Connection) -> Result<(), Connection>,
 ) -> Result<ProductionReadOnlyDatabaseConnection, ProductionDatabaseConnectionOpenError> {
-    let result = revalidate_identity(&owner.connection, &owner.inspected)
-        .and_then(|_| configure_policy(&owner.connection))
-        .and_then(|_| apply_key(&owner.connection))
-        .and_then(|_| enable_query_only(&owner.connection));
+    let result = {
+        #[cfg(test)]
+        if test_primary_failure_is_injected(
+            ProductionDatabasePrimaryFailureBoundary::ReadOnlyConstruction,
+        ) {
+            Err(ProductionDatabaseConnectionOpenError::Failed)
+        } else {
+            revalidate_identity(&owner.connection, &owner.inspected)
+                .and_then(|_| configure_policy(&owner.connection))
+                .and_then(|_| apply_key(&owner.connection))
+                .and_then(|_| enable_query_only(&owner.connection))
+        }
+        #[cfg(not(test))]
+        revalidate_identity(&owner.connection, &owner.inspected)
+            .and_then(|_| configure_policy(&owner.connection))
+            .and_then(|_| apply_key(&owner.connection))
+            .and_then(|_| enable_query_only(&owner.connection))
+    };
     if result.is_err() {
         return match close_lifetime_owner_using(owner, close_on_failure) {
             ProductionDatabaseConnectionCloseOutcome::Closed => {
@@ -989,6 +1150,9 @@ fn enable_and_verify_query_only(
 #[cfg(test)]
 mod tests {
     thread_local! {
+        pub(super) static PRIMARY_FAILURE: std::cell::Cell<Option<TestPrimaryFailureInjectionState>> = const {
+            std::cell::Cell::new(None)
+        };
         pub(super) static COMMON_CONTEXT_CLOSE_FAILURE: std::cell::Cell<Option<usize>> = const {
             std::cell::Cell::new(None)
         };
@@ -2387,6 +2551,155 @@ mod tests {
             format!("{guard:?}"),
             "ConnectionLifetimeWriteGuard([REDACTED])"
         );
+    }
+
+    #[test]
+    fn primary_failure_selector_is_one_shot_occurrence_exact_and_capability_free() {
+        with_production_database_primary_failure_injected(
+            ProductionDatabasePrimaryFailureInjection::ReadOnlyConstruction { occurrence: 0 },
+            || {
+                assert!(test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::ReadOnlyConstruction
+                ));
+            },
+        );
+        with_production_database_primary_failure_injected(
+            ProductionDatabasePrimaryFailureInjection::ReadabilityIntegrity { occurrence: 1 },
+            || {
+                assert!(!test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::ReadOnlyConstruction
+                ));
+                assert!(!test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::ReadabilityIntegrity
+                ));
+                assert!(test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::ReadabilityIntegrity
+                ));
+                assert!(!test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::ReadabilityIntegrity
+                ));
+            },
+        );
+        with_production_database_primary_failure_injected(
+            ProductionDatabasePrimaryFailureInjection::LiveMetadataHeaders { occurrence: 3 },
+            || {
+                for _ in 0..3 {
+                    assert!(!test_primary_failure_is_injected(
+                        ProductionDatabasePrimaryFailureBoundary::LiveMetadataHeaders
+                    ));
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn nested_and_unwinding_primary_failure_scopes_restore_prior_state() {
+        with_production_database_primary_failure_injected(
+            ProductionDatabasePrimaryFailureInjection::PreparedMetadataComparison { occurrence: 1 },
+            || {
+                assert!(!test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison
+                ));
+                with_production_database_primary_failure_injected(
+                    ProductionDatabasePrimaryFailureInjection::Freshness,
+                    || {
+                        assert!(test_primary_failure_is_injected(
+                            ProductionDatabasePrimaryFailureBoundary::Freshness
+                        ));
+                    },
+                );
+                assert!(test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison
+                ));
+
+                let unwind = std::panic::catch_unwind(|| {
+                    with_production_database_primary_failure_injected(
+                        ProductionDatabasePrimaryFailureInjection::EvidenceCorrespondence,
+                        || panic!("synthetic unwind"),
+                    );
+                });
+                assert!(unwind.is_err());
+                assert!(!test_primary_failure_is_injected(
+                    ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison
+                ));
+            },
+        );
+        assert!(!test_primary_failure_is_injected(
+            ProductionDatabasePrimaryFailureBoundary::Freshness
+        ));
+    }
+
+    #[test]
+    fn readability_primary_failure_uses_existing_category_and_ordinal_close_seam() {
+        let root = TestRoot::create();
+        root.create_empty_database();
+        let outcome = with_production_database_primary_failure_injected(
+            ProductionDatabasePrimaryFailureInjection::ReadabilityIntegrity { occurrence: 0 },
+            || {
+                with_production_database_close_failure_injected_at(0, || {
+                    validate_production_database_readability_and_integrity(
+                        ProductionReadOnlyDatabaseConnection {
+                            owner: test_lifetime_owner(&root),
+                        },
+                    )
+                })
+            },
+        );
+        let ProductionDatabaseValidationOutcome::CloseFailed(failure) = outcome else {
+            panic!("selected primary failure should retain ownership on selected close failure");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseValidationCloseRetryOutcome::Closed(
+                ProductionDatabaseValidationError::ValidationUnavailable
+            )
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn read_only_construction_primary_failure_uses_existing_close_owner() {
+        let root = TestRoot::create();
+        root.create_empty_database();
+        let result = with_production_database_primary_failure_injected(
+            ProductionDatabasePrimaryFailureInjection::ReadOnlyConstruction { occurrence: 0 },
+            || {
+                with_production_database_close_failure_injected_at(0, || {
+                    finish_opened_connection_using_close(
+                        test_lifetime_owner(&root),
+                        |_, _| Ok(()),
+                        |_| Ok(()),
+                        |_| Ok(()),
+                        |_| Ok(()),
+                        |connection| {
+                            connection
+                                .close()
+                                .map_err(|(returned_connection, _)| returned_connection)
+                        },
+                    )
+                })
+            },
+        );
+        let Err(ProductionDatabaseConnectionOpenError::CloseFailed(failure)) = result else {
+            panic!("selected construction and close failures must retain the owner");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn primary_selector_surface_and_production_isolation_are_locked() {
+        const SOURCE: &str = include_str!("production_database_connection_handoff.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("ProductionDatabasePrimaryFailureInjection"));
+        let signature = "pub(crate) fn with_production_database_primary_failure_injected<T>(\n    selector: ProductionDatabasePrimaryFailureInjection,\n    operation: impl FnOnce() -> T,\n) -> T";
+        assert!(SOURCE.contains(signature));
+        assert!(!signature.contains("Connection"));
+        assert!(!signature.contains("Path"));
+        assert!(!signature.contains("Key"));
     }
 }
 

@@ -140,10 +140,19 @@ pub(crate) fn validate_production_database_evidence_correspondence(
         metadata_contract,
     } = database;
 
-    match classify_database_metadata_correspondence(
+    let correspondence = classify_database_metadata_correspondence(
         &metadata_contract,
         trusted_assessment.evidence(),
+    );
+    #[cfg(test)]
+    let correspondence = if super::super::test_primary_failure_is_injected(
+        super::super::ProductionDatabasePrimaryFailureBoundary::EvidenceCorrespondence,
     ) {
+        DatabaseMetadataCorrespondence::Mismatch
+    } else {
+        correspondence
+    };
+    match correspondence {
         DatabaseMetadataCorrespondence::Corresponds => {
             DatabaseEvidenceCorrespondenceValidationOutcome::Validated(
                 DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection {
@@ -400,6 +409,33 @@ mod tests {
                 )
             ),
             "Closed(DatabaseEvidenceCorrespondenceMismatch)"
+        );
+    }
+
+    #[test]
+    fn selected_correspondence_boundary_uses_existing_mismatch_category() {
+        super::super::super::with_production_database_primary_failure_injected(
+            super::super::super::ProductionDatabasePrimaryFailureInjection::EvidenceCorrespondence,
+            || {
+                let correspondence = if super::super::super::test_primary_failure_is_injected(
+                    super::super::super::ProductionDatabasePrimaryFailureBoundary::EvidenceCorrespondence,
+                ) {
+                    DatabaseMetadataCorrespondence::Mismatch
+                } else {
+                    DatabaseMetadataCorrespondence::Corresponds
+                };
+                assert!(matches!(
+                    correspondence,
+                    DatabaseMetadataCorrespondence::Mismatch
+                ));
+                let outcome = DatabaseEvidenceCorrespondenceValidationOutcome::Mismatch(
+                    DatabaseEvidenceCorrespondenceMismatch,
+                );
+                assert!(matches!(
+                    outcome,
+                    DatabaseEvidenceCorrespondenceValidationOutcome::Mismatch(_)
+                ));
+            },
         );
     }
 }

@@ -219,7 +219,19 @@ pub(super) fn finish_validation_using(
     close_on_failure: impl FnOnce(Connection) -> Result<(), Connection>,
 ) -> LiveMetadataAndHeaderValidationOutcome {
     let owner = connection.owner;
-    match validate(&owner.connection) {
+    let validation_result = {
+        #[cfg(test)]
+        if super::test_primary_failure_is_injected(
+            super::ProductionDatabasePrimaryFailureBoundary::LiveMetadataHeaders,
+        ) {
+            Err(LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable)
+        } else {
+            validate(&owner.connection)
+        }
+        #[cfg(not(test))]
+        validate(&owner.connection)
+    };
+    match validation_result {
         Ok(metadata_contract) => LiveMetadataAndHeaderValidationOutcome::Validated(
             LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
                 owner,
@@ -1490,6 +1502,63 @@ mod tests {
             outcome,
             LiveMetadataAndHeaderValidationOutcome::Failed(
                 LiveMetadataAndHeaderValidationError::MetadataRowMissing
+            )
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn selected_live_metadata_failure_uses_existing_category_and_close_owner() {
+        let root = TestRoot::create();
+        create_fixture(
+            &root,
+            EXPECTED_APPLICATION_ID,
+            1,
+            Some(CREATE_METADATA_RELATION),
+            &[canonical_values()],
+            false,
+        );
+        let outcome = super::super::with_production_database_primary_failure_injected(
+            super::super::ProductionDatabasePrimaryFailureInjection::LiveMetadataHeaders {
+                occurrence: 0,
+            },
+            || {
+                super::super::with_production_database_close_failure_injected_at(0, || {
+                    validate_production_database_live_metadata_and_headers(accepted_predecessor(
+                        &root,
+                    ))
+                })
+            },
+        );
+        let LiveMetadataAndHeaderValidationOutcome::CloseFailed(failure) = outcome else {
+            panic!("selected live validation and close failures must retain the owner");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            LiveMetadataAndHeaderValidationCloseRetryOutcome::Closed(
+                LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable
+            )
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn selected_correspondence_failure_uses_existing_mismatch_close_owner() {
+        let (root, outcome) = super::super::with_production_database_primary_failure_injected(
+            super::super::ProductionDatabasePrimaryFailureInjection::EvidenceCorrespondence,
+            || {
+                super::super::with_production_database_close_failure_injected_at(0, || {
+                    correspondence_fixture(matching_correspondence_evidence(7, 11, 1_798_000_000))
+                })
+            },
+        );
+        let DatabaseEvidenceCorrespondenceValidationOutcome::CloseFailed(failure) = outcome else {
+            panic!("selected correspondence and close failures must retain the owner");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome::Closed(
+                DatabaseEvidenceCorrespondenceMismatch
             )
         ));
         root.assert_exact_cleanup();
