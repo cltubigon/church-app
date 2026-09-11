@@ -16,6 +16,8 @@ mod database_metadata_decoding;
 #[allow(dead_code)]
 #[cfg(windows)]
 mod first_time_setup_exclusivity;
+#[cfg(windows)]
+mod first_time_setup_orchestration;
 mod first_time_setup_publication;
 mod freshness_anchor_active_wrapper_loader;
 mod freshness_anchor_authenticated_envelope;
