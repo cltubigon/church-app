@@ -1076,7 +1076,8 @@ pub(crate) fn request_first_time_setup(app: AppHandle) -> FirstTimeSetupRequestR
     #[cfg(windows)]
     return request_first_time_setup_with(
         || app.path().app_local_data_dir().map_err(|_| ()),
-        |canonical_root| lifecycle_from_app(&app).request_first_time_setup(canonical_root),
+        select_setup_root,
+        |selected_root| lifecycle_from_app(&app).request_first_time_setup(selected_root),
     );
 
     #[cfg(not(windows))]
@@ -1086,20 +1087,37 @@ pub(crate) fn request_first_time_setup(app: AppHandle) -> FirstTimeSetupRequestR
     }
 }
 
+#[cfg(all(windows, debug_assertions))]
+fn select_setup_root(canonical_root: PathBuf) -> Result<PathBuf, ()> {
+    let selection = select_startup_root(canonical_root).map_err(|_| ())?;
+    Ok(selection.root().to_path_buf())
+}
+
+#[cfg(all(windows, not(debug_assertions)))]
+fn select_setup_root(canonical_root: PathBuf) -> Result<PathBuf, ()> {
+    Ok(canonical_root)
+}
+
 #[cfg(windows)]
-fn request_first_time_setup_with<Resolve, Request>(
+fn request_first_time_setup_with<Resolve, Select, Request>(
     resolve_canonical_root: Resolve,
+    select_root: Select,
     request: Request,
 ) -> FirstTimeSetupRequestResult
 where
     Resolve: FnOnce() -> Result<PathBuf, ()>,
+    Select: FnOnce(PathBuf) -> Result<PathBuf, ()>,
     Request: FnOnce(PathBuf) -> FirstTimeSetupRequestOutcome,
 {
     let canonical_root = match resolve_canonical_root() {
         Ok(canonical_root) => canonical_root,
         Err(()) => return FirstTimeSetupRequestResult::Unavailable,
     };
-    request(canonical_root).into()
+    let selected_root = match select_root(canonical_root) {
+        Ok(selected_root) => selected_root,
+        Err(()) => return FirstTimeSetupRequestResult::Unavailable,
+    };
+    request(selected_root).into()
 }
 
 pub(crate) fn lifecycle_from_app(app: &AppHandle) -> Arc<ApplicationLifecycle> {
@@ -2160,9 +2178,80 @@ mod tests {
     fn setup_request_path_resolution_failure_is_unavailable_without_requesting_setup() {
         let result = request_first_time_setup_with(
             || Err(()),
+            |_| panic!("root selection must not run when canonical path resolution fails"),
             |_| panic!("setup must not be requested when canonical path resolution fails"),
         );
         assert_eq!(result, FirstTimeSetupRequestResult::Unavailable);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn setup_request_forwards_the_validated_debug_selection_instead_of_the_canonical_root() {
+        let canonical_root = PathBuf::from(r"C:\synthetic-canonical-root");
+        let selected_root = PathBuf::from(r"C:\synthetic-validated-manual-root");
+        let result = request_first_time_setup_with(
+            || Ok(canonical_root.clone()),
+            |received| {
+                assert_eq!(received, canonical_root);
+                Ok(selected_root.clone())
+            },
+            |received| {
+                assert_eq!(received, selected_root);
+                FirstTimeSetupRequestOutcome::Started
+            },
+        );
+        assert_eq!(result, FirstTimeSetupRequestResult::Started);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn setup_request_without_a_debug_override_forwards_the_canonical_root() {
+        let canonical_root = PathBuf::from(r"C:\synthetic-canonical-root");
+        let result = request_first_time_setup_with(
+            || Ok(canonical_root.clone()),
+            Ok,
+            |received| {
+                assert_eq!(received, canonical_root);
+                FirstTimeSetupRequestOutcome::Started
+            },
+        );
+        assert_eq!(result, FirstTimeSetupRequestResult::Started);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn invalid_debug_root_selection_is_unavailable_without_requesting_setup() {
+        let result = request_first_time_setup_with(
+            || Ok(PathBuf::from(r"C:\synthetic-canonical-root")),
+            |_| Err(()),
+            |_| panic!("setup must not be requested when root selection fails"),
+        );
+        assert_eq!(result, FirstTimeSetupRequestResult::Unavailable);
+    }
+
+    #[test]
+    fn setup_root_selection_is_debug_only_and_reuses_the_startup_selector() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let production_source = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let debug_selection = production_source
+            .split_once("#[cfg(all(windows, debug_assertions))]\nfn select_setup_root")
+            .unwrap()
+            .1
+            .split_once("#[cfg(all(windows, not(debug_assertions)))]")
+            .unwrap()
+            .0;
+        assert!(debug_selection.contains("select_startup_root(canonical_root)"));
+        assert!(debug_selection.contains("selection.root().to_path_buf()"));
+
+        let release_selection = production_source
+            .split_once("#[cfg(all(windows, not(debug_assertions)))]\nfn select_setup_root")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nfn request_first_time_setup_with")
+            .unwrap()
+            .0;
+        assert!(release_selection.contains("Ok(canonical_root)"));
+        assert!(!release_selection.contains("select_startup_root"));
     }
 
     #[cfg(windows)]
@@ -2181,8 +2270,9 @@ mod tests {
             .unwrap()
             .0;
         assert!(command.contains("app.path().app_local_data_dir().map_err(|_| ())"));
+        assert!(command.contains("select_setup_root"));
         assert!(command.contains("lifecycle_from_app(&app)"));
-        assert!(command.contains(".request_first_time_setup(canonical_root)"));
+        assert!(command.contains(".request_first_time_setup(selected_root)"));
         for forbidden in [
             "run_first_time_setup(",
             "run_production_startup(",
