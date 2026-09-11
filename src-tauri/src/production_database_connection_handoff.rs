@@ -674,6 +674,14 @@ fn close_lifetime_owner_using(
 
 #[cfg(test)]
 fn test_close_failure_is_injected() -> bool {
+    if let Some(should_fail) = tests::ORDINAL_CLOSE_FAILURE.with(|state| {
+        state.get().map(|(ordinal, attempt)| {
+            state.set(Some((ordinal, attempt + 1)));
+            attempt == ordinal
+        })
+    }) {
+        return should_fail;
+    }
     tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| {
         state.get().is_some_and(|attempts| {
             state.set(Some(attempts + 1));
@@ -683,12 +691,16 @@ fn test_close_failure_is_injected() -> bool {
 }
 
 #[cfg(test)]
-struct TestCloseFailureInjectionReset(Option<usize>);
+struct TestCloseFailureInjectionReset {
+    every: Option<usize>,
+    at: Option<(usize, usize)>,
+}
 
 #[cfg(test)]
 impl Drop for TestCloseFailureInjectionReset {
     fn drop(&mut self) {
-        tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| state.set(self.0));
+        tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| state.set(self.every));
+        tests::ORDINAL_CLOSE_FAILURE.with(|state| state.set(self.at));
     }
 }
 
@@ -699,8 +711,25 @@ impl Drop for TestCloseFailureInjectionReset {
 pub(crate) fn with_production_database_close_failure_injected<T>(
     operation: impl FnOnce() -> T,
 ) -> T {
-    let previous = tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| state.replace(Some(0)));
-    let reset = TestCloseFailureInjectionReset(previous);
+    let every = tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| state.replace(Some(0)));
+    let at = tests::ORDINAL_CLOSE_FAILURE.with(|state| state.replace(None));
+    let reset = TestCloseFailureInjectionReset { every, at };
+    let outcome = operation();
+    drop(reset);
+    outcome
+}
+
+/// Runs one test-only operation with only the selected zero-based close-attempt
+/// ordinal failing on the current thread. The operation receives no database
+/// capability, and the prior injection state is restored even if it unwinds.
+#[cfg(test)]
+pub(crate) fn with_production_database_close_failure_injected_at<T>(
+    ordinal: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let every = tests::COMMON_CONTEXT_CLOSE_FAILURE.with(|state| state.replace(None));
+    let at = tests::ORDINAL_CLOSE_FAILURE.with(|state| state.replace(Some((ordinal, 0))));
+    let reset = TestCloseFailureInjectionReset { every, at };
     let outcome = operation();
     drop(reset);
     outcome
@@ -961,6 +990,9 @@ fn enable_and_verify_query_only(
 mod tests {
     thread_local! {
         pub(super) static COMMON_CONTEXT_CLOSE_FAILURE: std::cell::Cell<Option<usize>> = const {
+            std::cell::Cell::new(None)
+        };
+        pub(super) static ORDINAL_CLOSE_FAILURE: std::cell::Cell<Option<(usize, usize)>> = const {
             std::cell::Cell::new(None)
         };
     }
@@ -1876,6 +1908,159 @@ mod tests {
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
         assert!(OpenOptions::new().write(true).open(&database).is_ok());
+    }
+
+    #[test]
+    fn ordinal_close_failure_injection_is_test_only_crate_private_and_capability_free() {
+        let source = include_str!("production_database_connection_handoff.rs");
+        let signature = "#[cfg(test)]\npub(crate) fn with_production_database_close_failure_injected_at<T>(\n    ordinal: usize,\n    operation: impl FnOnce() -> T,\n) -> T";
+        assert!(source.contains(signature));
+        for capability in [
+            "Connection",
+            "Handle",
+            "Path",
+            "Key",
+            "Identifier",
+            "Metadata",
+            "Native",
+        ] {
+            assert!(!signature.contains(capability));
+        }
+    }
+
+    #[test]
+    fn fail_every_close_injection_still_fails_repeated_close_attempts() {
+        let root = TestRoot::create();
+        root.create_empty_database();
+        let owner = finish_with_successful_test_key(&root, &Cell::new(0)).unwrap();
+
+        let failure = with_production_database_close_failure_injected(|| {
+            let ProductionDatabaseConnectionCloseOutcome::Failed(failure) = owner.close() else {
+                panic!("the first consulted close must fail");
+            };
+            let ProductionDatabaseConnectionCloseOutcome::Failed(failure) = failure.retry_close()
+            else {
+                panic!("a repeated consulted close must also fail");
+            };
+            failure
+        });
+
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+    }
+
+    #[test]
+    fn zero_based_ordinal_fails_only_the_selected_close_attempt() {
+        let first_root = TestRoot::create();
+        first_root.create_empty_database();
+        let selected_root = TestRoot::create();
+        selected_root.create_empty_database();
+        let later_root = TestRoot::create();
+        later_root.create_empty_database();
+        let first = finish_with_successful_test_key(&first_root, &Cell::new(0)).unwrap();
+        let selected = finish_with_successful_test_key(&selected_root, &Cell::new(0)).unwrap();
+        let later = finish_with_successful_test_key(&later_root, &Cell::new(0)).unwrap();
+
+        let (first, selected, later) =
+            with_production_database_close_failure_injected_at(1, || {
+                (first.close(), selected.close(), later.close())
+            });
+
+        assert!(matches!(
+            first,
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        let ProductionDatabaseConnectionCloseOutcome::Failed(selected) = selected else {
+            panic!("zero-based ordinal one must select the second consulted close");
+        };
+        assert!(matches!(
+            later,
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(matches!(
+            selected.retry_close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+    }
+
+    #[test]
+    fn ordinal_beyond_consulted_closes_injects_no_failure() {
+        let first_root = TestRoot::create();
+        first_root.create_empty_database();
+        let second_root = TestRoot::create();
+        second_root.create_empty_database();
+        let first = finish_with_successful_test_key(&first_root, &Cell::new(0)).unwrap();
+        let second = finish_with_successful_test_key(&second_root, &Cell::new(0)).unwrap();
+
+        let (first, second) = with_production_database_close_failure_injected_at(2, || {
+            (first.close(), second.close())
+        });
+
+        assert!(matches!(
+            first,
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(matches!(
+            second,
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+    }
+
+    #[test]
+    fn zero_based_ordinal_can_target_retry_separately_from_first_close() {
+        let root = TestRoot::create();
+        root.create_empty_database();
+        let owner = finish_with_successful_test_key(&root, &Cell::new(0)).unwrap();
+
+        let failure = with_production_database_close_failure_injected_at(1, || {
+            let ProductionDatabaseConnectionCloseOutcome::Failed(failure) = owner.close_using(Err)
+            else {
+                panic!("the synthetic first close must retain ownership");
+            };
+            let ProductionDatabaseConnectionCloseOutcome::Failed(failure) = failure.retry_close()
+            else {
+                panic!("zero-based ordinal one must inject failure into the retry");
+            };
+            failure
+        });
+
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+    }
+
+    #[test]
+    fn nested_close_failure_injection_restores_outer_attempt_state() {
+        with_production_database_close_failure_injected_at(1, || {
+            assert!(!test_close_failure_is_injected());
+            with_production_database_close_failure_injected(|| {
+                assert!(test_close_failure_is_injected());
+                assert!(test_close_failure_is_injected());
+            });
+            assert!(test_close_failure_is_injected());
+            assert!(!test_close_failure_is_injected());
+        });
+        assert!(!test_close_failure_is_injected());
+    }
+
+    #[test]
+    fn unwinding_close_failure_injection_restores_prior_attempt_state() {
+        with_production_database_close_failure_injected_at(1, || {
+            assert!(!test_close_failure_is_injected());
+            let unwind = std::panic::catch_unwind(|| {
+                with_production_database_close_failure_injected(|| {
+                    assert!(test_close_failure_is_injected());
+                    panic!("synthetic unwind");
+                });
+            });
+            assert!(unwind.is_err());
+            assert!(test_close_failure_is_injected());
+            assert!(!test_close_failure_is_injected());
+        });
+        assert!(!test_close_failure_is_injected());
     }
 
     #[test]
