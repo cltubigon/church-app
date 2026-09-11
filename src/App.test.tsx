@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -115,16 +115,25 @@ describe("application foundation", () => {
   });
 
   it.each([
+    ["starting", "Preparing the application securely. This may take some time."],
+    ["ready", "Unfinished application foundation"],
     ["setupInProgress", "First-time setup is in progress."],
     [
       "setupRestartRequired",
       "First-time setup is complete. Restart the application to continue.",
     ],
-  ])("renders %s as a non-operational setup state", async (status, message) => {
+    ["stopping", "The application is stopping."],
+    ["shutdownIncomplete", "The application could not complete shutdown."],
+  ])("does not offer first-time setup while startup status is %s", async (status, message) => {
     mockedInvoke.mockResolvedValue(status);
     renderApp();
     expect(await screen.findByText(message)).toBeInTheDocument();
-    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
+    if (status === "ready") {
+      expect(screen.getByRole("navigation", { name: "Staff area placeholders" })).toBeInTheDocument();
+    } else {
+      expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    }
   });
 
   it("renders only a coarse unavailable state when startup status cannot be read", async () => {
@@ -132,6 +141,138 @@ describe("application foundation", () => {
     renderApp();
     expect(await screen.findByText("The application is unavailable.")).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("sensitive backend detail");
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("offers one explicit first-time setup action only on the unavailable surface", async () => {
+    mockedInvoke.mockResolvedValue("unavailable");
+    renderApp();
+
+    expect(await screen.findByText("The application is unavailable.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Use this only to set up Church App for the first time."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Set up Church App" })).toHaveLength(1);
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("requests setup once without arguments and promptly re-checks startup status", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "request_first_time_setup") return Promise.resolve("started");
+      return Promise.reject(new Error("unexpected command"));
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Set up Church App" }));
+
+    await waitFor(() => {
+      expect(
+        mockedInvoke.mock.calls.filter(([command]) => command === "startup_status"),
+      ).toHaveLength(2);
+    });
+    expect(
+      mockedInvoke.mock.calls.filter(([command]) => command === "request_first_time_setup"),
+    ).toEqual([["request_first_time_setup"]]);
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("suppresses duplicate setup submissions while the request is pending", async () => {
+    let finishSetup: ((result: "started") => void) | undefined;
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "request_first_time_setup") {
+        return new Promise((resolve) => {
+          finishSetup = resolve;
+        });
+      }
+      return Promise.reject(new Error("unexpected command"));
+    });
+    const user = userEvent.setup();
+    renderApp();
+    const button = await screen.findByRole("button", { name: "Set up Church App" });
+
+    await user.click(button);
+    expect(screen.getByRole("button", { name: "Starting first-time setup…" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Starting first-time setup…" }));
+    expect(
+      mockedInvoke.mock.calls.filter(([command]) => command === "request_first_time_setup"),
+    ).toHaveLength(1);
+
+    await act(async () => finishSetup?.("started"));
+  });
+
+  it.each(["started", "alreadyInProgress", "startupInProgress", "notAllowed"] as const)(
+    "keeps the %s request result non-operational and re-checks canonical status",
+    async (result) => {
+      mockedInvoke.mockImplementation((command) => {
+        if (command === "startup_status") return Promise.resolve("unavailable");
+        if (command === "request_first_time_setup") return Promise.resolve(result);
+        return Promise.reject(new Error("unexpected command"));
+      });
+      const user = userEvent.setup();
+      renderApp();
+
+      await user.click(await screen.findByRole("button", { name: "Set up Church App" }));
+
+      await waitFor(() => {
+        expect(
+          mockedInvoke.mock.calls.filter(([command]) => command === "startup_status"),
+        ).toHaveLength(2);
+      });
+      expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    },
+  );
+
+  it("uses refreshed status as authority for restart-required and never renders Ready locally", async () => {
+    let startupReadCount = 0;
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") {
+        startupReadCount += 1;
+        return Promise.resolve(
+          startupReadCount === 1 ? "unavailable" : "setupRestartRequired",
+        );
+      }
+      if (command === "request_first_time_setup") return Promise.resolve("restartRequired");
+      return Promise.reject(new Error("unexpected command"));
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Set up Church App" }));
+
+    expect(
+      await screen.findByText("First-time setup is complete. Restart the application to continue."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    expect(mockedInvoke.mock.calls.map(([command]) => command)).toEqual([
+      "startup_status",
+      "request_first_time_setup",
+      "startup_status",
+    ]);
+  });
+
+  it.each([
+    ["the unavailable result", () => Promise.resolve("unavailable")],
+    ["an unknown result", () => Promise.resolve("sensitive unexpected setup result")],
+    ["a rejected request", () => Promise.reject(new Error("C:\\private\\setup-secret"))],
+  ])("shows only a coarse setup failure for %s", async (_case, getSetupOutcome) => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "request_first_time_setup") return getSetupOutcome();
+      return Promise.reject(new Error("unexpected command"));
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Set up Church App" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "First-time setup could not be started.",
+    );
+    expect(document.body.textContent).not.toContain("sensitive unexpected setup result");
+    expect(document.body.textContent).not.toContain("setup-secret");
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
   });
 });

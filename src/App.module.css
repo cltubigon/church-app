@@ -94,6 +94,34 @@
 .panel p {
   max-width: 65ch;
 }
+.setupAction {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #ded8cd;
+}
+.setupAction button {
+  padding: 0.65rem 0.9rem;
+  color: #fff;
+  background: #27594b;
+  border: 2px solid #27594b;
+  border-radius: 0.35rem;
+  cursor: pointer;
+  font-weight: 700;
+}
+.setupAction button:hover:not(:disabled) {
+  background: #173f35;
+}
+.setupAction button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+.setupAction [role="alert"] {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  color: #702f1a;
+  background: #fff2ec;
+  border-left: 0.25rem solid #b44d20;
+}
 .footer {
   padding: 1rem clamp(1.25rem, 6vw, 5rem);
   color: #526159;

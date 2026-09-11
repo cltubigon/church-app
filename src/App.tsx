@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router";
 import styles from "./App.module.css";
 import { HealthPanel } from "./components/HealthPanel";
-import { getStartupStatus, type StartupStatus } from "./lib/startup";
+import { getStartupStatus, requestFirstTimeSetup, type StartupStatus } from "./lib/startup";
 
 const areas = [
   { label: "Requests", path: "/requests" },
@@ -49,7 +49,19 @@ function UnknownRoute() {
   );
 }
 
-function StartupBoundary({ status }: { status: Exclude<StartupStatus, "ready"> }) {
+interface StartupBoundaryProps {
+  onRequestSetup: () => void;
+  setupError: string | null;
+  setupRequestPending: boolean;
+  status: Exclude<StartupStatus, "ready">;
+}
+
+function StartupBoundary({
+  onRequestSetup,
+  setupError,
+  setupRequestPending,
+  status,
+}: StartupBoundaryProps) {
   const content = {
     starting: "Preparing the application securely. This may take some time.",
     unavailable: "The application is unavailable.",
@@ -64,6 +76,15 @@ function StartupBoundary({ status }: { status: Exclude<StartupStatus, "ready"> }
       <section aria-live="polite" className={styles.panel}>
         <h1>Church App</h1>
         <p>{content}</p>
+        {status === "unavailable" && (
+          <div aria-busy={setupRequestPending} className={styles.setupAction}>
+            <p>Use this only to set up Church App for the first time.</p>
+            <button disabled={setupRequestPending} onClick={onRequestSetup} type="button">
+              {setupRequestPending ? "Starting first-time setup…" : "Set up Church App"}
+            </button>
+            {setupError !== null && <p role="alert">{setupError}</p>}
+          </div>
+        )}
       </section>
     </main>
   );
@@ -71,6 +92,9 @@ function StartupBoundary({ status }: { status: Exclude<StartupStatus, "ready"> }
 
 export function App() {
   const [startupStatus, setStartupStatus] = useState<StartupStatus>("starting");
+  const [statusRefreshKey, setStatusRefreshKey] = useState(0);
+  const [setupRequestPending, setSetupRequestPending] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -95,9 +119,35 @@ export function App() {
       active = false;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, []);
+  }, [statusRefreshKey]);
 
-  if (startupStatus !== "ready") return <StartupBoundary status={startupStatus} />;
+  useEffect(() => {
+    if (startupStatus !== "unavailable") setSetupError(null);
+  }, [startupStatus]);
+
+  async function requestSetup() {
+    if (setupRequestPending) return;
+
+    setSetupRequestPending(true);
+    setSetupError(null);
+    const result = await requestFirstTimeSetup();
+    if (result === "unavailable") {
+      setSetupError("First-time setup could not be started.");
+    }
+    setStatusRefreshKey((key) => key + 1);
+    setSetupRequestPending(false);
+  }
+
+  if (startupStatus !== "ready") {
+    return (
+      <StartupBoundary
+        onRequestSetup={() => void requestSetup()}
+        setupError={setupError}
+        setupRequestPending={setupRequestPending}
+        status={startupStatus}
+      />
+    );
+  }
 
   return (
     <div className={styles.app}>
