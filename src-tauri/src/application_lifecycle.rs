@@ -21,7 +21,9 @@ use crate::{
         FirstTimeSetupCrossProcessExclusivity, FirstTimeSetupCrossProcessExclusivityOutcome,
         acquire_first_time_setup_cross_process_exclusivity,
     },
-    first_time_setup_orchestration::{FirstTimeSetupOrchestrationOutcome, run_first_time_setup},
+    first_time_setup_orchestration::{
+        FirstTimeSetupOrchestrationOutcome, FirstTimeSetupTerminalFailure, run_first_time_setup,
+    },
     installation_evidence_persistence::observe_production_installation_evidence,
     installation_evidence_protection::{
         bind_database_key_candidate_to_trusted_installation_evidence,
@@ -309,6 +311,47 @@ enum SetupWorkerResult {
     CloseRetryRequired,
 }
 
+#[cfg(all(windows, debug_assertions))]
+fn first_time_setup_terminal_failure_phase(failure: FirstTimeSetupTerminalFailure) -> &'static str {
+    match failure {
+        FirstTimeSetupTerminalFailure::Authorization => "authorization",
+        FirstTimeSetupTerminalFailure::RootPreparation => "root_preparation",
+        FirstTimeSetupTerminalFailure::Generation => "generation",
+        FirstTimeSetupTerminalFailure::TimestampUnavailable => "timestamp_unavailable",
+        FirstTimeSetupTerminalFailure::DatabaseCreation => "database_creation",
+        FirstTimeSetupTerminalFailure::DatabaseInitialization => "database_initialization",
+        FirstTimeSetupTerminalFailure::DatabaseValidation => "database_validation",
+        FirstTimeSetupTerminalFailure::PublicationMaterialPreparation => {
+            "publication_material_preparation"
+        }
+        FirstTimeSetupTerminalFailure::ProtectedDirectoryPreparation => {
+            "protected_directory_preparation"
+        }
+        FirstTimeSetupTerminalFailure::Staging => "staging",
+        FirstTimeSetupTerminalFailure::StagedVerification => "staged_verification",
+        FirstTimeSetupTerminalFailure::Publication => "publication",
+        FirstTimeSetupTerminalFailure::FinalActiveVerification => "final_active_verification",
+        FirstTimeSetupTerminalFailure::FinalObservation => "final_observation",
+        FirstTimeSetupTerminalFailure::Completion => "completion",
+    }
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn setup_worker_result_for_terminal_failure(
+    failure: FirstTimeSetupTerminalFailure,
+) -> SetupWorkerResult {
+    let phase = first_time_setup_terminal_failure_phase(failure);
+    eprintln!(r#"event="first_time_setup" outcome="terminal_failure" phase="{phase}""#);
+    SetupWorkerResult::Failed
+}
+
+#[cfg(all(windows, not(debug_assertions)))]
+fn setup_worker_result_for_terminal_failure(
+    _failure: FirstTimeSetupTerminalFailure,
+) -> SetupWorkerResult {
+    SetupWorkerResult::Failed
+}
+
 enum SetupCompletion {
     RestartRequired,
     FinishedWithoutOwner { shutdown_requested: bool },
@@ -484,11 +527,13 @@ impl ApplicationLifecycle {
                     lifecycle.complete_setup(SetupWorkerResult::CloseRetryRequired);
                     retain_setup_close_owner(owner);
                 }
+                Ok(FirstTimeSetupOrchestrationOutcome::TerminalFailure(phase)) => {
+                    lifecycle.complete_setup(setup_worker_result_for_terminal_failure(phase));
+                }
                 Ok(
                     FirstTimeSetupOrchestrationOutcome::AlreadyInProgress
                     | FirstTimeSetupOrchestrationOutcome::Unavailable
-                    | FirstTimeSetupOrchestrationOutcome::NotEligible(_)
-                    | FirstTimeSetupOrchestrationOutcome::TerminalFailure(_),
+                    | FirstTimeSetupOrchestrationOutcome::NotEligible(_),
                 )
                 | Err(_) => lifecycle.complete_setup(SetupWorkerResult::Failed),
             }
@@ -1850,6 +1895,200 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         panic!("setup worker did not reach {expected:?}");
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn every_terminal_failure_has_one_fixed_safe_phase() {
+        let cases = [
+            (
+                FirstTimeSetupTerminalFailure::Authorization,
+                "authorization",
+            ),
+            (
+                FirstTimeSetupTerminalFailure::RootPreparation,
+                "root_preparation",
+            ),
+            (FirstTimeSetupTerminalFailure::Generation, "generation"),
+            (
+                FirstTimeSetupTerminalFailure::TimestampUnavailable,
+                "timestamp_unavailable",
+            ),
+            (
+                FirstTimeSetupTerminalFailure::DatabaseCreation,
+                "database_creation",
+            ),
+            (
+                FirstTimeSetupTerminalFailure::DatabaseInitialization,
+                "database_initialization",
+            ),
+            (
+                FirstTimeSetupTerminalFailure::DatabaseValidation,
+                "database_validation",
+            ),
+            (
+                FirstTimeSetupTerminalFailure::PublicationMaterialPreparation,
+                "publication_material_preparation",
+            ),
+            (
+                FirstTimeSetupTerminalFailure::ProtectedDirectoryPreparation,
+                "protected_directory_preparation",
+            ),
+            (FirstTimeSetupTerminalFailure::Staging, "staging"),
+            (
+                FirstTimeSetupTerminalFailure::StagedVerification,
+                "staged_verification",
+            ),
+            (FirstTimeSetupTerminalFailure::Publication, "publication"),
+            (
+                FirstTimeSetupTerminalFailure::FinalActiveVerification,
+                "final_active_verification",
+            ),
+            (
+                FirstTimeSetupTerminalFailure::FinalObservation,
+                "final_observation",
+            ),
+            (FirstTimeSetupTerminalFailure::Completion, "completion"),
+        ];
+
+        let mut distinct = std::collections::BTreeSet::new();
+        for (failure, expected) in cases {
+            let phase = first_time_setup_terminal_failure_phase(failure);
+            assert_eq!(phase, expected);
+            assert!(distinct.insert(phase), "duplicate phase: {phase}");
+            for forbidden in ['/', '\\', ':'] {
+                assert!(!phase.contains(forbidden));
+            }
+            assert!(
+                phase
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            );
+        }
+        assert_eq!(distinct.len(), 15);
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let mapping = SOURCE
+            .split_once("fn first_time_setup_terminal_failure_phase(")
+            .unwrap()
+            .1
+            .split_once("fn setup_worker_result_for_terminal_failure(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            mapping.matches("FirstTimeSetupTerminalFailure::").count(),
+            cases.len()
+        );
+        assert!(!mapping.contains("_ =>"));
+        assert!(!mapping.contains("Debug"));
+        assert!(!mapping.contains("format!"));
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn terminal_failure_diagnostic_precedes_the_existing_failed_mapping() {
+        assert_eq!(
+            setup_worker_result_for_terminal_failure(
+                FirstTimeSetupTerminalFailure::DatabaseCreation
+            ),
+            SetupWorkerResult::Failed
+        );
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let debug_helper = production
+            .split_once(
+                "#[cfg(all(windows, debug_assertions))]\nfn setup_worker_result_for_terminal_failure",
+            )
+            .unwrap()
+            .1
+            .split_once("#[cfg(all(windows, not(debug_assertions)))]")
+            .unwrap()
+            .0;
+        let emission = debug_helper
+            .find(
+                r##"eprintln!(r#"event="first_time_setup" outcome="terminal_failure" phase="{phase}""#);"##,
+            )
+            .unwrap();
+        let failed = debug_helper.find("SetupWorkerResult::Failed").unwrap();
+        assert!(emission < failed);
+        assert_eq!(debug_helper.matches("eprintln!").count(), 1);
+
+        let setup_worker = production
+            .split_once("fn request_first_time_setup_with")
+            .unwrap()
+            .1
+            .split_once("fn complete_setup")
+            .unwrap()
+            .0;
+        assert_eq!(
+            setup_worker
+                .matches("FirstTimeSetupOrchestrationOutcome::TerminalFailure(phase)")
+                .count(),
+            1
+        );
+        assert!(setup_worker.contains(
+            "lifecycle.complete_setup(setup_worker_result_for_terminal_failure(phase));"
+        ));
+    }
+
+    #[test]
+    fn release_setup_path_has_no_terminal_failure_diagnostic_emission() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let release_helper = production
+            .split_once(
+                "#[cfg(all(windows, not(debug_assertions)))]\nfn setup_worker_result_for_terminal_failure",
+            )
+            .unwrap()
+            .1
+            .split_once("enum SetupCompletion")
+            .unwrap()
+            .0;
+        assert!(release_helper.contains("SetupWorkerResult::Failed"));
+        assert!(!release_helper.contains("eprintln!"));
+        assert!(!release_helper.contains("outcome=\"terminal_failure\""));
+        assert!(!release_helper.contains("first_time_setup_terminal_failure_phase"));
+    }
+
+    #[test]
+    fn terminal_failure_diagnostic_adds_no_lifecycle_or_ipc_status() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let startup_status = SOURCE
+            .split_once("pub(crate) enum StartupStatus {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(
+            startup_status,
+            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,"
+        );
+
+        let request_result = SOURCE
+            .split_once("pub(crate) enum FirstTimeSetupRequestResult {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(
+            request_result,
+            "\n    Started,\n    AlreadyInProgress,\n    StartupInProgress,\n    NotAllowed,\n    RestartRequired,\n    Unavailable,"
+        );
+
+        let setup_worker_result = SOURCE
+            .split_once("enum SetupWorkerResult {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert_eq!(
+            setup_worker_result,
+            "\n    Completed,\n    Failed,\n    CloseRetryRequired,"
+        );
     }
 
     #[cfg(windows)]
