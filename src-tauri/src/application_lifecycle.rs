@@ -5,7 +5,9 @@
 
 use std::{
     fmt,
+    path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
+    thread,
 };
 
 use serde::Serialize;
@@ -15,6 +17,7 @@ use tauri::{AppHandle, Manager};
 use crate::{
     database_key_active_wrapper_loader::load_active_database_key_wrapper,
     database_key_presence::inspect_database_key_active_presence,
+    first_time_setup_orchestration::{FirstTimeSetupOrchestrationOutcome, run_first_time_setup},
     installation_evidence_persistence::observe_production_installation_evidence,
     installation_evidence_protection::{
         bind_database_key_candidate_to_trusted_installation_evidence,
@@ -60,6 +63,8 @@ pub(crate) enum StartupStatus {
     Starting,
     Ready,
     Unavailable,
+    SetupInProgress,
+    SetupRestartRequired,
     Stopping,
     ShutdownIncomplete,
 }
@@ -75,8 +80,11 @@ enum LifecycleState<Operational, CloseFailure> {
     Starting,
     Ready(Operational),
     Failed(CoarseStartupFailure),
+    SetupInProgress,
+    SetupRestartRequired,
     Stopping,
     CloseRetryRequired(CloseFailure),
+    SetupCloseRetryRequired,
 }
 
 impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
@@ -85,8 +93,12 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
             Self::NotStarted | Self::Starting => StartupStatus::Starting,
             Self::Ready(_) => StartupStatus::Ready,
             Self::Failed(_) => StartupStatus::Unavailable,
+            Self::SetupInProgress => StartupStatus::SetupInProgress,
+            Self::SetupRestartRequired => StartupStatus::SetupRestartRequired,
             Self::Stopping => StartupStatus::Stopping,
-            Self::CloseRetryRequired(_) => StartupStatus::ShutdownIncomplete,
+            Self::CloseRetryRequired(_) | Self::SetupCloseRetryRequired => {
+                StartupStatus::ShutdownIncomplete
+            }
         }
     }
 
@@ -103,6 +115,28 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
         !matches!(self, Self::Starting)
     }
 
+    fn reserve_setup(&mut self) -> FirstTimeSetupRequestOutcome {
+        match self {
+            Self::Failed(_) => {
+                *self = Self::SetupInProgress;
+                FirstTimeSetupRequestOutcome::Started
+            }
+            Self::NotStarted | Self::Starting => FirstTimeSetupRequestOutcome::StartupInProgress,
+            Self::Ready(_) | Self::Stopping | Self::CloseRetryRequired(_) => {
+                FirstTimeSetupRequestOutcome::NotAllowed
+            }
+            Self::SetupInProgress => FirstTimeSetupRequestOutcome::AlreadyInProgress,
+            Self::SetupRestartRequired => FirstTimeSetupRequestOutcome::RestartRequired,
+            Self::SetupCloseRetryRequired => FirstTimeSetupRequestOutcome::NotAllowed,
+        }
+    }
+
+    fn rollback_setup_reservation(&mut self) {
+        if matches!(self, Self::SetupInProgress) {
+            *self = Self::Failed(CoarseStartupFailure::StartupUnavailable);
+        }
+    }
+
     fn begin_shutdown(&mut self) -> ShutdownAction<Operational> {
         match std::mem::replace(self, Self::Stopping) {
             Self::NotStarted => {
@@ -115,11 +149,54 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
                 *self = Self::Failed(failure);
                 ShutdownAction::Exit
             }
+            Self::SetupInProgress => ShutdownAction::WaitForSetup,
+            Self::SetupRestartRequired => {
+                *self = Self::Failed(CoarseStartupFailure::StartupInterrupted);
+                ShutdownAction::Exit
+            }
             Self::Stopping => ShutdownAction::WaitForStartup,
             Self::CloseRetryRequired(failure) => {
                 *self = Self::CloseRetryRequired(failure);
                 ShutdownAction::Blocked
             }
+            Self::SetupCloseRetryRequired => {
+                *self = Self::SetupCloseRetryRequired;
+                ShutdownAction::Blocked
+            }
+        }
+    }
+
+    fn finish_setup(&mut self, result: SetupWorkerResult) -> SetupCompletion {
+        match (&self, result) {
+            (Self::SetupInProgress, SetupWorkerResult::Completed) => {
+                *self = Self::SetupRestartRequired;
+                SetupCompletion::RestartRequired
+            }
+            (Self::SetupInProgress, SetupWorkerResult::Failed) => {
+                *self = Self::Failed(CoarseStartupFailure::StartupUnavailable);
+                SetupCompletion::FinishedWithoutOwner {
+                    shutdown_requested: false,
+                }
+            }
+            (Self::SetupInProgress, SetupWorkerResult::CloseRetryRequired) => {
+                *self = Self::SetupCloseRetryRequired;
+                SetupCompletion::ShutdownIncomplete
+            }
+            (Self::Stopping, SetupWorkerResult::Completed | SetupWorkerResult::Failed) => {
+                *self = Self::Failed(CoarseStartupFailure::StartupInterrupted);
+                SetupCompletion::FinishedWithoutOwner {
+                    shutdown_requested: true,
+                }
+            }
+            (Self::Stopping, SetupWorkerResult::CloseRetryRequired) => {
+                *self = Self::SetupCloseRetryRequired;
+                SetupCompletion::ShutdownIncomplete
+            }
+            (_, SetupWorkerResult::CloseRetryRequired) => {
+                *self = Self::SetupCloseRetryRequired;
+                SetupCompletion::ShutdownIncomplete
+            }
+            _ => SetupCompletion::StaleResultIgnored,
         }
     }
 
@@ -175,8 +252,34 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
 enum ShutdownAction<Operational> {
     Exit,
     WaitForStartup,
+    WaitForSetup,
     Close(Operational),
     Blocked,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FirstTimeSetupRequestOutcome {
+    Started,
+    AlreadyInProgress,
+    StartupInProgress,
+    NotAllowed,
+    RestartRequired,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SetupWorkerResult {
+    Completed,
+    Failed,
+    CloseRetryRequired,
+}
+
+enum SetupCompletion {
+    RestartRequired,
+    FinishedWithoutOwner { shutdown_requested: bool },
+    ShutdownIncomplete,
+    StaleResultIgnored,
 }
 
 enum StartupWorkerResult<Operational, CloseFailure> {
@@ -236,8 +339,11 @@ struct LifecycleInner {
     state: LifecycleState<OperationalProductionDatabase, RetainedCloseFailure>,
     startup_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     close_worker: Option<tauri::async_runtime::JoinHandle<()>>,
+    setup_worker: Option<thread::JoinHandle<()>>,
     startup_work_resolved: bool,
     close_work_resolved: bool,
+    setup_work_resolved: bool,
+    setup_shutdown_app: Option<AppHandle>,
 }
 
 pub(crate) struct ApplicationLifecycle {
@@ -251,8 +357,11 @@ impl ApplicationLifecycle {
                 state: LifecycleState::NotStarted,
                 startup_worker: None,
                 close_worker: None,
+                setup_worker: None,
                 startup_work_resolved: false,
                 close_work_resolved: true,
+                setup_work_resolved: true,
+                setup_shutdown_app: None,
             }),
         })
     }
@@ -289,6 +398,128 @@ impl ApplicationLifecycle {
             lifecycle.complete_startup(result, &worker_app);
         });
         self.lock().startup_worker = Some(worker);
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    pub(crate) fn request_first_time_setup(
+        self: &Arc<Self>,
+        canonical_root: PathBuf,
+    ) -> FirstTimeSetupRequestOutcome {
+        self.request_first_time_setup_with(canonical_root, run_first_time_setup, spawn_setup_thread)
+    }
+
+    #[cfg(windows)]
+    fn request_first_time_setup_with<Run, Spawn>(
+        self: &Arc<Self>,
+        canonical_root: PathBuf,
+        run: Run,
+        spawn: Spawn,
+    ) -> FirstTimeSetupRequestOutcome
+    where
+        Run: FnOnce(PathBuf) -> FirstTimeSetupOrchestrationOutcome + Send + 'static,
+        Spawn: FnOnce(SetupThreadTask) -> std::io::Result<thread::JoinHandle<()>>,
+    {
+        let prior_worker = {
+            let mut inner = self.lock();
+            if matches!(inner.state, LifecycleState::Failed(_)) && inner.setup_work_resolved {
+                inner.setup_worker.take()
+            } else {
+                None
+            }
+        };
+        if let Some(worker) = prior_worker {
+            let _ = worker.join();
+        }
+
+        let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+        let lifecycle = Arc::clone(self);
+        let task: SetupThreadTask = Box::new(move || {
+            if start_receiver.recv().is_err() {
+                lifecycle.complete_setup(SetupWorkerResult::Failed);
+                return;
+            }
+            eprintln!(r#"event="first_time_setup" outcome="worker_started""#);
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(canonical_root)));
+            match outcome {
+                Ok(FirstTimeSetupOrchestrationOutcome::Completed) => {
+                    lifecycle.complete_setup(SetupWorkerResult::Completed);
+                }
+                Ok(FirstTimeSetupOrchestrationOutcome::CloseRetryRequired(owner)) => {
+                    lifecycle.complete_setup(SetupWorkerResult::CloseRetryRequired);
+                    retain_setup_close_owner(owner);
+                }
+                Ok(
+                    FirstTimeSetupOrchestrationOutcome::AlreadyInProgress
+                    | FirstTimeSetupOrchestrationOutcome::Unavailable
+                    | FirstTimeSetupOrchestrationOutcome::NotEligible(_)
+                    | FirstTimeSetupOrchestrationOutcome::TerminalFailure(_),
+                )
+                | Err(_) => lifecycle.complete_setup(SetupWorkerResult::Failed),
+            }
+        });
+
+        let mut inner = self.lock();
+        let reservation = inner.state.reserve_setup();
+        if reservation != FirstTimeSetupRequestOutcome::Started {
+            return reservation;
+        }
+        inner.setup_work_resolved = false;
+        eprintln!(r#"event="first_time_setup" outcome="reserved""#);
+        let worker = match spawn(task) {
+            Ok(worker) => worker,
+            Err(_) => {
+                inner.state.rollback_setup_reservation();
+                inner.setup_work_resolved = true;
+                return FirstTimeSetupRequestOutcome::Unavailable;
+            }
+        };
+        inner.setup_worker = Some(worker);
+        drop(inner);
+        if start_sender.send(()).is_err() {
+            self.complete_setup(SetupWorkerResult::Failed);
+            FirstTimeSetupRequestOutcome::Unavailable
+        } else {
+            FirstTimeSetupRequestOutcome::Started
+        }
+    }
+
+    fn complete_setup(&self, result: SetupWorkerResult) {
+        let (completion, shutdown_app) = {
+            let mut inner = self.lock();
+            let completion = inner.state.finish_setup(result);
+            if !matches!(completion, SetupCompletion::ShutdownIncomplete) {
+                inner.setup_work_resolved = true;
+            }
+            let shutdown_app = if matches!(
+                completion,
+                SetupCompletion::FinishedWithoutOwner {
+                    shutdown_requested: true
+                }
+            ) {
+                inner.setup_shutdown_app.take()
+            } else {
+                None
+            };
+            (completion, shutdown_app)
+        };
+        eprintln!(r#"event="first_time_setup" outcome="worker_completed""#);
+        match completion {
+            SetupCompletion::RestartRequired => {
+                eprintln!(r#"event="first_time_setup" outcome="restart_required""#);
+            }
+            SetupCompletion::FinishedWithoutOwner { shutdown_requested } => {
+                eprintln!(r#"event="first_time_setup" outcome="unavailable""#);
+                if let (true, Some(app)) = (shutdown_requested, shutdown_app) {
+                    app.exit(0);
+                }
+            }
+            SetupCompletion::ShutdownIncomplete => {
+                eprintln!(r#"event="application_shutdown" outcome="close_failed""#);
+            }
+            SetupCompletion::StaleResultIgnored => {}
+        }
     }
 
     fn complete_startup(
@@ -328,12 +559,19 @@ impl ApplicationLifecycle {
     pub(crate) fn request_shutdown(self: &Arc<Self>, app: AppHandle) {
         let action = {
             let mut inner = self.lock();
-            inner.state.begin_shutdown()
+            let action = inner.state.begin_shutdown();
+            if matches!(action, ShutdownAction::WaitForSetup) {
+                inner.setup_shutdown_app = Some(app.clone());
+            }
+            action
         };
         eprintln!(r#"event="application_shutdown" outcome="requested""#);
         match action {
             ShutdownAction::Exit => app.exit(0),
             ShutdownAction::WaitForStartup => {
+                eprintln!(r#"event="application_shutdown" outcome="pending""#);
+            }
+            ShutdownAction::WaitForSetup => {
                 eprintln!(r#"event="application_shutdown" outcome="pending""#);
             }
             ShutdownAction::Close(owner) => self.close_on_worker(owner, app),
@@ -372,13 +610,22 @@ impl ApplicationLifecycle {
         let inner = self.lock();
         inner.startup_work_resolved
             && inner.close_work_resolved
+            && inner.setup_work_resolved
             && matches!(inner.state, LifecycleState::Failed(_))
     }
 
     pub(crate) fn join_workers(&self) {
-        let (startup, close) = {
+        let (startup, close, setup) = {
             let mut inner = self.lock();
-            (inner.startup_worker.take(), inner.close_worker.take())
+            let setup = inner
+                .setup_work_resolved
+                .then(|| inner.setup_worker.take())
+                .flatten();
+            (
+                inner.startup_worker.take(),
+                inner.close_worker.take(),
+                setup,
+            )
         };
         if let Some(worker) = startup {
             let _ = tauri::async_runtime::block_on(worker);
@@ -386,6 +633,29 @@ impl ApplicationLifecycle {
         if let Some(worker) = close {
             let _ = tauri::async_runtime::block_on(worker);
         }
+        if let Some(worker) = setup {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(windows)]
+type SetupThreadTask = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(windows)]
+fn spawn_setup_thread(task: SetupThreadTask) -> std::io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("first-time-setup".to_owned())
+        .spawn(task)
+}
+
+#[cfg(windows)]
+fn retain_setup_close_owner(
+    owner: crate::first_time_setup_orchestration::FirstTimeSetupCloseRetryRequired,
+) -> ! {
+    let _owner = owner;
+    loop {
+        thread::park();
     }
 }
 
@@ -712,6 +982,9 @@ pub(crate) fn lifecycle_from_app(app: &AppHandle) -> Arc<ApplicationLifecycle> {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    use std::{rc::Rc, sync::mpsc, time::Duration};
+
     #[derive(Debug, Eq, PartialEq)]
     struct TestOwner(u8);
 
@@ -938,6 +1211,347 @@ mod tests {
         assert!(state.reserve_startup());
         assert!(!state.reserve_startup());
         assert_eq!(state.status(), StartupStatus::Starting);
+    }
+
+    #[test]
+    fn setup_reservation_accepts_only_failed_and_rejects_every_locked_state() {
+        let mut failed = LifecycleState::<TestOwner, TestCloseFailure>::Failed(
+            CoarseStartupFailure::StartupUnavailable,
+        );
+        assert_eq!(
+            failed.reserve_setup(),
+            FirstTimeSetupRequestOutcome::Started
+        );
+        assert_eq!(failed.status(), StartupStatus::SetupInProgress);
+        assert_eq!(
+            failed.reserve_setup(),
+            FirstTimeSetupRequestOutcome::AlreadyInProgress
+        );
+
+        let cases = [
+            (
+                LifecycleState::NotStarted,
+                FirstTimeSetupRequestOutcome::StartupInProgress,
+            ),
+            (
+                LifecycleState::Starting,
+                FirstTimeSetupRequestOutcome::StartupInProgress,
+            ),
+            (
+                LifecycleState::Ready(TestOwner(1)),
+                FirstTimeSetupRequestOutcome::NotAllowed,
+            ),
+            (
+                LifecycleState::Stopping,
+                FirstTimeSetupRequestOutcome::NotAllowed,
+            ),
+            (
+                LifecycleState::CloseRetryRequired(TestCloseFailure(2)),
+                FirstTimeSetupRequestOutcome::NotAllowed,
+            ),
+            (
+                LifecycleState::SetupRestartRequired,
+                FirstTimeSetupRequestOutcome::RestartRequired,
+            ),
+            (
+                LifecycleState::SetupCloseRetryRequired,
+                FirstTimeSetupRequestOutcome::NotAllowed,
+            ),
+        ];
+        for (mut state, expected) in cases {
+            assert_eq!(state.reserve_setup(), expected);
+        }
+    }
+
+    #[test]
+    fn setup_completion_is_restart_only_and_never_operational() {
+        let mut state: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::SetupInProgress;
+        assert!(matches!(
+            state.finish_setup(SetupWorkerResult::Completed),
+            SetupCompletion::RestartRequired
+        ));
+        assert_eq!(state.status(), StartupStatus::SetupRestartRequired);
+        assert!(!matches!(state, LifecycleState::Ready(_)));
+    }
+
+    #[test]
+    fn setup_failure_returns_to_unavailable_without_an_owner() {
+        let mut state: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::SetupInProgress;
+        assert!(matches!(
+            state.finish_setup(SetupWorkerResult::Failed),
+            SetupCompletion::FinishedWithoutOwner {
+                shutdown_requested: false
+            }
+        ));
+        assert!(matches!(state, LifecycleState::Failed(_)));
+        assert_eq!(state.status(), StartupStatus::Unavailable);
+    }
+
+    #[test]
+    fn setup_close_retention_is_payload_free_and_blocks_exit() {
+        let mut state: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::SetupInProgress;
+        assert!(matches!(
+            state.finish_setup(SetupWorkerResult::CloseRetryRequired),
+            SetupCompletion::ShutdownIncomplete
+        ));
+        assert!(matches!(state, LifecycleState::SetupCloseRetryRequired));
+        assert_eq!(state.status(), StartupStatus::ShutdownIncomplete);
+
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::SetupCloseRetryRequired;
+            inner.startup_work_resolved = true;
+            inner.setup_work_resolved = false;
+        }
+        assert!(!lifecycle.may_exit());
+    }
+
+    #[test]
+    fn shutdown_during_setup_drains_without_installing_restart_required() {
+        for result in [SetupWorkerResult::Completed, SetupWorkerResult::Failed] {
+            let mut state: LifecycleState<TestOwner, TestCloseFailure> =
+                LifecycleState::SetupInProgress;
+            assert!(matches!(
+                state.begin_shutdown(),
+                ShutdownAction::WaitForSetup
+            ));
+            assert_eq!(state.status(), StartupStatus::Stopping);
+            assert!(matches!(
+                state.finish_setup(result),
+                SetupCompletion::FinishedWithoutOwner {
+                    shutdown_requested: true
+                }
+            ));
+            assert!(matches!(state, LifecycleState::Failed(_)));
+            assert_ne!(state.status(), StartupStatus::SetupRestartRequired);
+        }
+    }
+
+    #[test]
+    fn setup_close_failure_after_shutdown_remains_blocked() {
+        let mut state: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::SetupInProgress;
+        assert!(matches!(
+            state.begin_shutdown(),
+            ShutdownAction::WaitForSetup
+        ));
+        assert!(matches!(
+            state.finish_setup(SetupWorkerResult::CloseRetryRequired),
+            SetupCompletion::ShutdownIncomplete
+        ));
+        assert!(matches!(state.begin_shutdown(), ShutdownAction::Blocked));
+        assert_eq!(state.status(), StartupStatus::ShutdownIncomplete);
+    }
+
+    #[test]
+    fn setup_restart_required_shuts_down_without_database_close_work() {
+        let mut state: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::SetupRestartRequired;
+        assert!(matches!(state.begin_shutdown(), ShutdownAction::Exit));
+        assert!(matches!(state, LifecycleState::Failed(_)));
+    }
+
+    #[cfg(windows)]
+    fn lifecycle_failed_and_resolved() -> Arc<ApplicationLifecycle> {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable);
+            inner.startup_work_resolved = true;
+        }
+        lifecycle
+    }
+
+    #[cfg(windows)]
+    fn wait_for_setup_status(lifecycle: &ApplicationLifecycle, expected: StartupStatus) {
+        for _ in 0..200 {
+            if lifecycle.status() == expected {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("setup worker did not reach {expected:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn setup_worker_spawn_failure_rolls_back_the_reservation() {
+        let lifecycle = lifecycle_failed_and_resolved();
+        let result = lifecycle.request_first_time_setup_with(
+            PathBuf::from(r"C:\synthetic-root"),
+            |_| FirstTimeSetupOrchestrationOutcome::Completed,
+            |task| {
+                drop(task);
+                Err(std::io::Error::other("synthetic spawn failure"))
+            },
+        );
+        assert_eq!(result, FirstTimeSetupRequestOutcome::Unavailable);
+        let inner = lifecycle.lock();
+        assert_eq!(inner.state.status(), StartupStatus::Unavailable);
+        assert!(inner.setup_worker.is_none());
+        assert!(inner.setup_work_resolved);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_in_progress_rejects_setup_without_invoking_the_spawner() {
+        let lifecycle = ApplicationLifecycle::new();
+        let result = lifecycle.request_first_time_setup_with(
+            PathBuf::from(r"C:\synthetic-root"),
+            |_| FirstTimeSetupOrchestrationOutcome::Completed,
+            |_| panic!("setup spawner must not run"),
+        );
+        assert_eq!(result, FirstTimeSetupRequestOutcome::StartupInProgress);
+        assert!(lifecycle.lock().setup_worker.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dedicated_setup_worker_completes_to_restart_required() {
+        let lifecycle = lifecycle_failed_and_resolved();
+        assert_eq!(
+            lifecycle.request_first_time_setup_with(
+                PathBuf::from(r"C:\synthetic-root"),
+                |_| FirstTimeSetupOrchestrationOutcome::Completed,
+                spawn_setup_thread,
+            ),
+            FirstTimeSetupRequestOutcome::Started
+        );
+        wait_for_setup_status(&lifecycle, StartupStatus::SetupRestartRequired);
+        assert_ne!(lifecycle.status(), StartupStatus::Ready);
+        lifecycle.join_workers();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn setup_worker_failure_and_panic_fail_closed_to_unavailable() {
+        for panics in [false, true] {
+            let lifecycle = lifecycle_failed_and_resolved();
+            assert_eq!(
+                lifecycle.request_first_time_setup_with(
+                    PathBuf::from(r"C:\synthetic-root"),
+                    move |_| {
+                        if panics {
+                            panic!("synthetic setup worker panic");
+                        }
+                        FirstTimeSetupOrchestrationOutcome::Unavailable
+                    },
+                    spawn_setup_thread,
+                ),
+                FirstTimeSetupRequestOutcome::Started
+            );
+            wait_for_setup_status(&lifecycle, StartupStatus::Unavailable);
+            assert_ne!(lifecycle.status(), StartupStatus::Ready);
+            lifecycle.join_workers();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_setup_reservation_prevents_a_second_worker() {
+        let lifecycle = lifecycle_failed_and_resolved();
+        let (release_sender, release_receiver) = mpsc::channel();
+        assert_eq!(
+            lifecycle.request_first_time_setup_with(
+                PathBuf::from(r"C:\synthetic-root"),
+                move |_| {
+                    release_receiver.recv().expect("release setup worker");
+                    FirstTimeSetupOrchestrationOutcome::Unavailable
+                },
+                spawn_setup_thread,
+            ),
+            FirstTimeSetupRequestOutcome::Started
+        );
+        assert_eq!(
+            lifecycle.request_first_time_setup_with(
+                PathBuf::from(r"C:\second-synthetic-root"),
+                |_| FirstTimeSetupOrchestrationOutcome::Completed,
+                spawn_setup_thread,
+            ),
+            FirstTimeSetupRequestOutcome::AlreadyInProgress
+        );
+        release_sender.send(()).expect("release first setup worker");
+        wait_for_setup_status(&lifecycle, StartupStatus::Unavailable);
+        lifecycle.join_workers();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn synthetic_non_send_owner_is_created_retained_and_dropped_on_one_os_thread() {
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let owner = Rc::new(());
+            let created_on = thread::current().id();
+            sender.send(created_on).expect("report creation thread");
+            thread::park_timeout(Duration::from_millis(5));
+            assert_eq!(Rc::strong_count(&owner), 1);
+            sender
+                .send(thread::current().id())
+                .expect("report retention thread");
+            drop(owner);
+            sender
+                .send(thread::current().id())
+                .expect("report drop thread");
+        });
+        let created_on = receiver.recv().expect("creation thread");
+        worker.thread().unpark();
+        assert_eq!(receiver.recv().expect("retention thread"), created_on);
+        assert_eq!(receiver.recv().expect("drop thread"), created_on);
+        worker.join().expect("synthetic owner worker");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_setup_close_owner_is_matched_and_retained_only_inside_worker() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let inner = SOURCE
+            .split_once("struct LifecycleInner {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(!inner.contains("FirstTimeSetupCloseRetryRequired"));
+        assert!(SOURCE.contains("FirstTimeSetupOrchestrationOutcome::CloseRetryRequired(owner)"));
+        assert!(SOURCE.contains("retain_setup_close_owner(owner)"));
+        let retention = SOURCE
+            .split_once("fn retain_setup_close_owner(")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(retention.contains("let _owner = owner;"));
+        assert!(retention.contains("thread::park()"));
+        assert!(!retention.contains("retry_close"));
+    }
+
+    #[test]
+    fn setup_integration_adds_no_command_or_startup_reentry() {
+        let bootstrap = include_str!("lib.rs");
+        assert!(!bootstrap.contains("request_first_time_setup"));
+        assert!(!bootstrap.contains("run_first_time_setup"));
+        assert!(
+            bootstrap.contains(
+                ".invoke_handler(tauri::generate_handler![health_check, startup_status])"
+            )
+        );
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let setup_request = SOURCE
+            .split_once("fn request_first_time_setup_with")
+            .unwrap()
+            .1
+            .split_once("fn complete_setup")
+            .unwrap()
+            .0;
+        assert!(!setup_request.contains("run_production_startup"));
+        assert!(!setup_request.contains("activate_production_database_for_operational_use"));
+        assert!(!setup_request.contains("OperationalProductionDatabase"));
     }
 
     #[test]

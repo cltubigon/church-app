@@ -114,6 +114,19 @@ describe("application foundation", () => {
     await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith("startup_status"));
   });
 
+  it.each([
+    ["setupInProgress", "First-time setup is in progress."],
+    [
+      "setupRestartRequired",
+      "First-time setup is complete. Restart the application to continue.",
+    ],
+  ])("renders %s as a non-operational setup state", async (status, message) => {
+    mockedInvoke.mockResolvedValue(status);
+    renderApp();
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
   it("renders only a coarse unavailable state when startup status cannot be read", async () => {
     mockedInvoke.mockResolvedValue("sensitive backend detail");
     renderApp();

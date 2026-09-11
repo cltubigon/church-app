@@ -4,6 +4,8 @@ export type StartupStatus =
   | "starting"
   | "ready"
   | "unavailable"
+  | "setupInProgress"
+  | "setupRestartRequired"
   | "stopping"
   | "shutdownIncomplete";
 
@@ -11,6 +13,8 @@ const startupStatuses = new Set<StartupStatus>([
   "starting",
   "ready",
   "unavailable",
+  "setupInProgress",
+  "setupRestartRequired",
   "stopping",
   "shutdownIncomplete",
 ]);

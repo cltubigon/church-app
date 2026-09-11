@@ -53,6 +53,8 @@ function StartupBoundary({ status }: { status: Exclude<StartupStatus, "ready"> }
   const content = {
     starting: "Preparing the application securely. This may take some time.",
     unavailable: "The application is unavailable.",
+    setupInProgress: "First-time setup is in progress.",
+    setupRestartRequired: "First-time setup is complete. Restart the application to continue.",
     stopping: "The application is stopping.",
     shutdownIncomplete: "The application could not complete shutdown.",
   }[status];
@@ -78,7 +80,12 @@ export function App() {
       const status = await getStartupStatus();
       if (!active) return;
       setStartupStatus(status);
-      if (status === "starting" || status === "ready" || status === "stopping") {
+      if (
+        status === "starting" ||
+        status === "ready" ||
+        status === "setupInProgress" ||
+        status === "stopping"
+      ) {
         timer = setTimeout(refresh, 500);
       }
     };
