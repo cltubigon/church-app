@@ -17,6 +17,10 @@ use tauri::{AppHandle, Manager};
 use crate::{
     database_key_active_wrapper_loader::load_active_database_key_wrapper,
     database_key_presence::inspect_database_key_active_presence,
+    first_time_setup_exclusivity::{
+        FirstTimeSetupCrossProcessExclusivity, FirstTimeSetupCrossProcessExclusivityOutcome,
+        acquire_first_time_setup_cross_process_exclusivity,
+    },
     first_time_setup_orchestration::{FirstTimeSetupOrchestrationOutcome, run_first_time_setup},
     installation_evidence_persistence::observe_production_installation_evidence,
     installation_evidence_protection::{
@@ -84,6 +88,7 @@ enum LifecycleState<Operational, CloseFailure> {
     SetupRestartRequired,
     Stopping,
     CloseRetryRequired(CloseFailure),
+    StartupCloseRetryRequired,
     SetupCloseRetryRequired,
 }
 
@@ -96,9 +101,9 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
             Self::SetupInProgress => StartupStatus::SetupInProgress,
             Self::SetupRestartRequired => StartupStatus::SetupRestartRequired,
             Self::Stopping => StartupStatus::Stopping,
-            Self::CloseRetryRequired(_) | Self::SetupCloseRetryRequired => {
-                StartupStatus::ShutdownIncomplete
-            }
+            Self::CloseRetryRequired(_)
+            | Self::StartupCloseRetryRequired
+            | Self::SetupCloseRetryRequired => StartupStatus::ShutdownIncomplete,
         }
     }
 
@@ -122,9 +127,10 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
                 FirstTimeSetupRequestOutcome::Started
             }
             Self::NotStarted | Self::Starting => FirstTimeSetupRequestOutcome::StartupInProgress,
-            Self::Ready(_) | Self::Stopping | Self::CloseRetryRequired(_) => {
-                FirstTimeSetupRequestOutcome::NotAllowed
-            }
+            Self::Ready(_)
+            | Self::Stopping
+            | Self::CloseRetryRequired(_)
+            | Self::StartupCloseRetryRequired => FirstTimeSetupRequestOutcome::NotAllowed,
             Self::SetupInProgress => FirstTimeSetupRequestOutcome::AlreadyInProgress,
             Self::SetupRestartRequired => FirstTimeSetupRequestOutcome::RestartRequired,
             Self::SetupCloseRetryRequired => FirstTimeSetupRequestOutcome::NotAllowed,
@@ -157,6 +163,10 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
             Self::Stopping => ShutdownAction::WaitForStartup,
             Self::CloseRetryRequired(failure) => {
                 *self = Self::CloseRetryRequired(failure);
+                ShutdownAction::Blocked
+            }
+            Self::StartupCloseRetryRequired => {
+                *self = Self::StartupCloseRetryRequired;
                 ShutdownAction::Blocked
             }
             Self::SetupCloseRetryRequired => {
@@ -580,6 +590,12 @@ impl ApplicationLifecycle {
         }
     }
 
+    #[cfg(windows)]
+    fn retain_startup_close_failure(&self) {
+        let mut inner = self.lock();
+        inner.state = LifecycleState::StartupCloseRetryRequired;
+    }
+
     pub(crate) fn request_shutdown(self: &Arc<Self>, app: AppHandle) {
         let action = {
             let mut inner = self.lock();
@@ -641,15 +657,14 @@ impl ApplicationLifecycle {
     pub(crate) fn join_workers(&self) {
         let (startup, close, setup) = {
             let mut inner = self.lock();
+            let startup = (!matches!(inner.state, LifecycleState::StartupCloseRetryRequired))
+                .then(|| inner.startup_worker.take())
+                .flatten();
             let setup = inner
                 .setup_work_resolved
                 .then(|| inner.setup_worker.take())
                 .flatten();
-            (
-                inner.startup_worker.take(),
-                inner.close_worker.take(),
-                setup,
-            )
+            (startup, inner.close_worker.take(), setup)
         };
         if let Some(worker) = startup {
             let _ = tauri::async_runtime::block_on(worker);
@@ -678,6 +693,20 @@ fn retain_setup_close_owner(
     owner: crate::first_time_setup_orchestration::FirstTimeSetupCloseRetryRequired,
 ) -> ! {
     let _owner = owner;
+    loop {
+        thread::park();
+    }
+}
+
+#[cfg(windows)]
+fn retain_startup_close_owner<T>(
+    lifecycle: &ApplicationLifecycle,
+    failure: T,
+    exclusivity: FirstTimeSetupCrossProcessExclusivity,
+) -> ! {
+    lifecycle.retain_startup_close_failure();
+    let _failure = failure;
+    let _exclusivity = exclusivity;
     loop {
         thread::park();
     }
@@ -721,6 +750,12 @@ fn run_production_startup(
     if lifecycle.shutdown_pending() {
         return interrupted();
     }
+
+    let exclusivity = match acquire_first_time_setup_cross_process_exclusivity() {
+        FirstTimeSetupCrossProcessExclusivityOutcome::Acquired(owner) => owner,
+        FirstTimeSetupCrossProcessExclusivityOutcome::AlreadyHeld
+        | FirstTimeSetupCrossProcessExclusivityOutcome::Unavailable => return unavailable(),
+    };
 
     let early_installation_evidence = observe_production_installation_evidence(&evidence_paths);
     if lifecycle.shutdown_pending() {
@@ -771,37 +806,41 @@ fn run_production_startup(
             return unavailable();
         }
         Err(crate::production_database_connection_handoff::ProductionDatabaseConnectionOpenError::CloseFailed(failure)) => {
-            return StartupWorkerResult::CloseRetryRequired(RetainedCloseFailure::Construction(failure));
+            retain_startup_close_owner(
+                lifecycle,
+                RetainedCloseFailure::Construction(failure),
+                exclusivity,
+            )
         }
     };
     if lifecycle.shutdown_pending() {
-        return close_interrupted_owner(opened);
+        return close_protected_interrupted_owner(opened, lifecycle, exclusivity);
     }
 
     let validated = match validate_production_database_readability_and_integrity(opened) {
         ProductionDatabaseValidationOutcome::Validated(owner) => owner,
         ProductionDatabaseValidationOutcome::Failed(_) => return unavailable(),
-        ProductionDatabaseValidationOutcome::CloseFailed(failure) => {
-            return StartupWorkerResult::CloseRetryRequired(RetainedCloseFailure::Validation(
-                failure,
-            ));
-        }
+        ProductionDatabaseValidationOutcome::CloseFailed(failure) => retain_startup_close_owner(
+            lifecycle,
+            RetainedCloseFailure::Validation(failure),
+            exclusivity,
+        ),
     };
     if lifecycle.shutdown_pending() {
-        return close_interrupted_owner(validated);
+        return close_protected_interrupted_owner(validated, lifecycle, exclusivity);
     }
 
     let metadata = match validate_production_database_live_metadata_and_headers(validated) {
         LiveMetadataAndHeaderValidationOutcome::Validated(owner) => owner,
         LiveMetadataAndHeaderValidationOutcome::Failed(_) => return unavailable(),
-        LiveMetadataAndHeaderValidationOutcome::CloseFailed(failure) => {
-            return StartupWorkerResult::CloseRetryRequired(RetainedCloseFailure::Metadata(
-                failure,
-            ));
-        }
+        LiveMetadataAndHeaderValidationOutcome::CloseFailed(failure) => retain_startup_close_owner(
+            lifecycle,
+            RetainedCloseFailure::Metadata(failure),
+            exclusivity,
+        ),
     };
     if lifecycle.shutdown_pending() {
-        return close_interrupted_owner(metadata);
+        return close_protected_interrupted_owner(metadata, lifecycle, exclusivity);
     }
 
     let correspondence =
@@ -809,44 +848,48 @@ fn run_production_startup(
             DatabaseEvidenceCorrespondenceValidationOutcome::Validated(owner) => owner,
             DatabaseEvidenceCorrespondenceValidationOutcome::Mismatch(_) => return unavailable(),
             DatabaseEvidenceCorrespondenceValidationOutcome::CloseFailed(failure) => {
-                return StartupWorkerResult::CloseRetryRequired(
+                retain_startup_close_owner(
+                    lifecycle,
                     RetainedCloseFailure::Correspondence(failure),
-                );
+                    exclusivity,
+                )
             }
         };
     if lifecycle.shutdown_pending() {
-        return close_interrupted_owner(correspondence);
+        return close_protected_interrupted_owner(correspondence, lifecycle, exclusivity);
     }
 
     let fresh = match validate_production_database_freshness(correspondence, anchor_observation) {
         ProductionDatabaseFreshnessValidationOutcome::Validated(owner) => owner,
         ProductionDatabaseFreshnessValidationOutcome::Failed(_) => return unavailable(),
         ProductionDatabaseFreshnessValidationOutcome::CloseFailed(failure) => {
-            return StartupWorkerResult::CloseRetryRequired(RetainedCloseFailure::Freshness(
-                failure,
-            ));
+            retain_startup_close_owner(
+                lifecycle,
+                RetainedCloseFailure::Freshness(failure),
+                exclusivity,
+            )
         }
     };
     if lifecycle.shutdown_pending() {
-        return close_interrupted_owner(fresh);
+        return close_protected_interrupted_owner(fresh, lifecycle, exclusivity);
     }
 
     #[cfg(debug_assertions)]
     if pause_requested {
         if pause_before_final_installation_observation() != ManualStartupPauseOutcome::Resumed {
-            return close_unavailable_owner(fresh);
+            return close_protected_unavailable_owner(fresh, lifecycle, exclusivity);
         }
         if lifecycle.shutdown_pending() {
-            return close_interrupted_owner(fresh);
+            return close_protected_interrupted_owner(fresh, lifecycle, exclusivity);
         }
     }
 
     let final_installation_evidence = observe_production_installation_evidence(&evidence_paths);
     if lifecycle.shutdown_pending() {
-        return close_interrupted_owner(fresh);
+        return close_protected_interrupted_owner(fresh, lifecycle, exclusivity);
     }
     if !is_initialized_with_expected_storage(&final_installation_evidence) {
-        return close_unavailable_owner(fresh);
+        return close_protected_unavailable_owner(fresh, lifecycle, exclusivity);
     }
 
     let authorized = match authorize_production_database_startup(fresh, final_installation_evidence)
@@ -854,11 +897,14 @@ fn run_production_startup(
         ProductionDatabaseStartupAuthorizationOutcome::Authorized(owner) => owner,
         ProductionDatabaseStartupAuthorizationOutcome::Failed(_) => return unavailable(),
         ProductionDatabaseStartupAuthorizationOutcome::CloseFailed(failure) => {
-            return StartupWorkerResult::CloseRetryRequired(RetainedCloseFailure::Authorization(
-                failure,
-            ));
+            retain_startup_close_owner(
+                lifecycle,
+                RetainedCloseFailure::Authorization(failure),
+                exclusivity,
+            )
         }
     };
+    drop(exclusivity);
     if lifecycle.shutdown_pending() {
         return close_interrupted_owner(authorized);
     }
@@ -928,19 +974,24 @@ fn is_initialized_with_expected_storage(evidence: &InstallationEvidence) -> bool
 }
 
 #[cfg(windows)]
-fn close_unavailable_owner<T>(
+fn close_protected_unavailable_owner<T>(
     owner: T,
+    lifecycle: &ApplicationLifecycle,
+    exclusivity: FirstTimeSetupCrossProcessExclusivity,
 ) -> StartupWorkerResult<OperationalProductionDatabase, RetainedCloseFailure>
 where
     T: CanonicallyClosable,
 {
     match owner.close_canonically() {
         ProductionDatabaseConnectionCloseOutcome::Closed => {
+            drop(exclusivity);
             StartupWorkerResult::Failed(CoarseStartupFailure::StartupUnavailable)
         }
-        ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
-            StartupWorkerResult::CloseRetryRequired(RetainedCloseFailure::Operational(failure))
-        }
+        ProductionDatabaseConnectionCloseOutcome::Failed(failure) => retain_startup_close_owner(
+            lifecycle,
+            RetainedCloseFailure::Operational(failure),
+            exclusivity,
+        ),
     }
 }
 
@@ -958,6 +1009,28 @@ where
         ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
             StartupWorkerResult::CloseRetryRequired(RetainedCloseFailure::Operational(failure))
         }
+    }
+}
+
+#[cfg(windows)]
+fn close_protected_interrupted_owner<T>(
+    owner: T,
+    lifecycle: &ApplicationLifecycle,
+    exclusivity: FirstTimeSetupCrossProcessExclusivity,
+) -> StartupWorkerResult<OperationalProductionDatabase, RetainedCloseFailure>
+where
+    T: CanonicallyClosable,
+{
+    match owner.close_canonically() {
+        ProductionDatabaseConnectionCloseOutcome::Closed => {
+            drop(exclusivity);
+            StartupWorkerResult::Failed(CoarseStartupFailure::StartupInterrupted)
+        }
+        ProductionDatabaseConnectionCloseOutcome::Failed(failure) => retain_startup_close_owner(
+            lifecycle,
+            RetainedCloseFailure::Operational(failure),
+            exclusivity,
+        ),
     }
 }
 
@@ -1232,7 +1305,11 @@ mod tests {
             pause_to_observation.matches("shutdown_pending()").count(),
             1
         );
-        assert!(pause_to_observation.contains("return close_interrupted_owner(fresh)"));
+        assert!(
+            pause_to_observation.contains(
+                "return close_protected_interrupted_owner(fresh, lifecycle, exclusivity)"
+            )
+        );
         assert!(!pause_to_observation.contains("observe_production_installation_evidence"));
         assert!(!pause_to_observation.contains("authorize_production_database_startup"));
         assert!(!pause_to_observation.contains("StartupWorkerResult::Ready"));
@@ -1258,6 +1335,331 @@ mod tests {
             assert!(!frontend_source.contains("CHURCH_APP_MANUAL_STARTUP_PAUSE"));
             assert!(!frontend_source.contains("manual_startup_pause"));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_exclusivity_wraps_every_decisive_observation_and_authorization_only() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let worker = SOURCE
+            .split_once("fn run_production_startup(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nstruct StartupPaths")
+            .unwrap()
+            .0;
+
+        let paths = worker
+            .find("let paths = match StartupPaths::from_app(app)")
+            .unwrap();
+        let initial_shutdown = worker.find("if lifecycle.shutdown_pending()").unwrap();
+        let acquire = worker
+            .find("let exclusivity = match acquire_first_time_setup_cross_process_exclusivity()")
+            .unwrap();
+        let early_observation = worker.find("let early_installation_evidence").unwrap();
+        let final_observation = worker.find("let final_installation_evidence").unwrap();
+        let authorization = worker
+            .find("authorize_production_database_startup(fresh, final_installation_evidence)")
+            .unwrap();
+        let release = worker.find("drop(exclusivity)").unwrap();
+        let post_authorization_shutdown = worker[release..]
+            .find("if lifecycle.shutdown_pending()")
+            .unwrap()
+            + release;
+        let activation = worker
+            .find("activate_production_database_for_operational_use(authorized)")
+            .unwrap();
+
+        assert!(paths < initial_shutdown);
+        assert!(initial_shutdown < acquire);
+        assert!(acquire < early_observation);
+        assert!(early_observation < final_observation);
+        assert!(final_observation < authorization);
+        assert!(authorization < release);
+        assert!(release < post_authorization_shutdown);
+        assert!(post_authorization_shutdown < activation);
+        assert_eq!(worker.matches("drop(exclusivity)").count(), 1);
+        assert_eq!(
+            worker
+                .matches("acquire_first_time_setup_cross_process_exclusivity()")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_exclusivity_acquisition_maps_contention_and_unavailability_before_observation() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let worker = SOURCE
+            .split_once("fn run_production_startup(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nstruct StartupPaths")
+            .unwrap()
+            .0;
+        let acquisition = worker
+            .split_once("let exclusivity = match")
+            .unwrap()
+            .1
+            .split_once("let early_installation_evidence")
+            .unwrap()
+            .0;
+
+        assert!(
+            acquisition
+                .contains("FirstTimeSetupCrossProcessExclusivityOutcome::Acquired(owner) => owner")
+        );
+        assert!(acquisition.contains(
+            "FirstTimeSetupCrossProcessExclusivityOutcome::AlreadyHeld\n        | FirstTimeSetupCrossProcessExclusivityOutcome::Unavailable => return unavailable()"
+        ));
+        assert!(!acquisition.contains("observe_production_installation_evidence"));
+        assert!(!acquisition.contains("loop"));
+        assert!(!acquisition.contains("while"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn abandoned_mutex_ownership_uses_the_same_acquired_startup_path() {
+        const EXCLUSIVITY_SOURCE: &str = include_str!("first_time_setup_exclusivity.rs");
+        let finish = EXCLUSIVITY_SOURCE
+            .split_once("fn finish_acquisition(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        assert!(
+            finish
+                .contains("WaitDisposition::Acquired | WaitDisposition::AbandonedAndAcquired => (")
+        );
+        assert_eq!(
+            finish
+                .matches("FirstTimeSetupCrossProcessExclusivityOutcome::Acquired(")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_mutex_owner_blocks_a_setup_side_acquisition_until_drop() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        const EXCLUSIVITY_SOURCE: &str = include_str!("first_time_setup_exclusivity.rs");
+        let worker = SOURCE
+            .split_once("fn run_production_startup(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nstruct StartupPaths")
+            .unwrap()
+            .0;
+        assert!(
+            worker
+                .contains("FirstTimeSetupCrossProcessExclusivityOutcome::Acquired(owner) => owner")
+        );
+        assert!(worker.contains("let exclusivity = match"));
+        assert!(worker.contains("drop(exclusivity)"));
+
+        let primitive_regression = EXCLUSIVITY_SOURCE
+            .split_once(
+                "fn first_acquisition_succeeds_second_is_non_reentrant_and_drop_permits_later_acquisition()",
+            )
+            .unwrap()
+            .1
+            .split_once("#[test]")
+            .unwrap()
+            .0;
+        assert!(
+            primitive_regression
+                .contains("FirstTimeSetupCrossProcessExclusivityOutcome::AlreadyHeld")
+        );
+        assert_eq!(
+            primitive_regression
+                .matches("acquire_first_time_setup_cross_process_exclusivity()")
+                .count(),
+            3
+        );
+        assert!(primitive_regression.contains("drop(first)"));
+    }
+
+    #[test]
+    fn startup_close_retry_marker_is_payload_free_blocked_and_not_setup_eligible() {
+        let mut state: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::StartupCloseRetryRequired;
+        assert_eq!(state.status(), StartupStatus::ShutdownIncomplete);
+        assert_eq!(
+            state.reserve_setup(),
+            FirstTimeSetupRequestOutcome::NotAllowed
+        );
+        assert!(matches!(state.begin_shutdown(), ShutdownAction::Blocked));
+        assert!(matches!(state, LifecycleState::StartupCloseRetryRequired));
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let definition = SOURCE
+            .split_once("enum LifecycleState<Operational, CloseFailure> {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(definition.contains("StartupCloseRetryRequired,"));
+        assert!(!definition.contains("StartupCloseRetryRequired("));
+    }
+
+    #[test]
+    fn startup_close_retry_marker_keeps_may_exit_false() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::StartupCloseRetryRequired;
+            inner.startup_work_resolved = true;
+            inner.close_work_resolved = true;
+            inner.setup_work_resolved = true;
+        }
+        assert!(!lifecycle.may_exit());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn join_workers_does_not_join_an_intentionally_retained_startup_worker() {
+        let lifecycle = ApplicationLifecycle::new();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let worker = tauri::async_runtime::spawn_blocking(move || {
+            release_receiver.recv().expect("release synthetic worker");
+        });
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::StartupCloseRetryRequired;
+            inner.startup_worker = Some(worker);
+            inner.startup_work_resolved = false;
+        }
+
+        lifecycle.join_workers();
+        assert!(lifecycle.lock().startup_worker.is_some());
+
+        release_sender.send(()).expect("release synthetic worker");
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.startup_work_resolved = true;
+        }
+        lifecycle.join_workers();
+        assert!(lifecycle.lock().startup_worker.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mutex_coupled_close_ownership_is_retained_only_on_the_startup_worker() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let inner = SOURCE
+            .split_once("struct LifecycleInner {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(!inner.contains("FirstTimeSetupCrossProcessExclusivity"));
+        assert!(!inner.contains("StartupClose"));
+
+        let retention = SOURCE
+            .split_once("fn retain_startup_close_owner<T>(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nfn close_operational")
+            .unwrap()
+            .0;
+        assert!(retention.contains("failure: T"));
+        assert!(retention.contains("exclusivity: FirstTimeSetupCrossProcessExclusivity"));
+        assert!(retention.contains("lifecycle.retain_startup_close_failure()"));
+        assert!(retention.contains("let _failure = failure"));
+        assert!(retention.contains("let _exclusivity = exclusivity"));
+        assert!(retention.contains("thread::park()"));
+        assert!(!retention.contains("retry_close"));
+        assert!(!retention.contains("Arc<"));
+        assert!(!retention.contains("Mutex<"));
+        assert!(!retention.contains("send("));
+
+        let startup_spawn = SOURCE
+            .split_once("let worker = tauri::async_runtime::spawn_blocking(move || {")
+            .unwrap()
+            .1
+            .split_once("self.lock().startup_worker = Some(worker)")
+            .unwrap()
+            .0;
+        assert!(startup_spawn.contains("let result = run_production_startup"));
+        assert!(startup_spawn.contains("lifecycle.complete_startup(result"));
+        assert!(!startup_spawn.contains("return result"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_close_paths_retain_on_failure_and_release_only_after_success() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        for helper_name in [
+            "fn close_protected_unavailable_owner<T>(",
+            "fn close_protected_interrupted_owner<T>(",
+        ] {
+            let helper = SOURCE
+                .split_once(helper_name)
+                .unwrap()
+                .1
+                .split_once("\n}\n")
+                .unwrap()
+                .0;
+            let close = helper.find("owner.close_canonically()").unwrap();
+            let release = helper.find("drop(exclusivity)").unwrap();
+            let retain = helper.find("retain_startup_close_owner(").unwrap();
+            assert!(close < release);
+            assert!(close < retain);
+            assert!(!helper[retain..].contains("drop(exclusivity)"));
+        }
+
+        let worker = SOURCE
+            .split_once("fn run_production_startup(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nstruct StartupPaths")
+            .unwrap()
+            .0;
+        for failure in [
+            "RetainedCloseFailure::Construction(failure)",
+            "RetainedCloseFailure::Validation(failure)",
+            "RetainedCloseFailure::Metadata(failure)",
+            "RetainedCloseFailure::Correspondence(failure)",
+            "RetainedCloseFailure::Freshness(failure)",
+            "RetainedCloseFailure::Authorization(failure)",
+        ] {
+            assert!(worker.contains(failure));
+        }
+        assert_eq!(worker.matches("retain_startup_close_owner(").count(), 6);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_authorization_shutdown_keeps_existing_movable_operational_close_path() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let worker = SOURCE
+            .split_once("fn run_production_startup(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nstruct StartupPaths")
+            .unwrap()
+            .0;
+        let release = worker.find("drop(exclusivity)").unwrap();
+        let after_release = &worker[release..];
+        assert!(after_release.contains("return close_interrupted_owner(authorized)"));
+        assert!(!after_release.contains("close_protected_interrupted_owner"));
+
+        let ordinary_close = SOURCE
+            .split_once("fn close_interrupted_owner<T>(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nfn close_protected_interrupted_owner")
+            .unwrap()
+            .0;
+        assert!(ordinary_close.contains(
+            "StartupWorkerResult::CloseRetryRequired(RetainedCloseFailure::Operational(failure))"
+        ));
     }
 
     #[test]
