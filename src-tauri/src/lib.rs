@@ -99,7 +99,9 @@ fn health_check() -> Result<HealthResponse, HealthError> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    use application_lifecycle::{ApplicationLifecycle, lifecycle_from_app, startup_status};
+    use application_lifecycle::{
+        ApplicationLifecycle, lifecycle_from_app, request_first_time_setup, startup_status,
+    };
 
     let lifecycle = ApplicationLifecycle::new();
     tauri::Builder::default()
@@ -108,7 +110,11 @@ pub fn run() {
             lifecycle.start(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![health_check, startup_status])
+        .invoke_handler(tauri::generate_handler![
+            health_check,
+            startup_status,
+            request_first_time_setup
+        ])
         .build(tauri::generate_context!())
         .expect("the Church App foundation runtime could not start")
         .run(|app, event| {

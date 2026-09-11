@@ -268,6 +268,30 @@ pub(crate) enum FirstTimeSetupRequestOutcome {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum FirstTimeSetupRequestResult {
+    Started,
+    AlreadyInProgress,
+    StartupInProgress,
+    NotAllowed,
+    RestartRequired,
+    Unavailable,
+}
+
+impl From<FirstTimeSetupRequestOutcome> for FirstTimeSetupRequestResult {
+    fn from(outcome: FirstTimeSetupRequestOutcome) -> Self {
+        match outcome {
+            FirstTimeSetupRequestOutcome::Started => Self::Started,
+            FirstTimeSetupRequestOutcome::AlreadyInProgress => Self::AlreadyInProgress,
+            FirstTimeSetupRequestOutcome::StartupInProgress => Self::StartupInProgress,
+            FirstTimeSetupRequestOutcome::NotAllowed => Self::NotAllowed,
+            FirstTimeSetupRequestOutcome::RestartRequired => Self::RestartRequired,
+            FirstTimeSetupRequestOutcome::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SetupWorkerResult {
     Completed,
@@ -974,6 +998,37 @@ pub(crate) fn startup_status(state: tauri::State<'_, Arc<ApplicationLifecycle>>)
     state.status()
 }
 
+#[tauri::command]
+pub(crate) fn request_first_time_setup(app: AppHandle) -> FirstTimeSetupRequestResult {
+    #[cfg(windows)]
+    return request_first_time_setup_with(
+        || app.path().app_local_data_dir().map_err(|_| ()),
+        |canonical_root| lifecycle_from_app(&app).request_first_time_setup(canonical_root),
+    );
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        FirstTimeSetupRequestResult::Unavailable
+    }
+}
+
+#[cfg(windows)]
+fn request_first_time_setup_with<Resolve, Request>(
+    resolve_canonical_root: Resolve,
+    request: Request,
+) -> FirstTimeSetupRequestResult
+where
+    Resolve: FnOnce() -> Result<PathBuf, ()>,
+    Request: FnOnce(PathBuf) -> FirstTimeSetupRequestOutcome,
+{
+    let canonical_root = match resolve_canonical_root() {
+        Ok(canonical_root) => canonical_root,
+        Err(()) => return FirstTimeSetupRequestResult::Unavailable,
+    };
+    request(canonical_root).into()
+}
+
 pub(crate) fn lifecycle_from_app(app: &AppHandle) -> Arc<ApplicationLifecycle> {
     Arc::clone(app.state::<Arc<ApplicationLifecycle>>().inner())
 }
@@ -1531,13 +1586,12 @@ mod tests {
     }
 
     #[test]
-    fn setup_integration_adds_no_command_or_startup_reentry() {
+    fn setup_integration_adds_no_startup_reentry() {
         let bootstrap = include_str!("lib.rs");
-        assert!(!bootstrap.contains("request_first_time_setup"));
         assert!(!bootstrap.contains("run_first_time_setup"));
         assert!(
             bootstrap.contains(
-                ".invoke_handler(tauri::generate_handler![health_check, startup_status])"
+                ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup\n        ])"
             )
         );
 
@@ -1659,11 +1713,102 @@ mod tests {
         let bootstrap = include_str!("lib.rs");
         assert!(
             bootstrap.contains(
-                ".invoke_handler(tauri::generate_handler![health_check, startup_status])"
+                ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup\n        ])"
             )
         );
         assert!(bootstrap.contains("lifecycle.start(app.handle().clone())"));
         assert!(!bootstrap.contains("generate_handler![activate_production_database"));
         assert!(!bootstrap.contains("generate_handler![retry"));
+    }
+
+    #[test]
+    fn setup_request_outcomes_map_exactly_to_coarse_ipc_results() {
+        for (outcome, result) in [
+            (
+                FirstTimeSetupRequestOutcome::Started,
+                FirstTimeSetupRequestResult::Started,
+            ),
+            (
+                FirstTimeSetupRequestOutcome::AlreadyInProgress,
+                FirstTimeSetupRequestResult::AlreadyInProgress,
+            ),
+            (
+                FirstTimeSetupRequestOutcome::StartupInProgress,
+                FirstTimeSetupRequestResult::StartupInProgress,
+            ),
+            (
+                FirstTimeSetupRequestOutcome::NotAllowed,
+                FirstTimeSetupRequestResult::NotAllowed,
+            ),
+            (
+                FirstTimeSetupRequestOutcome::RestartRequired,
+                FirstTimeSetupRequestResult::RestartRequired,
+            ),
+            (
+                FirstTimeSetupRequestOutcome::Unavailable,
+                FirstTimeSetupRequestResult::Unavailable,
+            ),
+        ] {
+            assert_eq!(FirstTimeSetupRequestResult::from(outcome), result);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn setup_request_path_resolution_failure_is_unavailable_without_requesting_setup() {
+        let result = request_first_time_setup_with(
+            || Err(()),
+            |_| panic!("setup must not be requested when canonical path resolution fails"),
+        );
+        assert_eq!(result, FirstTimeSetupRequestResult::Unavailable);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn setup_request_command_is_argument_free_path_owned_and_reservation_only() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let signature =
+            "pub(crate) fn request_first_time_setup(app: AppHandle) -> FirstTimeSetupRequestResult";
+        assert!(SOURCE.contains(signature));
+
+        let command = SOURCE
+            .split_once(signature)
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(command.contains("app.path().app_local_data_dir().map_err(|_| ())"));
+        assert!(command.contains("lifecycle_from_app(&app)"));
+        assert!(command.contains(".request_first_time_setup(canonical_root)"));
+        for forbidden in [
+            "run_first_time_setup(",
+            "run_production_startup(",
+            "activate_production_database_for_operational_use(",
+            "FirstTimeSetupAuthorization",
+            "OperationalProductionDatabase",
+            "PathBuf",
+            "String",
+        ] {
+            assert!(!command.contains(forbidden));
+        }
+
+        let result_definition = SOURCE
+            .split_once("pub(crate) enum FirstTimeSetupRequestResult")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "Path",
+            "Authorization",
+            "Owner",
+            "Error",
+            "Phase",
+            "Metadata",
+        ] {
+            assert!(!result_definition.contains(forbidden));
+        }
     }
 }
