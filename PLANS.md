@@ -6,7 +6,7 @@ Active multi-stage initiative. Carlo has explicitly approved the bounded product
 
 ## 2. Authority and objective
 
-The active documentation objective is to lock the product-level maintenance authorization trigger policy. The local human operator physically using Church App under the dedicated Church App production Windows account is the maintenance-authorizing actor, but authority exists only after an explicit interactive maintenance confirmation initiated from the application. This is an authorization and consent boundary, not application-level identity authentication. The policy is documentation only: maintenance execution, authentication, backup/restore, writable database access, migration, schema V2, parish/business schema, IPC, UI design, and the Rust capability design remain separate and unimplemented.
+The active documentation objective is to lock the product-level maintenance authorization trigger policy and initial operation taxonomy. The local human operator physically using Church App under the dedicated Church App production Windows account is the maintenance-authorizing actor, but authority exists only after an explicit interactive maintenance confirmation initiated from the application. This is an authorization and consent boundary, not application-level identity authentication. Production database migration is the sole initial maintenance authorization identity; no generic maintenance-operation enum or broad generic maintenance-authorization capability is approved. The policy is documentation only: maintenance execution, authentication, backup/restore, writable database access, migration, schema V2, parish/business schema, IPC, UI design, and the Rust capability design remain separate and unimplemented.
 
 ## 3. Locked operational decisions relevant to the initiative
 
@@ -30,11 +30,11 @@ The guarded read-only SQLCipher startup chain, operational activation, explicit 
 
 ## 7. Allowed scope
 
-Documentation-only recording of the approved maintenance authorization trigger policy and the directly related dedicated-account correction, limited to `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Code and repository safeguards remain unchanged.
+Documentation-only recording of the approved maintenance authorization trigger policy, initial operation taxonomy, and the directly related dedicated-account correction, limited to `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Code and repository safeguards remain unchanged.
 
 ## 8. Prohibited scope
 
-This documentation work authorizes no code, test, dependency, configuration, workflow, maintenance execution, authentication, new schema or migration, SQL or PRAGMA change, writable database access, freshness redesign, recovery integration, backup/restore, replacement, new Tauri command or IPC, frontend change, generated inventory, application runtime change, header mutation, or destructive operation. It does not define a Rust `MaintenanceAuthorization` type, a maintenance-operation enum or taxonomy, migration source/target versions, schema V2, IPC shape, UI wording or dialog design, authentication roles, backup implementation, writable maintenance owner, or migration execution.
+This documentation work authorizes no code, test, dependency, configuration, workflow, maintenance execution, authentication, new schema or migration, SQL or PRAGMA change, writable database access, freshness redesign, recovery integration, backup/restore, replacement, new Tauri command or IPC, frontend change, generated inventory, application runtime change, header mutation, or destructive operation. It does not define a Rust representation for the migration-specific authority, a generic maintenance-operation enum, a broad generic maintenance-authorization capability, migration source/target versions, schema V2, IPC shape, UI wording or dialog design, authentication roles, backup implementation, writable maintenance owner, or migration execution.
 
 ## 9. Dependency approvals
 
@@ -118,7 +118,7 @@ The accepted Windows production dependency is exactly `rusqlite = { version = "=
 - [x] Validate setup through final active artifacts and require a fresh-process restart before operational startup can reach `Ready`.
 - [x] Complete the accepted Windows debug end-to-end setup/startup observation from marker-only isolated root through `Unavailable`, explicit setup, restart-required, and fresh-process `ready_installed`.
 - [x] Implement and accept the private, consuming, currently unwired full-integrity transition from `ReadabilityAndIntegrityValidatedProductionDatabaseConnection` to `FullIntegrityValidatedProductionDatabaseConnection`.
-- [x] Document and lock the product-level maintenance authorization trigger policy without implementing it.
+- [x] Document and lock the product-level maintenance authorization trigger policy and initial migration-specific taxonomy without implementing them.
 - [ ] Separately approve the migration prerequisites and exact migration design; no migration implementation is authorized by this plan state.
 
 ## Implemented first-time setup and minimal V1 bootstrap
@@ -351,7 +351,7 @@ Frontend-visible states are `Starting`, `Ready`, `Unavailable`, `SetupInProgress
 
 Lifecycle logs are local, fixed, and coarse. They must not expose paths, keys, identifiers, metadata, native errors, or raw backend chains. Windows debug-assertion-only manual root/pause support is an isolated manual verification aid and is not frontend or IPC authority. The synthetic fixture exporter is Windows test-only, ignored, and not production behavior.
 
-## 23. Locked maintenance authorization trigger policy
+## 23. Locked maintenance authorization trigger and taxonomy policy
 
 The maintenance-authorizing actor is the local human operator physically using Church App under the dedicated standard Windows account used for Church App production operation. Merely being that Windows user does not create maintenance authorization. The application must require an explicit interactive maintenance confirmation initiated from Church App. That confirmation records the operator's authorization and consent for one maintenance action; it is deliberately not proof of application-level user identity. Application-level authentication may strengthen this boundary later, but the first-generation maintenance architecture does not depend on authentication existing.
 
@@ -359,7 +359,11 @@ Any future maintenance authority must be explicit, interactive, single-use, proc
 
 Application start, `Ready`, first-time setup authority, startup authorization, possession of `OperationalProductionDatabase` or `FullIntegrityValidatedProductionDatabaseConnection`, backup existence or verified-backup proof, writable database ownership, migration eligibility, version compatibility, and concurrency or exclusivity do not create or substitute for maintenance authorization. Safety prerequisites remain separate composed gates: a verified recoverable encrypted backup, full-integrity validation, valid source and target versions, writable maintenance ownership, concurrency and exclusivity, and installation, evidence, and freshness state. Satisfying any or all of them does not record operator consent.
 
-React may eventually request or present the interactive confirmation, but it remains non-authoritative. Rust must ultimately construct and own any future maintenance authority. This policy does not define the Rust capability type, the maintenance-operation enum or taxonomy, migration version pair, schema V2, IPC command shape, UI wording or confirmation-dialog design, authentication roles, backup implementation, writable maintenance owner, or migration execution.
+The initial authorization identity is specifically production database migration because migration is the only concrete next maintenance operation. No generic `MaintenanceOperation` enum and no broad generic `MaintenanceAuthorization` capability are approved at this stage. The future migration-specific capability may conceptually be named `ProductionDatabaseMigrationAuthorization`, but this decision neither finalizes nor implements its Rust representation. Source and target schema versions are separate migration-plan and eligibility prerequisites, not fields of that authorization identity. Verified recoverable backup proof is likewise a separate safety prerequisite: its presence does not create consent and it is not embedded in migration authorization. Possession of migration authorization alone must never imply that migration is eligible or executable.
+
+Restore, recovery, rekey or database-key replacement, anchor replacement, database replacement, and destructive cleanup remain separately authorized future authority domains and must not be collapsed into migration authority. Recovery and restore remain distinct from one another; rekey remains distinct from database replacement; and destructive cleanup remains distinct from reset, repair, recovery, replacement, and migration. Setup and startup are not maintenance operations. Backup verification or acceptance and full-integrity validation are safety or proof capabilities, not maintenance-operation identities. Explicit diagnostics, including full-integrity diagnostics, are not approved operation variants; backup creation is not approved as a distinct operator-authorized operation identity; and the catch-all identity “installation/evidence replacement” is too broad and must not be introduced.
+
+React may eventually request or present the interactive confirmation, but it remains non-authoritative. Rust must ultimately construct and own any future maintenance authority. Before `ProductionDatabaseMigrationAuthorization` can be implemented even as a private token, the project must separately approve a Rust-owned construction boundary that represents the already-locked interactive operator confirmation. This task does not design that IPC, UI, or construction flow. A ceremonial constructor whose only input is a Boolean, enum, version, path, startup state, `Ready` state, backup proof, integrity proof, or existing database owner is prohibited. Full-integrity proof, writable maintenance ownership, exclusivity, installation/evidence/freshness state, version eligibility, and backup proof remain separately composed prerequisites. This policy does not approve migration implementation, schema V2, migration SQL, authentication roles, backup implementation, writable maintenance ownership, or exclusivity design.
 
 ## 24. Links
 
