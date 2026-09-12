@@ -38,6 +38,7 @@ use crate::{
 
 mod create_new_database;
 mod fixed_metadata_and_header_observation;
+mod full_integrity_validation;
 mod live_metadata_and_header_validation;
 
 #[cfg(test)]
@@ -177,6 +178,13 @@ pub(crate) use live_metadata_and_header_validation::{
     revalidate_identity_bound_staged_key_production_database_for_setup,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
     validate_production_database_live_metadata_and_headers,
+};
+
+#[allow(unused_imports)]
+pub(crate) use full_integrity_validation::{
+    FullIntegrityValidatedProductionDatabaseConnection, FullIntegrityValidationCloseFailure,
+    FullIntegrityValidationCloseRetryOutcome, FullIntegrityValidationError,
+    FullIntegrityValidationOutcome, validate_production_database_full_integrity,
 };
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1205,10 +1213,10 @@ mod tests {
     const CORRECT_DATABASE_KEY: [u8; 32] = [0x74; 32];
     const WRONG_DATABASE_KEY: [u8; 32] = [0x85; 32];
 
-    struct TestRoot(PathBuf);
+    pub(super) struct TestRoot(PathBuf);
 
     impl TestRoot {
-        fn create() -> Self {
+        pub(super) fn create() -> Self {
             let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "church-app-connection-handoff-{}-{sequence}",
@@ -1222,7 +1230,7 @@ mod tests {
             &self.0
         }
 
-        fn typed_path(&self) -> ProductionDatabasePath {
+        pub(super) fn typed_path(&self) -> ProductionDatabasePath {
             production_database_path(self.0.clone())
         }
 
@@ -1235,7 +1243,7 @@ mod tests {
                 .expect("synthetic creation connection should close");
         }
 
-        fn inspected(&self) -> InspectedProductionDatabaseFile {
+        pub(super) fn inspected(&self) -> InspectedProductionDatabaseFile {
             let ProductionDatabaseInspection::Present(inspected) =
                 inspect_production_database_file(&self.typed_path())
             else {
@@ -1249,7 +1257,11 @@ mod tests {
                 .expect("synthetic read-only open should succeed")
         }
 
-        fn create_encrypted_database(&self, key: &GenerationBoundDatabaseKey, multipage: bool) {
+        pub(super) fn create_encrypted_database(
+            &self,
+            key: &GenerationBoundDatabaseKey,
+            multipage: bool,
+        ) {
             let connection = Connection::open(self.0.join(PRODUCTION_DATABASE_FILENAME))
                 .expect("synthetic SQLCipher database creation should succeed");
             apply_key_once(&connection, key).expect("synthetic SQLCipher keying should succeed");
@@ -1289,7 +1301,7 @@ mod tests {
             file.sync_all().unwrap();
         }
 
-        fn assert_exact_cleanup(self) {
+        pub(super) fn assert_exact_cleanup(self) {
             fs::remove_dir_all(&self.0).expect("exact synthetic root cleanup should succeed");
             assert!(!self.0.exists());
         }
@@ -1333,7 +1345,10 @@ mod tests {
         }
     }
 
-    fn generation_bound_key(root: &TestRoot, bytes: [u8; 32]) -> GenerationBoundDatabaseKey {
+    pub(super) fn generation_bound_key(
+        root: &TestRoot,
+        bytes: [u8; 32],
+    ) -> GenerationBoundDatabaseKey {
         let paths = installation_evidence_persistence_paths(root.path());
         fs::create_dir_all(paths.evidence_directory.as_path()).unwrap();
 
