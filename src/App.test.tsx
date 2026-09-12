@@ -118,10 +118,7 @@ describe("application foundation", () => {
     ["starting", "Preparing the application securely. This may take some time."],
     ["ready", "Unfinished application foundation"],
     ["setupInProgress", "First-time setup is in progress."],
-    [
-      "setupRestartRequired",
-      "First-time setup is complete. Restart the application to continue.",
-    ],
+    ["setupRestartRequired", "First-time setup is complete. Restart the application to continue."],
     ["stopping", "The application is stopping."],
     ["shutdownIncomplete", "The application could not complete shutdown."],
   ])("does not offer first-time setup while startup status is %s", async (status, message) => {
@@ -130,7 +127,9 @@ describe("application foundation", () => {
     expect(await screen.findByText(message)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
     if (status === "ready") {
-      expect(screen.getByRole("navigation", { name: "Staff area placeholders" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("navigation", { name: "Staff area placeholders" }),
+      ).toBeInTheDocument();
     } else {
       expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
     }
@@ -230,9 +229,7 @@ describe("application foundation", () => {
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") {
         startupReadCount += 1;
-        return Promise.resolve(
-          startupReadCount === 1 ? "unavailable" : "setupRestartRequired",
-        );
+        return Promise.resolve(startupReadCount === 1 ? "unavailable" : "setupRestartRequired");
       }
       if (command === "request_first_time_setup") return Promise.resolve("restartRequired");
       return Promise.reject(new Error("unexpected command"));
