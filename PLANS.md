@@ -2,7 +2,7 @@
 
 ## 1. Initiative and status
 
-Active multi-stage initiative. Carlo has explicitly approved the bounded production database and evidence-correspondence architecture package, including the corrected `ApplicationDatabaseFormatIdentity` exactly-16-byte SQLite `BLOB` encoding. The Windows production SQLCipher dependency, private raw-key primitive, metadata-only production database-file inspection, guarded read-only SQLCipher connection handoff, consuming validation and authorization chain, Rust-owned application-startup lifecycle, explicit first-time setup lifecycle, and minimal production V1 metadata/bootstrap schema are implemented and accepted through the current repository state. The repository still has no migration, backup, restore, recovery, replacement, authentication, parish workflow, parish/business schema, or general writable database-operation interface. This accepted foundation does not make the full product launch-ready. The accepted installation-evidence, local-volume, device-property, and controlled-host evidence remains otherwise unchanged.
+Active multi-stage initiative. Carlo has explicitly approved the bounded production database and evidence-correspondence architecture package, including the corrected `ApplicationDatabaseFormatIdentity` exactly-16-byte SQLite `BLOB` encoding. The Windows production SQLCipher dependency, private raw-key primitive, metadata-only production database-file inspection, guarded read-only SQLCipher connection handoff, consuming validation and authorization chain, Rust-owned application-startup lifecycle, explicit first-time setup lifecycle, minimal production V1 metadata/bootstrap schema, and private unwired full-integrity validation boundary are implemented and accepted through the current repository state. The repository still has no migration, backup, restore, recovery, replacement, authentication, parish workflow, parish/business schema, or general writable database-operation interface. This accepted foundation does not make the full product launch-ready. The accepted installation-evidence, local-volume, device-property, and controlled-host evidence remains otherwise unchanged.
 
 ## 2. Authority and objective
 
@@ -26,7 +26,7 @@ Keep database-key ownership, metadata contracts, metadata decoding, corresponden
 
 ## 6. Active stage
 
-The guarded read-only SQLCipher startup chain, operational activation, explicit first-time setup, encrypted database creation, and minimal V1 metadata/bootstrap initialization are implemented and accepted. Migration is the next genuinely unimplemented gated storage stage, but this documentation reconciliation does not approve its implementation. Future parish/business schema work, recovery, replacement, backup/restore, authentication, parish workflows, release validation, and any broader database-operation interface also remain unimplemented. Startup has no setup, migration, repair, recovery, or reset fallthrough.
+The guarded read-only SQLCipher startup chain, operational activation, explicit first-time setup, encrypted database creation, minimal V1 metadata/bootstrap initialization, and private unwired full-integrity validation boundary are implemented and accepted. Migration is the next genuinely unimplemented gated storage stage, but this documentation reconciliation does not approve its implementation. Future parish/business schema work, recovery, replacement, backup/restore, authentication, parish workflows, release validation, and any broader database-operation interface also remain unimplemented. Startup has no setup, migration, full-integrity, repair, recovery, or reset fallthrough.
 
 ## 7. Allowed scope
 
@@ -117,6 +117,7 @@ The accepted Windows production dependency is exactly `rusqlite = { version = "=
 - [x] Implement and wire the explicit first-time setup lifecycle through the narrow `request_first_time_setup` Tauri command.
 - [x] Validate setup through final active artifacts and require a fresh-process restart before operational startup can reach `Ready`.
 - [x] Complete the accepted Windows debug end-to-end setup/startup observation from marker-only isolated root through `Unavailable`, explicit setup, restart-required, and fresh-process `ready_installed`.
+- [x] Implement and accept the private, consuming, currently unwired full-integrity transition from `ReadabilityAndIntegrityValidatedProductionDatabaseConnection` to `FullIntegrityValidatedProductionDatabaseConnection`.
 - [ ] Separately approve the migration prerequisites and exact migration design; no migration implementation is authorized by this plan state.
 
 ## Implemented first-time setup and minimal V1 bootstrap
@@ -130,7 +131,7 @@ Migration is the next unimplemented gated storage stage. It is not approved for 
 - the exact approved target schema and version;
 - explicit maintenance authorization;
 - a verified recoverable encrypted backup;
-- completed full-integrity validation at the migration boundary;
+- approved composition and completed use of the implemented full-integrity validation capability at the migration boundary;
 - a separately approved writable maintenance connection and owner;
 - forward-only version-transition rules and downgrade refusal;
 - interruption and restart classification;
@@ -139,7 +140,7 @@ Migration is the next unimplemented gated storage stage. It is not approved for 
 - close-failure ownership; and
 - proof that migration cannot become a startup or setup fallback.
 
-This plan records prerequisite categories only. It does not define schema V2, parish/business tables, migration SQL, or the detailed designs and policies needed to satisfy those gates.
+The reusable full-integrity transition now exists, but its composition with the other migration prerequisites remains unresolved and unimplemented. The boundary alone grants no migration or maintenance authorization, verified recoverable backup, writable maintenance ownership, migration exclusivity, target schema/version, interruption/restart policy, or update ordering. It does not decide whether future maintenance must repeat cipher-integrity validation before mutation. This plan records prerequisite categories only. It does not define schema V2, parish/business tables, migration SQL, or the detailed designs and policies needed to satisfy those gates.
 
 ## 11. Implemented readability-and-integrity boundary
 
@@ -156,6 +157,8 @@ On validation failure, explicit close is attempted after the row stream and stat
 Carlo accepts that `cipher_integrity_check` may synchronously scan the whole file with work proportional to database pages. This stage introduces no production database-size ceiling and makes no bounded-latency or active-cancellation claim. The accepted lifecycle runs it on the blocking startup worker rather than the UI/event loop; this does not bound worker duration or eliminate shutdown drain time.
 
 The succeeding live metadata/header, correspondence, preloaded normalized freshness, startup-authorization, operational-activation, and lifecycle transitions are implemented as described below. The separate setup path now creates and validates the minimal V1 metadata/bootstrap database. Migration, parish/business schema, recovery, replacement, backup/restore, authentication, parish workflows, broader frontend/database IPC, and final release approval remain separately scoped work.
+
+The separately implemented private full-integrity transition consumes `ReadabilityAndIntegrityValidatedProductionDatabaseConnection`, retains its existing guarded connection lifetime, runs only fixed `PRAGMA main.integrity_check`, and returns `FullIntegrityValidatedProductionDatabaseConnection` only after exactly one SQLite `TEXT` row exactly equal to `ok` followed by normal completion. Malformed, unavailable, interrupted, incomplete, zero-row, extra-row, non-`TEXT`, and non-`ok` outcomes fail closed. Explicit close and ownership-bearing close retry are preserved, and no connection, arbitrary SQL, path, key, metadata, diagnostic text, raw handle, or backend error is exposed. The transition has no production caller and is not wired into startup, setup, application lifecycle, migration, backup, restore, recovery, IPC, or frontend. Ordinary startup remains the cipher-integrity plus `quick_check(1)` sequence above; setup remains unchanged.
 
 ## 12. Implemented live metadata and SQLite-header validation boundary
 
@@ -218,13 +221,13 @@ On the observed Windows host, the accepted `LocalFixedCandidate` prerequisite an
 - Carlo-approved: permanent identifier and display name; current-account, non-elevated ordinary-use direction with a dedicated standard Windows account optional and recommended for a parish-owned shared workstation; per-user application-data direction; application-owned-directory-only operation; explicit setup-only creation; no silent startup creation; immutable random parish identifier direction; temporary Windows SQLCipher feasibility; future verified restore condition; and the bounded SQLCipher Community Edition production database, independent database-key, metadata, correspondence, freshness, opening, integrity, path/sidecar, journal/durability, migration, support, redaction, and authority-separation package.
 - Implemented foundation: all previously accepted foundations plus operating-system-backed authentication-material generation, HMAC-SHA-256 envelope authentication, current-user in-memory DPAPI protection for separate key and evidence objects, strict wrapper and key-payload codecs, native clear-before-free handling, and a typed generation-match transition before plaintext release. Protection remains separate from persistence, structural validation, database cross-checking, setup, startup, and operational evidence.
 - Historical technical experiment: `sqlcipher_windows_feasibility` and its former development-dependency state remain Windows test-only evidence of the earlier candidate evaluation.
-- Implemented production foundation: the exact Windows production `rusqlite` configuration, private raw-key application primitive, metadata-only production database-file inspection, guarded read-only connection handoff, consuming validation and startup-authorization transitions, operational activation, lifecycle ownership, explicit first-time setup, encrypted database creation, and the minimal V1 metadata/bootstrap schema. The repository retains distinct setup and startup authority; activation consumes `StartupAuthorizedProductionDatabaseConnection` into `OperationalProductionDatabase` without granting arbitrary SQL or product-workflow authority.
+- Implemented production foundation: the exact Windows production `rusqlite` configuration, private raw-key application primitive, metadata-only production database-file inspection, guarded read-only connection handoff, consuming validation and startup-authorization transitions, operational activation, lifecycle ownership, explicit first-time setup, encrypted database creation, minimal V1 metadata/bootstrap schema, and private unwired full-integrity validation transition. The repository retains distinct setup and startup authority; activation consumes `StartupAuthorizedProductionDatabaseConnection` into `OperationalProductionDatabase` without granting arbitrary SQL or product-workflow authority. The full-integrity transition is not part of that startup chain and grants no migration authority.
 - Approved but not fully implemented: the larger bounded architecture package. Deferred implementation includes migration, parish/business schema, portable recovery, backup/restore, recovery authority, replacement, destructive retention or cleanup, authentication, parish workflows, broader database operations, and release automation.
 - The implemented startup-authorization boundary retains the exact signature, taxonomy, ownership, disposal, close/retry, redaction, and private placement recorded in section 21. The accepted lifecycle supplies the independently observed final installation evidence to that boundary, then consumes the authorized owner through operational activation.
 
 ## 15. Validation status
 
-The freshness and internal startup-authorization validation history remains accepted as previously recorded. The later operational lifecycle implementation at commit `44d2770786d4534ef37fb58b383e5b74ab73d04c` was accepted after focused and full automated validation in its implementation review and after manual scenarios A-E. Those automated suites were not rerun during the later staging/commit work or this documentation-only reconciliation. The single ignored test remains the unrelated pre-existing manually rooted USB controlled-host test.
+The freshness and internal startup-authorization validation history remains accepted as previously recorded. The later operational lifecycle implementation at commit `44d2770786d4534ef37fb58b383e5b74ab73d04c` was accepted after focused and full automated validation in its implementation review and after manual scenarios A-E. The unwired full-integrity boundary at commit `3d7e71551b8ec23af7ec47a227b6c37ac190b546` was accepted with 8 focused `full_integrity` tests, `cargo fmt --check`, Clippy with warnings denied, and `git diff --check` passing; pre-existing OpenSSL missing-PDB linker warnings were non-fatal. No broad Rust suite, frontend suite, or manual runtime test was run for that unwired Rust-only slice. No implementation suites are rerun by this documentation-only reconciliation.
 
 ## 16. Manual testing status
 
