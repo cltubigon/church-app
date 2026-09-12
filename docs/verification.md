@@ -136,7 +136,7 @@ The focused authenticated-envelope hardening command uses only deterministic syn
 
 The focused installation-evidence tests use only synthetic in-memory values. Encoding tests verify the exact 164-byte layout, fixed offsets, big-endian integers, golden fixture, determinism, and redacted output. Strict-parser tests verify exact total length and framing, application-identifier length and UTF-8, fixed-offset decoding, distinct parse and structural-validation errors, parsed-value redaction, the raw-bytes → parsed-but-untrusted → structural-validation API, and byte-exact canonical round-trip. Malformed-input hardening tests use a dependency-free deterministic corpus covering all 164 single-byte positions, wrong lengths, representative patterns, explicit field boundaries, selected two-byte framing mutations, redacted outcomes, and byte-identical re-encoding for every structurally valid accepted input. Contract tests retain current logical identity, canonical parish, nonzero identifier and generation, debug-redaction, and operational-boundary checks. They perform no persistence, filesystem or registry access, database work, environment mutation, clock reading, randomness, cryptography, DPAPI, or Tauri IPC.
 
-The focused installation-state tests supply only synthetic evidence to pure Rust decisions. They verify that ordinary startup cannot authorize setup, explicit authorization permits only a future setup step, initialized-but-missing and inconsistent states fail closed, present storage indicates only future open eligibility, the authorization boundary has no boolean, string, path, frontend, or Tauri argument, and no directory or file is created. The new persistence classifier has no conversion to this operational model.
+The focused installation-state tests supply only synthetic evidence to pure Rust decisions. They verify that ordinary startup cannot authorize setup, the pure authorization transition permits only the distinct setup path, initialized-but-missing and inconsistent states fail closed, present storage indicates only future open eligibility, the authorization boundary has no boolean, string, path, frontend, or Tauri argument, and that pure boundary creates no directory or file. The implemented setup lifecycle consumes this authority separately; the persistence classifier has no direct conversion to the operational model.
 
 The focused storage-foundation tests use Windows-like and portable synthetic roots for path construction and do not create directories or files. They verify all seven exact active/stage names, continued canonical ownership of `parish-data.db`, typed active/evidence/publication-stage paths, evidence-directory nesting, direct-root database staging, restore-versus-publication staging separation, redacted debug output, existing production/development/test/restore separation, unique safe automated-test identities, and narrow database-format and parish-identifier representations. Production path resolution itself remains behind Rust's Tauri application-handle boundary and is not invoked by the new constructor.
 
@@ -453,15 +453,15 @@ Separate cleanup remains for stale historical source comments in `database_fresh
 
 ## Accepted application-startup lifecycle evidence
 
-The Rust-owned lifecycle and operational activation are implemented and accepted at `44d2770786d4534ef37fb58b383e5b74ab73d04c` (`feat(app): orchestrate secure startup lifecycle`). The window begins in non-ready `Starting`; one blocking Rust worker runs the synchronous production chain; `Ready` requires installation of a real `OperationalProductionDatabase`; and read-only `startup_status` is the only lifecycle IPC addition alongside `health_check`.
+The Rust-owned lifecycle and operational activation are implemented and accepted at `44d2770786d4534ef37fb58b383e5b74ab73d04c` (`feat(app): orchestrate secure startup lifecycle`), with the later explicit setup integration accepted in the current repository state. The window begins in non-ready `Starting`; one blocking Rust worker runs the synchronous startup chain; `Ready` requires installation of a real `OperationalProductionDatabase`; and the lifecycle IPC surface now includes read-only `startup_status` plus the narrow argument-free `request_first_time_setup` command alongside `health_check`.
 
 Accepted implementation verification establishes:
 
 - canonical installation evidence is observed early and independently re-observed immediately before final startup authorization;
 - the actual second observed `InstallationEvidence` value is passed into authorization, and startup does not construct `Initialized(Present)`;
 - operational activation is the consuming post-authorization transition, not another authorization decision;
-- no setup, migration, repair, recovery, reset, or retry fallthrough exists;
-- frontend-visible states are exactly `Starting`, `Ready`, `Unavailable`, `Stopping`, and `ShutdownIncomplete`, while internal `CloseRetryRequired` ownership remains Rust-only;
+- no setup, migration, repair, recovery, reset, or retry fallthrough exists in ordinary startup; explicit setup is separately requested and authorized;
+- frontend-visible states include `Starting`, `Ready`, `Unavailable`, `SetupInProgress`, `SetupRestartRequired`, `Stopping`, and `ShutdownIncomplete`, while internal `CloseRetryRequired` ownership remains Rust-only;
 - shutdown during startup requests drain and prevents any later `Ready` installation;
 - close failure retains ownership internally and exposes `ShutdownIncomplete`, with no retry UI, IPC command, or user action;
 - manual root/pause support is Windows plus `debug_assertions` only and not frontend/IPC authority; the fixture exporter is Windows test-only and ignored; and
@@ -481,12 +481,28 @@ The following manual scenarios were completed and accepted:
 
 These scenarios use debug/test-only support for controlled observation. They do not turn that support into production product behavior and do not establish full-product launch readiness.
 
+## Accepted first-time setup and fresh-process startup evidence
+
+The implemented first-time setup lifecycle begins only from the accepted `NeverInitialized` path reached through the narrow setup request. It creates encrypted `parish-data.db`, initializes the minimal V1 metadata/header bootstrap contract, validates the database, prepares and publishes protected installation artifacts, performs final active verification, and finishes at `SetupRestartRequired`. This verification scope establishes no parish/business schema, workflow tables, migration, backup/restore, recovery, authentication, or general writable database API.
+
+Accepted Windows debug manual validation demonstrated this exact end-to-end sequence:
+
+```text
+marker-only isolated root
+-> Unavailable
+-> explicit first-time setup
+-> restart-required
+-> fresh-process ready_installed
+```
+
+The observation confirms the exercised debug setup/startup lifecycle, including the prohibition on same-process `Ready` after setup. It is not clean-machine release validation, installer validation, production readiness, or parish-workflow readiness. The old zero-byte setup failure did not reproduce and is not tracked here as an active defect. The existing Windows-debug setup terminal-failure phase diagnostic seam remains intentional.
+
 ## Remaining production database verification gates
 
-- Schema-creation tests must prove only the separately approved version-1 schema, singleton metadata row, `application_id = 0x43484150`, mirrored `user_version`, and fail-closed header/metadata disagreement. They remain separate from live read-only validation and correspondence.
+- The minimal version-1 metadata/bootstrap schema and its setup creation path are implemented. Future schema verification must distinguish that bootstrap contract from any separately approved parish/business schema; no schema V2 or parish workflow table is approved.
 - Path/link/sidecar tests must cover the exact application-owned NTFS path and filename, reparse/symlink/junction/mount traversal, cloud placeholder, hard link, network/removable storage, stable final path and identity, race revalidation, unexpected sidecars, and initial WAL/SHM prohibition. Startup must be proven unable to delete or repair sidecars.
 - Transaction-policy tests must cover rollback-journal `DELETE`, `synchronous=FULL`, explicit transactions, `secure_delete=ON`, `auto_vacuum=NONE`, no automatic journal switch, no automatic VACUUM, and no WAL checkpoint behavior.
-- Interrupted setup, migration, rekey, anchor replacement, database replacement, and controlled journal recovery tests must prove fail-closed restart classification and absence of generic repair. Migration tests additionally require explicit maintenance authorization, verified recoverable backup, prior full integrity success, forward-only behavior, and no automatic downgrade.
+- Future migration verification remains gated on a separately approved exact target schema/version, explicit maintenance authorization, verified recoverable encrypted backup, completed full-integrity validation at the migration boundary, a separate writable maintenance connection/owner, forward-only behavior, downgrade refusal, interruption/restart classification, exact metadata/`user_version`/evidence/freshness/lineage update ordering, concurrency/exclusivity, close-failure ownership, and proof that migration cannot become startup/setup fallback. This document does not define the detailed test design for those prerequisites.
 - Backup and staged-restore tests must prove SQLCipher-only encrypted artifacts, separate recovery-key envelopes, full integrity at acceptance, exact correspondence and lineage policy, explicit recovery authority, and no production plaintext database or fallback.
 - Authority tests must prove that persisted presence, evidence validation, path validation, key recovery, read-only opening, metadata decoding, integrity, correspondence, freshness, installation-state classification, startup authorization, operational activation, setup, migration, recovery, replacement, and destructive cleanup cannot substitute for one another.
 - Clean-machine release verification must run separately on supported Windows 10 x64 and Windows 11 x64 local-NTFS standard-user hosts. It must record pinned `rusqlite`, SQLCipher, OpenSSL, and lockfile identity; prove no system SQLCipher/OpenSSL dependency; and reject every unsupported platform/storage category. Release automation details remain deferred.
