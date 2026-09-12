@@ -1460,16 +1460,39 @@ mod tests {
                 "forbidden surface: {forbidden}"
             );
         }
+        let construction = production
+            .split_once("fn finish_opened_connection_using_close(")
+            .unwrap()
+            .1
+            .split_once("fn classify_file_control_handle")
+            .unwrap()
+            .0;
+        let test_configuration = construction
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .1
+            .split_once("#[cfg(not(test))]")
+            .unwrap()
+            .0;
+        let production_configuration = construction.split_once("#[cfg(not(test))]").unwrap().1;
         assert_eq!(
-            production.matches("apply_key(&owner.connection)").count(),
-            1
+            construction.matches("apply_key(&owner.connection)").count(),
+            2
         );
-        assert!(
-            production.find("apply_key(&owner.connection)").unwrap()
-                < production
-                    .find("enable_query_only(&owner.connection)")
-                    .unwrap()
-        );
+        for configuration in [test_configuration, production_configuration] {
+            assert_eq!(
+                configuration
+                    .matches("apply_key(&owner.connection)")
+                    .count(),
+                1
+            );
+            assert!(
+                configuration.find("apply_key(&owner.connection)").unwrap()
+                    < configuration
+                        .find("enable_query_only(&owner.connection)")
+                        .unwrap()
+            );
+        }
         assert!(
             production
                 .find("acquire_guarded_inspection(&path, inspected)")

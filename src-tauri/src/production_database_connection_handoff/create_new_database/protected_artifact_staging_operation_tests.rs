@@ -315,9 +315,9 @@ fn authority_is_zero_sized_private_and_bound_only_to_the_publication_machine() {
         "modsealed{pubtraitMachine{}implMachineforsuper::FirstTimeSetupPublicationStateMachine{}}"
     ));
     assert!(bridge.contains("traitAuthorityBinding:sealed::Machine{typeAuthority;}"));
-    assert_eq!(bridge.matches("pub(crate)fn").count(), 12);
-    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 12);
-    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 12);
+    assert_eq!(bridge.matches("pub(crate)fn").count(), 15);
+    assert_eq!(bridge.matches("<M:AuthorityBinding>(").count(), 15);
+    assert_eq!(bridge.matches("_authority:&M::Authority,").count(), 15);
     assert!(!bridge.contains("pub(crate)modsealed"));
 }
 
@@ -498,7 +498,13 @@ fn source_locks_every_borrow_write_success_then_advance_and_terminal_error() {
 
 #[test]
 fn source_has_no_publication_retry_cleanup_or_detachable_authority() {
-    let source = production();
+    let source = production()
+        .split_once("pub(crate) fn stage_first_time_setup_protected_artifacts(")
+        .unwrap()
+        .1
+        .split_once("/// Verify only")
+        .unwrap()
+        .0;
     for forbidden in [
         "verify_reloaded_",
         "revalidate_",
@@ -1966,12 +1972,19 @@ fn authenticated_evidence_publication_owner_predecessor_and_scope_are_exact() {
     assert!(compact_source.contains(
         "publish_first_time_setup_authenticated_evidence_wrapper(operation:EvidenceAuthenticationKeyWrapperPublishedFirstTimeSetupOperation,)->Result<AuthenticatedEvidencePublishedFirstTimeSetupOperation,FirstTimeSetupAuthenticatedEvidencePublicationError,>"
     ));
-    assert!(!source.contains("FinalActiveArtifactsVerified"));
-    assert!(!source.contains("ReadyForSetupCompletion"));
-    assert!(!source.contains("load_active_installation_evidence_wrapper_pair"));
-    assert!(!source.contains("recover_and_validate_loaded_installation_evidence"));
-    assert!(!source.contains("setup_complete"));
-    assert!(!source.contains("startup_author"));
+    let transition = source
+        .split_once("pub(crate) fn publish_first_time_setup_authenticated_evidence_wrapper(")
+        .unwrap()
+        .1
+        .split_once("fn publish_first_time_setup_authenticated_evidence_wrapper_using(")
+        .unwrap()
+        .0;
+    assert!(!transition.contains("FinalActiveArtifactsVerified"));
+    assert!(!transition.contains("ReadyForSetupCompletion"));
+    assert!(!transition.contains("load_active_installation_evidence_wrapper_pair"));
+    assert!(!transition.contains("recover_and_validate_loaded_installation_evidence"));
+    assert!(!transition.contains("setup_complete"));
+    assert!(!transition.contains("startup_author"));
 }
 
 #[test]

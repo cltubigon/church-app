@@ -293,7 +293,9 @@ fn production_dataflow_is_fixed_order_single_lifetime_and_has_no_later_authority
         "let IdentityBoundActiveSetupDatabase {",
         "validate_production_database_readability_and_integrity(database)",
         "validate_production_database_live_metadata_and_headers(\n        integrity,",
-        "if !live.matches_prepared_metadata(&prepared_database_metadata)",
+        "let matches = live.matches_prepared_metadata(&prepared_database_metadata);",
+        "#[cfg(test)]\n    let matches = matches",
+        "if !matches",
         "Ok(PreparedMetadataValidatedActiveSetupDatabase {",
     ];
     let mut remaining = transition;
@@ -314,6 +316,23 @@ fn production_dataflow_is_fixed_order_single_lifetime_and_has_no_later_authority
         1
     );
     assert_eq!(transition.matches("matches_prepared_metadata(").count(), 1);
+    let test_selector = transition
+        .split_once("#[cfg(test)]\n    let matches = matches")
+        .unwrap()
+        .1
+        .split_once("    if !matches")
+        .unwrap()
+        .0;
+    assert_eq!(
+        test_selector.split_whitespace().collect::<String>(),
+        ("&& !test_primary_failure_is_injected(
+                ProductionDatabasePrimaryFailureBoundary::PreparedMetadataComparison,
+            );")
+        .split_whitespace()
+        .collect::<String>()
+    );
+    assert!(!test_selector.contains("authority"));
+    assert!(!test_selector.contains("ProtectedArtifactStagingAuthority"));
 
     for forbidden in [
         "inspect_production_database_file",

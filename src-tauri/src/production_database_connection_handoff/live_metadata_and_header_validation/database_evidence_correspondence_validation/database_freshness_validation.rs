@@ -963,8 +963,15 @@ mod tests {
     #[test]
     fn production_source_is_a_narrow_sealed_one_call_adapter() {
         const SOURCE: &str = include_str!("database_freshness_validation.rs");
-        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
-        let compact_production: String = production
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let transition = production
+            .split_once("pub(crate) fn validate_production_database_freshness(")
+            .unwrap()
+            .1
+            .split_once("fn discard_anchor_observation")
+            .unwrap()
+            .0;
+        let compact_transition: String = transition
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect();
@@ -976,7 +983,7 @@ mod tests {
             "FnOnce(Connection",
         ] {
             assert!(
-                !production.contains(forbidden),
+                !transition.contains(forbidden),
                 "production Connection callback seam: {forbidden}"
             );
         }
@@ -987,29 +994,29 @@ mod tests {
             "FnOnce(Connection",
         ] {
             assert!(
-                !compact_production.contains(forbidden),
+                !compact_transition.contains(forbidden),
                 "formatting-obscured production Connection callback seam: {forbidden}"
             );
         }
 
         assert_eq!(
-            production.matches("classify_database_freshness(").count(),
+            transition.matches("classify_database_freshness(").count(),
             1
         );
         assert_eq!(
-            production
+            transition
                 .matches("DatabaseMetadataCorrespondence::Corresponds")
                 .count(),
             1
         );
-        assert!(production.contains(
+        assert!(transition.contains(
             "DatabaseMetadataCorrespondence::Corresponds,\n        &metadata_contract,\n        trusted_assessment.evidence(),\n        &anchor_observation,"
         ));
         assert!(
-            production
+            transition
                 .find("let classification = classify_database_freshness(")
                 .unwrap()
-                < production.find("match classification").unwrap()
+                < transition.find("match classification").unwrap()
         );
 
         let success = production

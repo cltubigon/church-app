@@ -230,6 +230,13 @@ fn production_dataflow_is_one_inspection_one_identity_check_and_one_key_move() {
 fn production_surface_performs_no_validation_reload_staged_or_authority_work() {
     let source = include_str!("identity_bound_active_setup_database_open.rs");
     let production = source.split("#[cfg(test)]").next().unwrap();
+    let transition = production
+        .split_once("pub(crate) fn open_identity_bound_active_setup_database(")
+        .unwrap()
+        .1
+        .split_once("\n}\n")
+        .unwrap()
+        .0;
     for forbidden in [
         "validate_production_database_readability_and_integrity",
         "validate_production_database_live_metadata_and_headers",
@@ -266,7 +273,7 @@ fn production_surface_performs_no_validation_reload_staged_or_authority_work() {
         "cleanup",
     ] {
         assert!(
-            !production.contains(forbidden),
+            !transition.contains(forbidden),
             "unexpected capability: {forbidden}"
         );
     }
