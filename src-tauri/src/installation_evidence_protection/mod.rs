@@ -1850,7 +1850,7 @@ mod tests {
 
     #[cfg(windows)]
     struct ActiveEvidenceLoadTrustChainCompositionTestRoot {
-        root: PathBuf,
+        container_root: PathBuf,
         paths: InstallationEvidencePersistencePaths,
     }
 
@@ -1866,12 +1866,15 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("test clock must follow epoch")
                 .as_nanos();
-            let root = env::temp_dir().join(format!(
-                "church-app-active-load-trust-chain-{}-{nanos}-{counter}",
+            let container_root = env::temp_dir().join(format!(
+                "church-app-active-load-container-{}-{nanos}-{counter}",
                 std::process::id()
             ));
-            fs::create_dir(&root).expect("unique composition root must be new");
-            let paths = installation_evidence_persistence_paths(&root);
+            fs::create_dir(&container_root).expect("unique composition container must be new");
+            let application_root = container_root.join("Church App");
+            fs::create_dir(&application_root)
+                .expect("synthetic application root must be created in the owned container");
+            let paths = installation_evidence_persistence_paths(&application_root);
             fs::create_dir(paths.evidence_directory.as_path())
                 .expect("exact synthetic evidence directory must be created");
             fs::write(
@@ -1884,7 +1887,10 @@ mod tests {
                 authenticated_evidence_wrapper,
             )
             .expect("synthetic active authenticated-evidence wrapper must be written");
-            let fixture = Self { root, paths };
+            let fixture = Self {
+                container_root,
+                paths,
+            };
             fixture.assert_canonical_active_state();
             fixture
         }
@@ -1921,7 +1927,7 @@ mod tests {
     #[cfg(windows)]
     impl Drop for ActiveEvidenceLoadTrustChainCompositionTestRoot {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
+            let _ = fs::remove_dir_all(&self.container_root);
         }
     }
 
