@@ -157,12 +157,22 @@ fn finish_acquisition(
 }
 
 #[cfg(test)]
+static PROCESS_LOCAL_RESERVATION_TEST_SERIALIZATION: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn serialize_process_local_reservation_tests() -> std::sync::MutexGuard<'static, ()> {
+    PROCESS_LOCAL_RESERVATION_TEST_SERIALIZATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
 mod tests {
     use std::{
         ffi::OsString,
         io::{BufRead, BufReader, Read, Write},
         process::{Child, Command, Stdio},
-        sync::{Mutex, MutexGuard},
     };
 
     use super::*;
@@ -173,14 +183,7 @@ mod tests {
     const CHILD_TEST_NAME: &str = "first_time_setup_exclusivity::tests::cross_process_helper_child";
     const CHILD_READY: &str = "FIRST_TIME_SETUP_EXCLUSIVITY_ACQUIRED";
 
-    static TEST_SERIALIZATION: Mutex<()> = Mutex::new(());
     static TEST_NAME_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    fn serialize_tests() -> MutexGuard<'static, ()> {
-        TEST_SERIALIZATION
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     fn unique_mutex_name(label: &str) -> String {
         let sequence = TEST_NAME_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -305,7 +308,7 @@ mod tests {
 
     #[test]
     fn first_acquisition_succeeds_second_is_non_reentrant_and_drop_permits_later_acquisition() {
-        let _serial = serialize_tests();
+        let _serial = serialize_process_local_reservation_tests();
         let first = expect_acquired(acquire_first_time_setup_cross_process_exclusivity());
         assert!(matches!(
             acquire_first_time_setup_cross_process_exclusivity(),
@@ -341,7 +344,7 @@ mod tests {
             serde::Deserialize<'static>
         );
 
-        let _serial = serialize_tests();
+        let _serial = serialize_process_local_reservation_tests();
         let owner = expect_acquired(acquire_first_time_setup_cross_process_exclusivity());
         assert_eq!(
             format!("{owner:?}"),
@@ -373,7 +376,7 @@ mod tests {
 
     #[test]
     fn native_creation_failure_clears_process_local_reservation() {
-        let _serial = serialize_tests();
+        let _serial = serialize_process_local_reservation_tests();
         let invalid_name = unique_mutex_name("invalid\\child");
         assert!(matches!(
             acquire_for_test(&invalid_name).0,
@@ -386,7 +389,7 @@ mod tests {
 
     #[test]
     fn primitive_is_independent_of_an_absent_application_root_and_mutates_no_filesystem() {
-        let _serial = serialize_tests();
+        let _serial = serialize_process_local_reservation_tests();
         let absent_root = std::env::temp_dir().join(format!(
             "church-app-exclusivity-absent-root-{}-{}",
             std::process::id(),
@@ -469,7 +472,7 @@ mod tests {
 
     #[test]
     fn cross_process_contention_then_normal_release_permits_acquisition() {
-        let _serial = serialize_tests();
+        let _serial = serialize_process_local_reservation_tests();
         let mutex_name = unique_mutex_name("normal-release");
         let child = HoldingChild::spawn(&mutex_name);
         let (contended, disposition) = acquire_for_test(&mutex_name);
@@ -485,7 +488,7 @@ mod tests {
 
     #[test]
     fn terminated_owner_is_acquired_through_abandoned_path() {
-        let _serial = serialize_tests();
+        let _serial = serialize_process_local_reservation_tests();
         let mutex_name = unique_mutex_name("abandoned");
         let child = HoldingChild::spawn(&mutex_name);
         let encoded_name: Vec<u16> = mutex_name

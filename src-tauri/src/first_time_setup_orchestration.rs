@@ -1088,6 +1088,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::first_time_setup_exclusivity::serialize_process_local_reservation_tests;
     use crate::production_database_connection_handoff::{
         ProductionDatabasePrimaryFailureInjection,
         with_production_database_close_failure_injected_at,
@@ -1406,6 +1407,7 @@ mod tests {
     #[test]
     fn already_held_short_circuits_before_observation_and_mutation() {
         let _serial = serial();
+        let _reservation_serial = serialize_process_local_reservation_tests();
         let fixture = Fixture::new();
         let owner = expect_acquired();
 
@@ -1459,6 +1461,7 @@ mod tests {
     #[test]
     fn acquired_entry_observes_exactly_once_and_only_never_initialized_proceeds() {
         let _serial = serial();
+        let _reservation_serial = serialize_process_local_reservation_tests();
         let fixture = Fixture::new();
         let paths = installation_evidence_persistence_paths(&fixture.root);
         let calls = Cell::new(0);
@@ -1537,6 +1540,7 @@ mod tests {
     #[test]
     fn real_never_initialized_setup_reaches_completed() {
         let _serial = serial();
+        let _reservation_serial = serialize_process_local_reservation_tests();
         let fixture = Fixture::new();
 
         let outcome = run_first_time_setup(fixture.root());
@@ -1551,6 +1555,7 @@ mod tests {
     #[test]
     fn every_retained_close_family_is_reached_exactly_and_disposed_through_the_real_entry_path() {
         let _serial = serial();
+        let _reservation_serial = serialize_process_local_reservation_tests();
 
         for case in DYNAMIC_CLOSE_FAILURE_CASES {
             assert_dynamic_close_failure_case(case);
@@ -1560,6 +1565,7 @@ mod tests {
     #[test]
     fn shared_connection_construction_family_retains_final_active_phase() {
         let _serial = serial();
+        let _reservation_serial = serialize_process_local_reservation_tests();
         assert_dynamic_close_failure_case(DynamicCloseFailureCase {
             expected_family: ExpectedRetainedCloseFamily::ProductionDatabaseConnectionConstruction,
             primary_failure: Some(
@@ -1573,6 +1579,7 @@ mod tests {
     #[test]
     fn injected_close_failure_retains_root_and_mutex_across_retry_then_terminates() {
         let _serial = serial();
+        let _reservation_serial = serialize_process_local_reservation_tests();
         let fixture = Fixture::new();
         let outcome = with_production_database_close_failure_injected_at(0, || {
             run_first_time_setup(fixture.root())
