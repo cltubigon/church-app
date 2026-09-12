@@ -97,6 +97,7 @@ export function App() {
   const [setupError, setSetupError] = useState<string | null>(null);
 
   useEffect(() => {
+    void statusRefreshKey;
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
