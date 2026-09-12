@@ -13,6 +13,10 @@ use std::{
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+mod production_database_migration_confirmation;
+
+use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmation;
+
 #[cfg(windows)]
 use crate::{
     database_key_active_wrapper_loader::load_active_database_key_wrapper,
@@ -414,6 +418,7 @@ struct RetainedCloseFailure;
 
 struct LifecycleInner {
     state: LifecycleState<OperationalProductionDatabase, RetainedCloseFailure>,
+    migration_confirmation: ProductionDatabaseMigrationConfirmation,
     startup_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     close_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     setup_worker: Option<thread::JoinHandle<()>>,
@@ -421,6 +426,13 @@ struct LifecycleInner {
     close_work_resolved: bool,
     setup_work_resolved: bool,
     setup_shutdown_app: Option<AppHandle>,
+}
+
+impl LifecycleInner {
+    fn begin_shutdown(&mut self) -> ShutdownAction<OperationalProductionDatabase> {
+        self.migration_confirmation.invalidate_for_shutdown();
+        self.state.begin_shutdown()
+    }
 }
 
 pub(crate) struct ApplicationLifecycle {
@@ -432,6 +444,7 @@ impl ApplicationLifecycle {
         Arc::new(Self {
             inner: Mutex::new(LifecycleInner {
                 state: LifecycleState::NotStarted,
+                migration_confirmation: ProductionDatabaseMigrationConfirmation::new(),
                 startup_worker: None,
                 close_worker: None,
                 setup_worker: None,
@@ -644,7 +657,7 @@ impl ApplicationLifecycle {
     pub(crate) fn request_shutdown(self: &Arc<Self>, app: AppHandle) {
         let action = {
             let mut inner = self.lock();
-            let action = inner.state.begin_shutdown();
+            let action = inner.begin_shutdown();
             if matches!(action, ShutdownAction::WaitForSetup) {
                 inner.setup_shutdown_app = Some(app.clone());
             }
@@ -2299,6 +2312,58 @@ mod tests {
         };
         assert_eq!(owner, TestOwner(7));
         assert_eq!(state.status(), StartupStatus::Stopping);
+    }
+
+    #[test]
+    fn lifecycle_shutdown_revokes_migration_confirmation_under_the_same_lock() {
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let mut inner = lifecycle.lock();
+        assert!(inner.migration_confirmation.establish_pending_for_test());
+        assert!(matches!(inner.begin_shutdown(), ShutdownAction::Exit));
+        assert_eq!(
+            inner.migration_confirmation.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::Revoked
+        );
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let helper = SOURCE
+            .split_once("impl LifecycleInner {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let revocation = helper
+            .find("self.migration_confirmation.invalidate_for_shutdown()")
+            .unwrap();
+        let stopping = helper.find("self.state.begin_shutdown()").unwrap();
+        assert!(revocation < stopping);
+    }
+
+    #[test]
+    fn migration_confirmation_has_no_ipc_frontend_or_startup_status_surface() {
+        const LIFECYCLE: &str = include_str!("application_lifecycle.rs");
+        const BOOTSTRAP: &str = include_str!("lib.rs");
+        const FRONTEND: &str = include_str!("../../src/App.tsx");
+
+        for forbidden in [
+            concat!("confirm_production_", "database_migration"),
+            concat!("cancel_production_", "database_migration_confirmation"),
+        ] {
+            assert!(!LIFECYCLE.contains(forbidden));
+            assert!(!BOOTSTRAP.contains(forbidden));
+            assert!(!FRONTEND.contains(forbidden));
+        }
+        let startup_status = LIFECYCLE
+            .split_once("pub(crate) enum StartupStatus {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(!startup_status.contains("Migration"));
     }
 
     #[test]
