@@ -6,14 +6,14 @@ Active multi-stage initiative. Carlo has explicitly approved the bounded product
 
 ## 2. Authority and objective
 
-The active documentation objective is to reconcile the accepted startup lifecycle with the subsequently implemented explicit first-time setup and minimal V1 metadata/bootstrap database creation. Setup begins only from the accepted `NeverInitialized` path, creates and validates the encrypted production database, publishes the protected installation artifacts, performs final active verification, and ends in restart-required. A fresh process may reach operational `Ready` only through the normal startup trust chain. Migration, parish/business schema, backup/restore, recovery, replacement, authentication, parish workflows, and any broader operational database interface remain separate and unimplemented.
+The active documentation objective is to lock the product-level maintenance authorization trigger policy. The local human operator physically using Church App under the dedicated Church App production Windows account is the maintenance-authorizing actor, but authority exists only after an explicit interactive maintenance confirmation initiated from the application. This is an authorization and consent boundary, not application-level identity authentication. The policy is documentation only: maintenance execution, authentication, backup/restore, writable database access, migration, schema V2, parish/business schema, IPC, UI design, and the Rust capability design remain separate and unimplemented.
 
 ## 3. Locked operational decisions relevant to the initiative
 
 - Future local parish data is authoritative and offline-capable; future central services are non-authoritative.
 - Privileged data operations and encryption material belong in Rust, never React.
 - Production paths are Rust-owned and fixed beneath the application-owned per-user local data directory; React cannot supply or receive them.
-- Ordinary Church App use may run under the current Windows account, and the process should run in a non-elevated session. Administrator-group membership need not be established for the accepted current-account evidence. A dedicated standard Windows account is optional and recommended for a parish-owned shared workstation, not an ordinary-use prerequisite. Elevation refusal is not yet implemented; this direction does not approve privileged or elevated ordinary operation.
+- Production normal operation uses one dedicated standard Windows account for Church App, and the process should run in a non-elevated session. Historical current-account test evidence does not establish dedicated-account execution or administrator-group membership. Elevation refusal is not yet implemented; this direction does not approve privileged or elevated ordinary operation.
 - The approved recovery condition above is a product decision only; its design and implementation remain deferred.
 
 ## 4. Current repository baseline
@@ -30,11 +30,11 @@ The guarded read-only SQLCipher startup chain, operational activation, explicit 
 
 ## 7. Allowed scope
 
-Documentation-only reconciliation of the accepted application-startup lifecycle integration, limited to `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Code and repository safeguards remain unchanged.
+Documentation-only recording of the approved maintenance authorization trigger policy and the directly related dedicated-account correction, limited to `PLANS.md`, `docs/architecture.md`, `docs/product-decisions.md`, `docs/security-and-data.md`, and `docs/verification.md`. Code and repository safeguards remain unchanged.
 
 ## 8. Prohibited scope
 
-This documentation work authorizes no code, test, dependency, configuration, workflow, new schema or migration, SQL or PRAGMA change, freshness redesign, recovery integration, backup/restore, replacement, new Tauri command or IPC, frontend change, generated inventory, application runtime change, header mutation, or destructive operation. It records only the committed setup/bootstrap and startup behavior and does not authorize any broader operational database interface, installation-state change, stale source-comment cleanup, or new architecture.
+This documentation work authorizes no code, test, dependency, configuration, workflow, maintenance execution, authentication, new schema or migration, SQL or PRAGMA change, writable database access, freshness redesign, recovery integration, backup/restore, replacement, new Tauri command or IPC, frontend change, generated inventory, application runtime change, header mutation, or destructive operation. It does not define a Rust `MaintenanceAuthorization` type, a maintenance-operation enum or taxonomy, migration source/target versions, schema V2, IPC shape, UI wording or dialog design, authentication roles, backup implementation, writable maintenance owner, or migration execution.
 
 ## 9. Dependency approvals
 
@@ -118,6 +118,7 @@ The accepted Windows production dependency is exactly `rusqlite = { version = "=
 - [x] Validate setup through final active artifacts and require a fresh-process restart before operational startup can reach `Ready`.
 - [x] Complete the accepted Windows debug end-to-end setup/startup observation from marker-only isolated root through `Unavailable`, explicit setup, restart-required, and fresh-process `ready_installed`.
 - [x] Implement and accept the private, consuming, currently unwired full-integrity transition from `ReadabilityAndIntegrityValidatedProductionDatabaseConnection` to `FullIntegrityValidatedProductionDatabaseConnection`.
+- [x] Document and lock the product-level maintenance authorization trigger policy without implementing it.
 - [ ] Separately approve the migration prerequisites and exact migration design; no migration implementation is authorized by this plan state.
 
 ## Implemented first-time setup and minimal V1 bootstrap
@@ -218,7 +219,7 @@ On the observed Windows host, the accepted `LocalFixedCandidate` prerequisite an
 
 ## 14. Decisions and authority classifications
 
-- Carlo-approved: permanent identifier and display name; current-account, non-elevated ordinary-use direction with a dedicated standard Windows account optional and recommended for a parish-owned shared workstation; per-user application-data direction; application-owned-directory-only operation; explicit setup-only creation; no silent startup creation; immutable random parish identifier direction; temporary Windows SQLCipher feasibility; future verified restore condition; and the bounded SQLCipher Community Edition production database, independent database-key, metadata, correspondence, freshness, opening, integrity, path/sidecar, journal/durability, migration, support, redaction, and authority-separation package.
+- Carlo-approved: permanent identifier and display name; dedicated standard Windows account and non-elevated production-operation direction, with historical current-account observations retained only as test evidence; per-user application-data direction; application-owned-directory-only operation; explicit setup-only creation; no silent startup creation; immutable random parish identifier direction; temporary Windows SQLCipher feasibility; future verified restore condition; and the bounded SQLCipher Community Edition production database, independent database-key, metadata, correspondence, freshness, opening, integrity, path/sidecar, journal/durability, migration, support, redaction, and authority-separation package.
 - Implemented foundation: all previously accepted foundations plus operating-system-backed authentication-material generation, HMAC-SHA-256 envelope authentication, current-user in-memory DPAPI protection for separate key and evidence objects, strict wrapper and key-payload codecs, native clear-before-free handling, and a typed generation-match transition before plaintext release. Protection remains separate from persistence, structural validation, database cross-checking, setup, startup, and operational evidence.
 - Historical technical experiment: `sqlcipher_windows_feasibility` and its former development-dependency state remain Windows test-only evidence of the earlier candidate evaluation.
 - Implemented production foundation: the exact Windows production `rusqlite` configuration, private raw-key application primitive, metadata-only production database-file inspection, guarded read-only connection handoff, consuming validation and startup-authorization transitions, operational activation, lifecycle ownership, explicit first-time setup, encrypted database creation, minimal V1 metadata/bootstrap schema, and private unwired full-integrity validation transition. The repository retains distinct setup and startup authority; activation consumes `StartupAuthorizedProductionDatabaseConnection` into `OperationalProductionDatabase` without granting arbitrary SQL or product-workflow authority. The full-integrity transition is not part of that startup chain and grants no migration authority.
@@ -350,7 +351,17 @@ Frontend-visible states are `Starting`, `Ready`, `Unavailable`, `SetupInProgress
 
 Lifecycle logs are local, fixed, and coarse. They must not expose paths, keys, identifiers, metadata, native errors, or raw backend chains. Windows debug-assertion-only manual root/pause support is an isolated manual verification aid and is not frontend or IPC authority. The synthetic fixture exporter is Windows test-only, ignored, and not production behavior.
 
-## 23. Links
+## 23. Locked maintenance authorization trigger policy
+
+The maintenance-authorizing actor is the local human operator physically using Church App under the dedicated standard Windows account used for Church App production operation. Merely being that Windows user does not create maintenance authorization. The application must require an explicit interactive maintenance confirmation initiated from Church App. That confirmation records the operator's authorization and consent for one maintenance action; it is deliberately not proof of application-level user identity. Application-level authentication may strengthen this boundary later, but the first-generation maintenance architecture does not depend on authentication existing.
+
+Any future maintenance authority must be explicit, interactive, single-use, process-local, non-persistent, non-renewing, and scoped to exactly one approved maintenance operation. It must never be inferred automatically, granted during startup or setup completion, granted merely because migration is required, survive application restart, be serialized or persisted, be reconstructed from frontend-supplied Boolean, string, path, or version values, or authorize a different maintenance operation. Automatic maintenance authorization and automatic maintenance execution are prohibited in the initial design.
+
+Application start, `Ready`, first-time setup authority, startup authorization, possession of `OperationalProductionDatabase` or `FullIntegrityValidatedProductionDatabaseConnection`, backup existence or verified-backup proof, writable database ownership, migration eligibility, version compatibility, and concurrency or exclusivity do not create or substitute for maintenance authorization. Safety prerequisites remain separate composed gates: a verified recoverable encrypted backup, full-integrity validation, valid source and target versions, writable maintenance ownership, concurrency and exclusivity, and installation, evidence, and freshness state. Satisfying any or all of them does not record operator consent.
+
+React may eventually request or present the interactive confirmation, but it remains non-authoritative. Rust must ultimately construct and own any future maintenance authority. This policy does not define the Rust capability type, the maintenance-operation enum or taxonomy, migration version pair, schema V2, IPC command shape, UI wording or confirmation-dialog design, authentication roles, backup implementation, writable maintenance owner, or migration execution.
+
+## 24. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)
