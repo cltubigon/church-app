@@ -3,8 +3,8 @@
 use std::fmt;
 
 use crate::production_database_connection_handoff::{
-    ProductionDatabaseConnectionCloseOutcome, ProductionDatabaseMigrationOpportunity,
-    ProductionDatabaseMigrationRevalidationCloseFailure,
+    ProductionDatabaseConnectionCloseFailure, ProductionDatabaseConnectionCloseOutcome,
+    ProductionDatabaseMigrationOpportunity, ProductionDatabaseMigrationRevalidationCloseFailure,
     ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
     ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
     ProductionDatabaseMigrationRevalidationOutcome,
@@ -27,6 +27,7 @@ enum ProductionDatabaseMigrationConfirmationState {
     Consumed,
     Revoked,
     RevokedCloseRetryRequired(ProductionDatabaseMigrationRevalidationCloseFailure),
+    RevokedSourceCloseRetryRequired(ProductionDatabaseConnectionCloseFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,18 +63,26 @@ impl ProductionDatabaseMigrationPendingContext {
     }
 }
 
-struct ProductionDatabaseMigrationRevalidationWork {
+pub(super) struct ProductionDatabaseMigrationRevalidationWork {
     opportunity: ProductionDatabaseMigrationOpportunity,
     revalidation_context: ProductionDatabaseMigrationRevalidationContext,
 }
 
 impl ProductionDatabaseMigrationRevalidationWork {
-    #[cfg(test)]
-    fn revalidate(self) -> ProductionDatabaseMigrationRevalidationOutcome {
+    pub(super) fn revalidate(self) -> ProductionDatabaseMigrationRevalidationOutcome {
         crate::production_database_connection_handoff::revalidate_production_database_migration_opportunity(
             self.opportunity,
             self.revalidation_context,
         )
+    }
+
+    pub(super) fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
+        let Self {
+            opportunity,
+            revalidation_context,
+        } = self;
+        drop(revalidation_context);
+        opportunity.close()
     }
 }
 
@@ -117,7 +126,7 @@ enum ProductionDatabaseMigrationCancellationOutcome {
 }
 
 #[allow(clippy::large_enum_variant)]
-enum ProductionDatabaseMigrationRevalidationCompletion {
+pub(super) enum ProductionDatabaseMigrationRevalidationCompletion {
     Authorized,
     Revoked(RevalidatedProductionDatabaseMigrationOpportunity),
     Failed(ProductionDatabaseMigrationRevalidationError),
@@ -132,7 +141,7 @@ enum ProductionDatabaseMigrationCloseRetryTransition {
 }
 
 #[derive(Debug)]
-struct ProductionDatabaseMigrationNotPending;
+pub(super) struct ProductionDatabaseMigrationNotPending;
 #[derive(Debug)]
 struct ProductionDatabaseMigrationNotAuthorized;
 
@@ -191,7 +200,7 @@ impl ProductionDatabaseMigrationConfirmation {
 
     #[allow(dead_code)]
     #[allow(clippy::result_large_err)]
-    fn begin_revalidation(
+    pub(super) fn begin_revalidation(
         &mut self,
     ) -> Result<ProductionDatabaseMigrationRevalidationWork, ProductionDatabaseMigrationNotPending>
     {
@@ -217,6 +226,49 @@ impl ProductionDatabaseMigrationConfirmation {
             opportunity,
             revalidation_context,
         })
+    }
+
+    pub(super) fn revoke_revalidation_before_start(&mut self) {
+        if matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::Revalidating { .. }
+        ) {
+            self.state = ProductionDatabaseMigrationConfirmationState::Revoked;
+        }
+    }
+
+    pub(super) fn retain_source_close_failure(
+        &mut self,
+        failure: ProductionDatabaseConnectionCloseFailure,
+    ) {
+        if matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::Revoked
+        ) {
+            self.state =
+                ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(
+                    failure,
+                );
+        }
+    }
+
+    pub(super) fn ownership_resolved_for_exit(&self) -> bool {
+        // Consumed is exit-resolved only while production execution remains unwired. Future
+        // execution wiring must add separate execution-owner accounting before consumption.
+        matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::NotOffered
+                | ProductionDatabaseMigrationConfirmationState::Consumed
+                | ProductionDatabaseMigrationConfirmationState::Revoked
+        )
+    }
+
+    pub(super) fn has_retained_close_failure(&self) -> bool {
+        matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::RevokedCloseRetryRequired(_)
+                | ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(_)
+        )
     }
 
     #[allow(dead_code)]
@@ -278,6 +330,9 @@ impl ProductionDatabaseMigrationConfirmation {
             | ProductionDatabaseMigrationConfirmationState::Revoked
             | ProductionDatabaseMigrationConfirmationState::RevokedCloseRetryRequired(
                 _,
+            )
+            | ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(
+                _,
             )) => {
                 self.state = terminal;
                 None
@@ -287,7 +342,7 @@ impl ProductionDatabaseMigrationConfirmation {
 
     #[allow(dead_code)]
     #[allow(clippy::result_large_err)]
-    fn complete_revalidation(
+    pub(super) fn complete_revalidation(
         &mut self,
         outcome: ProductionDatabaseMigrationRevalidationOutcome,
     ) -> Result<
@@ -356,6 +411,39 @@ impl ProductionDatabaseMigrationConfirmation {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn retry_retained_close_for_test(&mut self) -> bool {
+        if matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::RevokedCloseRetryRequired(_)
+        ) {
+            return matches!(
+                self.retry_revalidation_close(),
+                ProductionDatabaseMigrationCloseRetryTransition::Closed(_)
+            );
+        }
+        let prior = std::mem::replace(
+            &mut self.state,
+            ProductionDatabaseMigrationConfirmationState::Revoked,
+        );
+        let ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(failure) =
+            prior
+        else {
+            self.state = prior;
+            return false;
+        };
+        match failure.retry_close() {
+            ProductionDatabaseConnectionCloseOutcome::Closed => true,
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                self.state =
+                    ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(
+                        failure,
+                    );
+                false
+            }
+        }
+    }
+
     #[allow(dead_code)]
     fn consume_authorization(
         &mut self,
@@ -418,6 +506,9 @@ impl ProductionDatabaseMigrationConfirmation {
             ProductionDatabaseMigrationConfirmationState::RevokedCloseRetryRequired(_) => {
                 ProductionDatabaseMigrationConfirmationStateForTest::RevokedCloseRetryRequired
             }
+            ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(_) => {
+                ProductionDatabaseMigrationConfirmationStateForTest::RevokedSourceCloseRetryRequired
+            }
         }
     }
 }
@@ -433,6 +524,7 @@ pub(super) enum ProductionDatabaseMigrationConfirmationStateForTest {
     Consumed,
     Revoked,
     RevokedCloseRetryRequired,
+    RevokedSourceCloseRetryRequired,
 }
 
 #[cfg(test)]
@@ -933,6 +1025,10 @@ mod ownership_tests {
         const LIFECYCLE: &str = include_str!("../application_lifecycle.rs");
         let production_lifecycle = LIFECYCLE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
         assert!(!production_lifecycle.contains(".establish_pending("));
-        assert!(!production_lifecycle.contains(".begin_revalidation("));
+        assert_eq!(
+            production_lifecycle.matches(".begin_revalidation(").count(),
+            1,
+            "only the private lifecycle worker reservation may begin revalidation"
+        );
     }
 }

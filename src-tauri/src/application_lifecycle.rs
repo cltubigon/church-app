@@ -16,7 +16,8 @@ use tauri::{AppHandle, Manager};
 mod production_database_migration_confirmation;
 
 use production_database_migration_confirmation::{
-    ProductionDatabaseMigrationConfirmation, ProductionDatabaseMigrationShutdownOwnership,
+    ProductionDatabaseMigrationConfirmation, ProductionDatabaseMigrationRevalidationCompletion,
+    ProductionDatabaseMigrationShutdownOwnership,
 };
 
 #[cfg(windows)]
@@ -286,6 +287,13 @@ pub(crate) enum FirstTimeSetupRequestOutcome {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProductionDatabaseMigrationRevalidationRequestOutcome {
+    Started,
+    NotPending,
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum FirstTimeSetupRequestResult {
@@ -424,22 +432,12 @@ struct LifecycleInner {
     startup_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     close_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     setup_worker: Option<thread::JoinHandle<()>>,
+    migration_worker: Option<thread::JoinHandle<()>>,
     startup_work_resolved: bool,
     close_work_resolved: bool,
     setup_work_resolved: bool,
+    migration_work_resolved: bool,
     setup_shutdown_app: Option<AppHandle>,
-}
-
-impl LifecycleInner {
-    fn begin_shutdown(
-        &mut self,
-    ) -> (
-        ShutdownAction<OperationalProductionDatabase>,
-        Option<ProductionDatabaseMigrationShutdownOwnership>,
-    ) {
-        let pending_migration = self.migration_confirmation.invalidate_for_shutdown();
-        (self.state.begin_shutdown(), pending_migration)
-    }
 }
 
 pub(crate) struct ApplicationLifecycle {
@@ -455,9 +453,11 @@ impl ApplicationLifecycle {
                 startup_worker: None,
                 close_worker: None,
                 setup_worker: None,
+                migration_worker: None,
                 startup_work_resolved: false,
                 close_work_resolved: true,
                 setup_work_resolved: true,
+                migration_work_resolved: true,
                 setup_shutdown_app: None,
             }),
         })
@@ -470,7 +470,12 @@ impl ApplicationLifecycle {
     }
 
     pub(crate) fn status(&self) -> StartupStatus {
-        self.lock().state.status()
+        let inner = self.lock();
+        if inner.migration_confirmation.has_retained_close_failure() {
+            StartupStatus::ShutdownIncomplete
+        } else {
+            inner.state.status()
+        }
     }
 
     fn shutdown_pending(&self) -> bool {
@@ -584,6 +589,145 @@ impl ApplicationLifecycle {
         }
     }
 
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn begin_production_database_migration_revalidation(
+        self: &Arc<Self>,
+        app: AppHandle,
+    ) -> ProductionDatabaseMigrationRevalidationRequestOutcome {
+        self.begin_production_database_migration_revalidation_with(
+            Some(app),
+            spawn_migration_thread,
+        )
+    }
+
+    #[cfg(windows)]
+    fn begin_production_database_migration_revalidation_with<Spawn>(
+        self: &Arc<Self>,
+        app: Option<AppHandle>,
+        spawn: Spawn,
+    ) -> ProductionDatabaseMigrationRevalidationRequestOutcome
+    where
+        Spawn: FnOnce(MigrationThreadTask) -> std::io::Result<thread::JoinHandle<()>>,
+    {
+        let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+        let lifecycle = Arc::clone(self);
+        let mut inner = self.lock();
+        if inner.migration_worker.is_some() || !inner.migration_work_resolved {
+            return ProductionDatabaseMigrationRevalidationRequestOutcome::Unavailable;
+        }
+        let work = match inner.migration_confirmation.begin_revalidation() {
+            Ok(work) => work,
+            Err(_) => return ProductionDatabaseMigrationRevalidationRequestOutcome::NotPending,
+        };
+        inner.migration_work_resolved = false;
+        let escrow = Arc::new(Mutex::new(Some(work)));
+        let worker_escrow = Arc::clone(&escrow);
+        let worker_app = app.clone();
+        let task: MigrationThreadTask = Box::new(move || {
+            if start_receiver.recv().is_err() {
+                return;
+            }
+            let work = worker_escrow
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+                .expect("migration work escrow must contain exactly one owner");
+            let outcome = work.revalidate();
+            lifecycle.complete_migration_revalidation(outcome, worker_app.as_ref());
+        });
+        let worker = match spawn(task) {
+            Ok(worker) => worker,
+            Err(_) => {
+                inner
+                    .migration_confirmation
+                    .revoke_revalidation_before_start();
+                let work = escrow
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                    .expect("failed migration spawn must return complete escrowed work");
+                drop(inner);
+                self.complete_migration_source_close(work.close(), app.as_ref());
+                return ProductionDatabaseMigrationRevalidationRequestOutcome::Unavailable;
+            }
+        };
+        inner.migration_worker = Some(worker);
+        drop(inner);
+        if start_sender.send(()).is_err() {
+            let work = escrow
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(work) = work {
+                self.lock()
+                    .migration_confirmation
+                    .revoke_revalidation_before_start();
+                self.complete_migration_source_close(work.close(), app.as_ref());
+            }
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Unavailable
+        } else {
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Started
+        }
+    }
+
+    #[cfg(windows)]
+    fn complete_migration_revalidation(
+        &self,
+        outcome: crate::production_database_connection_handoff::ProductionDatabaseMigrationRevalidationOutcome,
+        app: Option<&AppHandle>,
+    ) {
+        let completion = {
+            let mut inner = self.lock();
+            let completion = inner
+                .migration_confirmation
+                .complete_revalidation(outcome)
+                .expect("only the reserved migration worker may complete revalidation");
+            match completion {
+                ProductionDatabaseMigrationRevalidationCompletion::Authorized
+                | ProductionDatabaseMigrationRevalidationCompletion::Failed(_) => {
+                    inner.migration_work_resolved = true;
+                }
+                ProductionDatabaseMigrationRevalidationCompletion::CloseRetryRequired
+                | ProductionDatabaseMigrationRevalidationCompletion::Revoked(_) => {}
+            }
+            completion
+        };
+        if let ProductionDatabaseMigrationRevalidationCompletion::Revoked(source) = completion {
+            self.complete_migration_source_close(source.close(), app);
+        } else if self.may_exit()
+            && let Some(app) = app
+        {
+            app.exit(0);
+        }
+    }
+
+    #[cfg(windows)]
+    fn complete_migration_source_close(
+        &self,
+        outcome: ProductionDatabaseConnectionCloseOutcome,
+        app: Option<&AppHandle>,
+    ) {
+        {
+            let mut inner = self.lock();
+            match outcome {
+                ProductionDatabaseConnectionCloseOutcome::Closed => {
+                    inner.migration_work_resolved = true;
+                }
+                ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                    inner
+                        .migration_confirmation
+                        .retain_source_close_failure(failure);
+                }
+            }
+        }
+        if self.may_exit()
+            && let Some(app) = app
+        {
+            app.exit(0);
+        }
+    }
+
     fn complete_setup(&self, result: SetupWorkerResult) {
         let (completion, shutdown_app) = {
             let mut inner = self.lock();
@@ -610,7 +754,9 @@ impl ApplicationLifecycle {
             }
             SetupCompletion::FinishedWithoutOwner { shutdown_requested } => {
                 eprintln!(r#"event="first_time_setup" outcome="unavailable""#);
-                if let (true, Some(app)) = (shutdown_requested, shutdown_app) {
+                if let (true, Some(app)) = (shutdown_requested, shutdown_app)
+                    && self.may_exit()
+                {
                     app.exit(0);
                 }
             }
@@ -644,7 +790,7 @@ impl ApplicationLifecycle {
             }
             StartupCompletion::FinishedWithoutOwner { shutdown_requested } => {
                 eprintln!(r#"event="application_startup" outcome="unavailable""#);
-                if shutdown_requested {
+                if shutdown_requested && self.may_exit() {
                     app.exit(0);
                 }
             }
@@ -662,20 +808,90 @@ impl ApplicationLifecycle {
     }
 
     pub(crate) fn request_shutdown(self: &Arc<Self>, app: AppHandle) {
-        let (action, pending_migration) = {
+        let prior_migration_worker = {
             let mut inner = self.lock();
-            let (action, pending_migration) = inner.begin_shutdown();
+            inner
+                .migration_work_resolved
+                .then(|| inner.migration_worker.take())
+                .flatten()
+        };
+        if let Some(worker) = prior_migration_worker {
+            let _ = worker.join();
+        }
+
+        let (migration_start_sender, migration_escrow, action) = {
+            let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+            let mut inner = self.lock();
+            let migration_owner = inner.migration_confirmation.invalidate_for_shutdown();
+            if migration_owner.is_some() {
+                inner.migration_work_resolved = false;
+            }
+            let action = inner.state.begin_shutdown();
             if matches!(action, ShutdownAction::WaitForSetup) {
                 inner.setup_shutdown_app = Some(app.clone());
             }
-            (action, pending_migration)
+            let mut migration_start_sender = None;
+            let mut migration_escrow = None;
+            if let Some(migration_owner) = migration_owner {
+                let escrow = Arc::new(Mutex::new(Some(migration_owner)));
+                let worker_escrow = Arc::clone(&escrow);
+                let lifecycle = Arc::clone(self);
+                let worker_app = app.clone();
+                let task: MigrationThreadTask = Box::new(move || {
+                    if start_receiver.recv().is_err() {
+                        return;
+                    }
+                    let owner = worker_escrow
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                        .expect("migration shutdown escrow must contain exactly one owner");
+                    lifecycle.complete_migration_source_close(
+                        close_migration_shutdown_ownership(owner),
+                        Some(&worker_app),
+                    );
+                });
+                if let Ok(worker) = spawn_migration_thread(task) {
+                    inner.migration_worker = Some(worker);
+                    migration_start_sender = Some(start_sender);
+                }
+                migration_escrow = Some(escrow);
+            }
+            (migration_start_sender, migration_escrow, action)
         };
-        let None = pending_migration else {
-            unreachable!("no production caller can establish a pending migration opportunity");
-        };
+
+        if let Some(start_sender) = migration_start_sender {
+            if start_sender.send(()).is_err()
+                && let Some(owner) = migration_escrow.as_ref().and_then(|escrow| {
+                    escrow
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                })
+            {
+                self.complete_migration_source_close(
+                    close_migration_shutdown_ownership(owner),
+                    Some(&app),
+                );
+            }
+        } else if let Some(owner) = migration_escrow.and_then(|escrow| {
+            escrow
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+        }) {
+            self.complete_migration_source_close(
+                close_migration_shutdown_ownership(owner),
+                Some(&app),
+            );
+        }
         eprintln!(r#"event="application_shutdown" outcome="requested""#);
         match action {
-            ShutdownAction::Exit => app.exit(0),
+            ShutdownAction::Exit => {
+                if self.may_exit() {
+                    app.exit(0);
+                }
+            }
             ShutdownAction::WaitForStartup => {
                 eprintln!(r#"event="application_shutdown" outcome="pending""#);
             }
@@ -699,16 +915,19 @@ impl ApplicationLifecycle {
         let worker = tauri::async_runtime::spawn_blocking(move || {
             eprintln!(r#"event="application_shutdown" outcome="close_attempted""#);
             let failure = close_operational(owner);
+            let close_failed = failure.is_some();
             {
                 let mut inner = lifecycle.lock();
                 inner.state.finish_close(failure);
                 inner.close_work_resolved = true;
             }
-            if lifecycle.status() == StartupStatus::ShutdownIncomplete {
+            if close_failed {
                 eprintln!(r#"event="application_shutdown" outcome="close_failed""#);
             } else {
                 eprintln!(r#"event="application_shutdown" outcome="close_succeeded""#);
-                app.exit(0);
+                if lifecycle.may_exit() {
+                    app.exit(0);
+                }
             }
         });
         self.lock().close_worker = Some(worker);
@@ -719,11 +938,13 @@ impl ApplicationLifecycle {
         inner.startup_work_resolved
             && inner.close_work_resolved
             && inner.setup_work_resolved
+            && inner.migration_work_resolved
             && matches!(inner.state, LifecycleState::Failed(_))
+            && inner.migration_confirmation.ownership_resolved_for_exit()
     }
 
     pub(crate) fn join_workers(&self) {
-        let (startup, close, setup) = {
+        let (startup, close, setup, migration) = {
             let mut inner = self.lock();
             let startup = (!matches!(inner.state, LifecycleState::StartupCloseRetryRequired))
                 .then(|| inner.startup_worker.take())
@@ -732,7 +953,11 @@ impl ApplicationLifecycle {
                 .setup_work_resolved
                 .then(|| inner.setup_worker.take())
                 .flatten();
-            (startup, inner.close_worker.take(), setup)
+            let migration = (inner.migration_work_resolved
+                && inner.migration_confirmation.ownership_resolved_for_exit())
+            .then(|| inner.migration_worker.take())
+            .flatten();
+            (startup, inner.close_worker.take(), setup, migration)
         };
         if let Some(worker) = startup {
             let _ = tauri::async_runtime::block_on(worker);
@@ -743,6 +968,9 @@ impl ApplicationLifecycle {
         if let Some(worker) = setup {
             let _ = worker.join();
         }
+        if let Some(worker) = migration {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -750,10 +978,30 @@ impl ApplicationLifecycle {
 type SetupThreadTask = Box<dyn FnOnce() + Send + 'static>;
 
 #[cfg(windows)]
+type MigrationThreadTask = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(windows)]
 fn spawn_setup_thread(task: SetupThreadTask) -> std::io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("first-time-setup".to_owned())
         .spawn(task)
+}
+
+#[cfg(windows)]
+fn spawn_migration_thread(task: MigrationThreadTask) -> std::io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("production-database-migration".to_owned())
+        .spawn(task)
+}
+
+#[cfg(windows)]
+fn close_migration_shutdown_ownership(
+    owner: ProductionDatabaseMigrationShutdownOwnership,
+) -> ProductionDatabaseConnectionCloseOutcome {
+    match owner {
+        ProductionDatabaseMigrationShutdownOwnership::Pending(pending) => pending.close(),
+        ProductionDatabaseMigrationShutdownOwnership::Authorized(source) => source.close(),
+    }
 }
 
 #[cfg(windows)]
@@ -1197,7 +1445,14 @@ mod tests {
     use super::*;
 
     #[cfg(windows)]
-    use std::{rc::Rc, sync::mpsc, time::Duration};
+    use std::{
+        rc::Rc,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::Duration,
+    };
 
     #[derive(Debug, Eq, PartialEq)]
     struct TestOwner(u8);
@@ -2324,6 +2579,403 @@ mod tests {
         assert_eq!(state.status(), StartupStatus::Stopping);
     }
 
+    #[cfg(windows)]
+    fn establish_migration_pending(
+        lifecycle: &ApplicationLifecycle,
+        root: &std::path::Path,
+        opportunity: crate::production_database_connection_handoff::ProductionDatabaseMigrationOpportunity,
+    ) {
+        use production_database_migration_confirmation::ProductionDatabaseMigrationPendingContext;
+
+        lifecycle
+            .lock()
+            .migration_confirmation
+            .establish_pending(ProductionDatabaseMigrationPendingContext::new(
+                opportunity,
+                crate::production_database_connection_handoff::genuine_production_database_migration_revalidation_context_for_test(root),
+            ))
+            .expect("test must establish one genuine pending opportunity");
+    }
+
+    #[cfg(windows)]
+    fn wait_for_migration_state(
+        lifecycle: &ApplicationLifecycle,
+        expected: production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest,
+    ) {
+        for _ in 0..200 {
+            if lifecycle.lock().migration_confirmation.state_for_test() == expected {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("migration worker did not reach the expected state");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_worker_start_gate_installs_handle_and_accounting_before_execution() {
+        use crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test;
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, root.path(), opportunity);
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = Arc::clone(&finished);
+        let result =
+            lifecycle.begin_production_database_migration_revalidation_with(None, |task| {
+                let handle = thread::Builder::new()
+                    .name("migration-start-gate-test".to_owned())
+                    .spawn(move || {
+                        task();
+                        worker_finished.store(true, Ordering::SeqCst);
+                    })?;
+                thread::sleep(Duration::from_millis(50));
+                assert!(!finished.load(Ordering::SeqCst));
+                Ok(handle)
+            });
+        assert_eq!(
+            result,
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Started
+        );
+        assert_eq!(
+            lifecycle.begin_production_database_migration_revalidation_with(None, |_| {
+                unreachable!("occupied migration worker lane must not spawn again")
+            }),
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Unavailable
+        );
+        {
+            let inner = lifecycle.lock();
+            assert!(inner.migration_worker.is_some());
+        }
+        wait_for_migration_state(
+            &lifecycle,
+            ProductionDatabaseMigrationConfirmationStateForTest::Authorized,
+        );
+        assert!(lifecycle.lock().migration_work_resolved);
+        let source = lifecycle
+            .lock()
+            .migration_confirmation
+            .invalidate_for_shutdown()
+            .expect("authorized source must remain owned");
+        assert!(matches!(
+            close_migration_shutdown_ownership(source),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_request_is_exactly_once_and_non_pending_does_not_spawn() {
+        let lifecycle = ApplicationLifecycle::new();
+        let spawned = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&spawned);
+        let result =
+            lifecycle.begin_production_database_migration_revalidation_with(None, move |_| {
+                observed.store(true, Ordering::SeqCst);
+                unreachable!("non-pending request must not spawn")
+            });
+        assert_eq!(
+            result,
+            ProductionDatabaseMigrationRevalidationRequestOutcome::NotPending
+        );
+        assert!(!spawned.load(Ordering::SeqCst));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_spawn_failure_recovers_closes_and_terminally_revokes_work() {
+        use crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test;
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, root.path(), opportunity);
+        let result =
+            lifecycle.begin_production_database_migration_revalidation_with(None, |task| {
+                drop(task);
+                Err(std::io::Error::other("synthetic spawn refusal"))
+            });
+        assert_eq!(
+            result,
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Unavailable
+        );
+        let inner = lifecycle.lock();
+        assert!(inner.migration_work_resolved);
+        assert!(inner.migration_worker.is_none());
+        assert_eq!(
+            inner.migration_confirmation.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::Revoked
+        );
+        drop(inner);
+        root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_spawn_failure_close_failure_retains_owner_and_blocks_exit() {
+        use crate::production_database_connection_handoff::{
+            genuine_production_database_migration_opportunity_for_test,
+            with_production_database_close_failure_injected,
+        };
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, root.path(), opportunity);
+        let result = with_production_database_close_failure_injected(|| {
+            lifecycle.begin_production_database_migration_revalidation_with(None, |task| {
+                drop(task);
+                Err(std::io::Error::other("synthetic spawn refusal"))
+            })
+        });
+        assert_eq!(
+            result,
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Unavailable
+        );
+        let inner = lifecycle.lock();
+        assert!(!inner.migration_work_resolved);
+        assert_eq!(
+            inner.migration_confirmation.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::RevokedSourceCloseRetryRequired
+        );
+        drop(inner);
+        assert!(!lifecycle.may_exit());
+        assert_eq!(lifecycle.status(), StartupStatus::ShutdownIncomplete);
+        assert!(
+            lifecycle
+                .lock()
+                .migration_confirmation
+                .retry_retained_close_for_test()
+        );
+        root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn primary_migration_revalidation_failure_resolves_without_double_close() {
+        use crate::{
+            production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test,
+            storage_foundation::installation_evidence_persistence_paths,
+        };
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, root.path(), opportunity);
+        std::fs::remove_file(
+            installation_evidence_persistence_paths(root.path())
+                .active_authenticated_evidence
+                .as_path(),
+        )
+        .unwrap();
+        assert_eq!(
+            lifecycle.begin_production_database_migration_revalidation_with(
+                None,
+                spawn_migration_thread,
+            ),
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Started
+        );
+        wait_for_migration_state(
+            &lifecycle,
+            ProductionDatabaseMigrationConfirmationStateForTest::Revoked,
+        );
+        assert!(lifecycle.lock().migration_work_resolved);
+        lifecycle.join_workers();
+        assert!(lifecycle.lock().migration_worker.is_none());
+        root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn revalidation_close_failure_remains_owned_and_unresolved() {
+        use crate::{
+            production_database_connection_handoff::{
+                genuine_production_database_migration_opportunity_for_test,
+                with_production_database_close_failure_injected,
+            },
+            storage_foundation::installation_evidence_persistence_paths,
+        };
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, root.path(), opportunity);
+        std::fs::remove_file(
+            installation_evidence_persistence_paths(root.path())
+                .active_authenticated_evidence
+                .as_path(),
+        )
+        .unwrap();
+        assert_eq!(
+            lifecycle.begin_production_database_migration_revalidation_with(None, |task| {
+                thread::Builder::new()
+                    .name("migration-close-failure-test".to_owned())
+                    .spawn(move || with_production_database_close_failure_injected(task))
+            }),
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Started
+        );
+        wait_for_migration_state(
+            &lifecycle,
+            ProductionDatabaseMigrationConfirmationStateForTest::RevokedCloseRetryRequired,
+        );
+        assert!(!lifecycle.lock().migration_work_resolved);
+        assert!(!lifecycle.may_exit());
+        assert!(
+            lifecycle
+                .lock()
+                .migration_confirmation
+                .retry_retained_close_for_test()
+        );
+        root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shutdown_revocation_wins_over_late_success_and_worker_closes_source() {
+        use crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test;
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, root.path(), opportunity);
+        let (wrapper_ready_sender, wrapper_ready_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let request_lifecycle = Arc::clone(&lifecycle);
+        let request = thread::spawn(move || {
+            request_lifecycle.begin_production_database_migration_revalidation_with(
+                None,
+                move |task| {
+                    thread::Builder::new()
+                        .name("migration-late-revocation-test".to_owned())
+                        .spawn(move || {
+                            wrapper_ready_sender.send(()).unwrap();
+                            release_receiver.recv().unwrap();
+                            task();
+                        })
+                },
+            )
+        });
+        wrapper_ready_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        {
+            let mut inner = lifecycle.lock();
+            assert!(
+                inner
+                    .migration_confirmation
+                    .invalidate_for_shutdown()
+                    .is_none()
+            );
+            assert_eq!(
+                inner.migration_confirmation.state_for_test(),
+                ProductionDatabaseMigrationConfirmationStateForTest::RevalidatingRevokeRequested
+            );
+        }
+        release_sender.send(()).unwrap();
+        assert_eq!(
+            request.join().unwrap(),
+            ProductionDatabaseMigrationRevalidationRequestOutcome::Started
+        );
+        wait_for_migration_state(
+            &lifecycle,
+            ProductionDatabaseMigrationConfirmationStateForTest::Revoked,
+        );
+        assert!(lifecycle.lock().migration_work_resolved);
+        lifecycle.join_workers();
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn migration_worker_surface_remains_private_unwired_and_non_executing() {
+        const LIFECYCLE: &str = include_str!("application_lifecycle.rs");
+        const BOOTSTRAP: &str = include_str!("lib.rs");
+        const FRONTEND: &str = include_str!("../../src/App.tsx");
+        let production = LIFECYCLE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let request_name = "begin_production_database_migration_revalidation(";
+        assert_eq!(production.matches(request_name).count(), 1);
+        assert!(!BOOTSTRAP.contains(request_name));
+        assert!(!FRONTEND.contains(request_name));
+        assert!(production.contains("std::sync::mpsc::sync_channel(0)"));
+        assert!(production.contains("name(\"production-database-migration\".to_owned())"));
+        let request = production
+            .split_once("fn begin_production_database_migration_revalidation_with")
+            .unwrap()
+            .1
+            .split_once("fn complete_migration_revalidation")
+            .unwrap()
+            .0;
+        assert!(!request.contains("spawn_blocking"));
+        assert!(!request.contains("catch_unwind"));
+        assert!(!production.contains(".establish_pending("));
+        for forbidden in [
+            "#[tauri::command]\nfn begin_production_database_migration",
+            "ProductionDatabaseMigrationRevalidationRequestResult",
+            "migration SQL",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "forbidden surface: {forbidden}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_accounting_independently_blocks_exit_and_completed_worker_joins() {
+        let lifecycle = ApplicationLifecycle::new();
+        let joined = Arc::new(AtomicBool::new(false));
+        let worker_joined = Arc::clone(&joined);
+        let worker = thread::spawn(move || worker_joined.store(true, Ordering::SeqCst));
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.startup_work_resolved = true;
+            inner.close_work_resolved = false;
+            inner.setup_work_resolved = true;
+            inner.migration_work_resolved = false;
+            inner.migration_worker = Some(worker);
+        }
+        assert!(!lifecycle.may_exit());
+        lifecycle.lock().close_work_resolved = true;
+        assert!(!lifecycle.may_exit());
+        lifecycle.lock().migration_work_resolved = true;
+        assert!(lifecycle.may_exit());
+        lifecycle.join_workers();
+        assert!(joined.load(Ordering::SeqCst));
+        assert!(lifecycle.lock().migration_worker.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pending_migration_owner_blocks_exit_even_if_resolution_bit_is_incorrectly_true() {
+        use crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, root.path(), opportunity);
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.startup_work_resolved = true;
+            inner.close_work_resolved = true;
+            inner.setup_work_resolved = true;
+            inner.migration_work_resolved = true;
+        }
+        assert!(!lifecycle.may_exit());
+        let owner = lifecycle
+            .lock()
+            .migration_confirmation
+            .invalidate_for_shutdown()
+            .unwrap();
+        assert!(matches!(
+            close_migration_shutdown_ownership(owner),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
     #[test]
     fn lifecycle_shutdown_revokes_migration_confirmation_under_the_same_lock() {
         use crate::production_database_connection_handoff::{
@@ -2350,7 +3002,9 @@ mod tests {
                 ))
                 .is_ok()
         );
-        let (action, pending_migration) = inner.begin_shutdown();
+        let pending_migration = inner.migration_confirmation.invalidate_for_shutdown();
+        inner.migration_work_resolved = false;
+        let action = inner.state.begin_shutdown();
         assert!(matches!(action, ShutdownAction::Exit));
         assert_eq!(
             inner.migration_confirmation.state_for_test(),
@@ -2370,16 +3024,16 @@ mod tests {
 
         const SOURCE: &str = include_str!("application_lifecycle.rs");
         let helper = SOURCE
-            .split_once("impl LifecycleInner {")
+            .split_once("pub(crate) fn request_shutdown")
             .unwrap()
             .1
-            .split_once("\n}")
+            .split_once("fn close_on_worker")
             .unwrap()
             .0;
         let revocation = helper
-            .find("self.migration_confirmation.invalidate_for_shutdown()")
+            .find("migration_confirmation.invalidate_for_shutdown()")
             .unwrap();
-        let stopping = helper.find("self.state.begin_shutdown()").unwrap();
+        let stopping = helper.find("state.begin_shutdown()").unwrap();
         assert!(revocation < stopping);
     }
 
