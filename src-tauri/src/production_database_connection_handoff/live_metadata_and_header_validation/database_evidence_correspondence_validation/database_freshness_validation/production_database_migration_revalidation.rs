@@ -360,6 +360,13 @@ pub(crate) fn revalidate_production_database_migration_opportunity(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn genuine_production_database_migration_revalidation_context_for_test(
+    root: &std::path::Path,
+) -> ProductionDatabaseMigrationRevalidationContext {
+    tests::matching_context(root)
+}
+
 fn discard_success_temporaries<T>(temporary_inputs: T) {
     drop(temporary_inputs);
 }
@@ -660,7 +667,9 @@ mod tests {
         paths
     }
 
-    fn matching_context(root: &std::path::Path) -> ProductionDatabaseMigrationRevalidationContext {
+    pub(super) fn matching_context(
+        root: &std::path::Path,
+    ) -> ProductionDatabaseMigrationRevalidationContext {
         ProductionDatabaseMigrationRevalidationContext::new(
             write_evidence(root, INSTALLATION),
             write_matching_anchor(root),
@@ -1042,7 +1051,7 @@ mod tests {
         assert!(!FRESHNESS_PARENT.contains(symbol));
         assert!(!OPPORTUNITY.contains(symbol));
         assert!(!LIFECYCLE.contains(symbol));
-        assert!(!CONFIRMATION.contains(symbol));
+        assert_eq!(CONFIRMATION.matches(symbol).count(), 1);
         assert!(
             !production
                 .contains("impl Clone for RevalidatedProductionDatabaseMigrationOpportunity")

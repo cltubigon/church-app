@@ -167,21 +167,30 @@ pub(crate) use live_metadata_and_header_validation::{
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
+    ProductionDatabaseMigrationRevalidationCloseFailure,
+    ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
+    ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
+    ProductionDatabaseMigrationRevalidationOutcome,
     ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
-    SetupPreparedMetadataMismatchCloseFailure, SetupProductionDatabaseRevalidationCloseFailure,
+    RevalidatedProductionDatabaseMigrationOpportunity, SetupPreparedMetadataMismatchCloseFailure,
+    SetupProductionDatabaseRevalidationCloseFailure,
     SetupProductionDatabaseRevalidationCloseOutcome, SetupProductionDatabaseRevalidationError,
     StartupAuthorizedProductionDatabaseConnection,
     activate_production_database_for_operational_use, authorize_production_database_startup,
     close_and_preserve_prepared_metadata_validated_production_database_for_setup,
     revalidate_identity_bound_staged_key_production_database_for_setup,
+    revalidate_production_database_migration_opportunity,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
     validate_production_database_live_metadata_and_headers,
 };
 
 #[cfg(test)]
-pub(crate) use live_metadata_and_header_validation::genuine_production_database_migration_opportunity_for_test;
+pub(crate) use live_metadata_and_header_validation::{
+    genuine_production_database_migration_opportunity_for_test,
+    genuine_production_database_migration_revalidation_context_for_test,
+};
 
 #[allow(unused_imports)]
 pub(crate) use full_integrity_validation::{

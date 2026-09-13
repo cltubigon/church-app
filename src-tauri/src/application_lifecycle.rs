@@ -15,7 +15,9 @@ use tauri::{AppHandle, Manager};
 
 mod production_database_migration_confirmation;
 
-use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmation;
+use production_database_migration_confirmation::{
+    ProductionDatabaseMigrationConfirmation, ProductionDatabaseMigrationShutdownOwnership,
+};
 
 #[cfg(windows)]
 use crate::{
@@ -433,9 +435,7 @@ impl LifecycleInner {
         &mut self,
     ) -> (
         ShutdownAction<OperationalProductionDatabase>,
-        Option<
-            crate::production_database_connection_handoff::ProductionDatabaseMigrationOpportunity,
-        >,
+        Option<ProductionDatabaseMigrationShutdownOwnership>,
     ) {
         let pending_migration = self.migration_confirmation.invalidate_for_shutdown();
         (self.state.begin_shutdown(), pending_migration)
@@ -2329,8 +2329,12 @@ mod tests {
         use crate::production_database_connection_handoff::{
             ProductionDatabaseConnectionCloseOutcome,
             genuine_production_database_migration_opportunity_for_test,
+            genuine_production_database_migration_revalidation_context_for_test,
         };
-        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+        use production_database_migration_confirmation::{
+            ProductionDatabaseMigrationConfirmationStateForTest,
+            ProductionDatabaseMigrationPendingContext,
+        };
 
         let lifecycle = ApplicationLifecycle::new();
         let mut inner = lifecycle.lock();
@@ -2338,7 +2342,12 @@ mod tests {
         assert!(
             inner
                 .migration_confirmation
-                .establish_pending(opportunity)
+                .establish_pending(ProductionDatabaseMigrationPendingContext::new(
+                    opportunity,
+                    genuine_production_database_migration_revalidation_context_for_test(
+                        root.path()
+                    ),
+                ))
                 .is_ok()
         );
         let (action, pending_migration) = inner.begin_shutdown();
@@ -2348,10 +2357,13 @@ mod tests {
             ProductionDatabaseMigrationConfirmationStateForTest::Revoked
         );
         drop(inner);
-        assert!(matches!(
+        let Some(ProductionDatabaseMigrationShutdownOwnership::Pending(pending_migration)) =
             pending_migration
-                .expect("lifecycle shutdown must return pending ownership")
-                .close(),
+        else {
+            panic!("lifecycle shutdown must return pending ownership");
+        };
+        assert!(matches!(
+            pending_migration.close(),
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
         root.assert_exact_cleanup();

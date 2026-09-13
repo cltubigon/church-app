@@ -25,16 +25,24 @@ pub(crate) use database_freshness_validation::{
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
+    ProductionDatabaseMigrationRevalidationCloseFailure,
+    ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
+    ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
+    ProductionDatabaseMigrationRevalidationOutcome,
     ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
+    RevalidatedProductionDatabaseMigrationOpportunity,
     StartupAuthorizedProductionDatabaseConnection,
     activate_production_database_for_operational_use, authorize_production_database_startup,
-    validate_production_database_freshness,
+    revalidate_production_database_migration_opportunity, validate_production_database_freshness,
 };
 
 #[cfg(test)]
-pub(crate) use database_freshness_validation::genuine_production_database_migration_opportunity_for_test;
+pub(crate) use database_freshness_validation::{
+    genuine_production_database_migration_opportunity_for_test,
+    genuine_production_database_migration_revalidation_context_for_test,
+};
 
 pub(crate) struct DatabaseEvidenceCorrespondenceMismatch;
 

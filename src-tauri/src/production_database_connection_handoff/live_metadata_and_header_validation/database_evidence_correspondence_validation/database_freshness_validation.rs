@@ -21,9 +21,19 @@ mod production_database_migration_revalidation;
 mod startup_authorization;
 
 pub(crate) use production_database_migration_opportunity::ProductionDatabaseMigrationOpportunity;
+pub(crate) use production_database_migration_revalidation::{
+    ProductionDatabaseMigrationRevalidationCloseFailure,
+    ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
+    ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
+    ProductionDatabaseMigrationRevalidationOutcome,
+    RevalidatedProductionDatabaseMigrationOpportunity,
+    revalidate_production_database_migration_opportunity,
+};
 
 #[cfg(test)]
 pub(crate) use production_database_migration_opportunity::genuine_production_database_migration_opportunity_for_test;
+#[cfg(test)]
+pub(crate) use production_database_migration_revalidation::genuine_production_database_migration_revalidation_context_for_test;
 
 pub(crate) use startup_authorization::{
     OperationalProductionDatabase, ProductionDatabaseStartupAuthorizationCloseFailure,
