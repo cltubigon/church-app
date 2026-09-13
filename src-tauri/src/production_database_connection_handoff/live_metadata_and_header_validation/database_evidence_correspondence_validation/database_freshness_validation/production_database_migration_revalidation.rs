@@ -3,7 +3,10 @@
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::fmt;
+use std::{
+    fmt,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
 
 use crate::{
     database_freshness_classification::{
@@ -112,6 +115,7 @@ pub(crate) enum ProductionDatabaseMigrationRevalidationError {
     TrustedEvidenceUnavailableOrNonCorresponding,
     FreshnessNotEstablished,
     InstallationNotInitializedAndPresent,
+    InternalFailure,
 }
 
 impl fmt::Debug for ProductionDatabaseMigrationRevalidationError {
@@ -124,6 +128,7 @@ impl fmt::Debug for ProductionDatabaseMigrationRevalidationError {
             }
             Self::FreshnessNotEstablished => "FreshnessNotEstablished",
             Self::InstallationNotInitializedAndPresent => "InstallationNotInitializedAndPresent",
+            Self::InternalFailure => "InternalFailure",
         })
     }
 }
@@ -203,161 +208,118 @@ pub(crate) fn revalidate_production_database_migration_opportunity(
         freshness_anchor_paths,
     } = context;
 
+    let computation = catch_unwind(AssertUnwindSafe(|| {
+        run_production_database_migration_revalidation_body(
+            &owner,
+            &offer_metadata,
+            &installation_evidence_paths,
+            &freshness_anchor_paths,
+        )
+    }));
+
+    match computation {
+        Ok(Ok((fresh_metadata, fresh_assessment))) => {
+            discard_success_temporaries((
+                offer_metadata,
+                offer_assessment,
+                installation_evidence_paths,
+                freshness_anchor_paths,
+            ));
+            ProductionDatabaseMigrationRevalidationOutcome::Revalidated(
+                RevalidatedProductionDatabaseMigrationOpportunity {
+                    owner,
+                    metadata_contract: fresh_metadata,
+                    trusted_assessment: fresh_assessment,
+                },
+            )
+        }
+        Ok(Err(category)) => finish_failed_revalidation(
+            category,
+            owner,
+            offer_metadata,
+            offer_assessment,
+            (installation_evidence_paths, freshness_anchor_paths),
+        ),
+        Err(_) => finish_failed_revalidation(
+            ProductionDatabaseMigrationRevalidationError::InternalFailure,
+            owner,
+            offer_metadata,
+            offer_assessment,
+            (installation_evidence_paths, freshness_anchor_paths),
+        ),
+    }
+}
+
+fn run_production_database_migration_revalidation_body(
+    owner: &ConnectionLifetimeOwner,
+    offer_metadata: &DatabaseMetadataContractV1,
+    installation_evidence_paths: &InstallationEvidencePersistencePaths,
+    freshness_anchor_paths: &FreshnessAnchorPersistencePaths,
+) -> Result<
+    (
+        DatabaseMetadataContractV1,
+        TrustedCurrentInstallationEvidenceAssessment,
+    ),
+    ProductionDatabaseMigrationRevalidationError,
+> {
+    #[cfg(test)]
+    tests::panic_if_selected(tests::RevalidationPanicPhase::SourceIdentity);
     let fresh_inspection =
         match inspect_production_database_file(&installation_evidence_paths.active_database) {
             ProductionDatabaseInspection::Present(inspection) => inspection,
             _ => {
-                return finish_failed_revalidation(
+                return Err(
                 ProductionDatabaseMigrationRevalidationError::SourceIdentityUnavailableOrChanged,
-                owner,
-                offer_metadata,
-                offer_assessment,
-                (installation_evidence_paths, freshness_anchor_paths),
             );
             }
         };
+    source_identity_is_unchanged(owner, &fresh_inspection)?;
 
-    if source_identity_is_unchanged(&owner, &fresh_inspection).is_err() {
-        return finish_failed_revalidation(
-            ProductionDatabaseMigrationRevalidationError::SourceIdentityUnavailableOrChanged,
-            owner,
-            offer_metadata,
-            offer_assessment,
-            (
-                installation_evidence_paths,
-                freshness_anchor_paths,
-                fresh_inspection,
-            ),
-        );
-    }
-
-    let fresh_metadata = match observe_fresh_source_metadata(&owner.connection) {
-        Ok(metadata) => metadata,
-        Err(_) => {
-            return finish_failed_revalidation(
-                ProductionDatabaseMigrationRevalidationError::MetadataOrHeadersUnavailableOrChanged,
-                owner,
-                offer_metadata,
-                offer_assessment,
-                (
-                    installation_evidence_paths,
-                    freshness_anchor_paths,
-                    fresh_inspection,
-                ),
-            );
-        }
-    };
-
-    if !metadata_matches_offer(&fresh_metadata, &offer_metadata) {
-        return finish_failed_revalidation(
+    #[cfg(test)]
+    tests::panic_if_selected(tests::RevalidationPanicPhase::MetadataAndHeaders);
+    let fresh_metadata = observe_fresh_source_metadata(&owner.connection)?;
+    if !metadata_matches_offer(&fresh_metadata, offer_metadata) {
+        return Err(
             ProductionDatabaseMigrationRevalidationError::MetadataOrHeadersUnavailableOrChanged,
-            owner,
-            offer_metadata,
-            offer_assessment,
-            (
-                installation_evidence_paths,
-                freshness_anchor_paths,
-                fresh_inspection,
-                fresh_metadata,
-            ),
         );
     }
 
-    let fresh_assessment = match load_trusted_current_installation_evidence_assessment(
-        &installation_evidence_paths,
-    ) {
-        Ok(assessment) => assessment,
-        Err(_) => {
-            return finish_failed_revalidation(
-                ProductionDatabaseMigrationRevalidationError::TrustedEvidenceUnavailableOrNonCorresponding,
-                owner,
-                offer_metadata,
-                offer_assessment,
-                (
-                    installation_evidence_paths,
-                    freshness_anchor_paths,
-                    fresh_inspection,
-                    fresh_metadata,
-                ),
-            );
-        }
-    };
-
+    #[cfg(test)]
+    tests::panic_if_selected(tests::RevalidationPanicPhase::EvidenceAndCorrespondence);
+    let fresh_assessment = load_trusted_current_installation_evidence_assessment(
+        installation_evidence_paths,
+    )
+    .map_err(|_| {
+        ProductionDatabaseMigrationRevalidationError::TrustedEvidenceUnavailableOrNonCorresponding
+    })?;
     if !fresh_evidence_corresponds(&fresh_metadata, &fresh_assessment) {
-        return finish_failed_revalidation(
+        return Err(
             ProductionDatabaseMigrationRevalidationError::TrustedEvidenceUnavailableOrNonCorresponding,
-            owner,
-            offer_metadata,
-            offer_assessment,
-            (
-                installation_evidence_paths,
-                freshness_anchor_paths,
-                fresh_inspection,
-                fresh_metadata,
-                fresh_assessment,
-            ),
         );
     }
 
+    #[cfg(test)]
+    tests::panic_if_selected(tests::RevalidationPanicPhase::AnchorAndFreshness);
     let anchor_observation = observe_normalized_current_freshness_anchor(
-        &freshness_anchor_paths,
+        freshness_anchor_paths,
         fresh_assessment.trusted_identity(),
     );
     if !freshness_is_established(&fresh_metadata, &fresh_assessment, &anchor_observation) {
-        return finish_failed_revalidation(
-            ProductionDatabaseMigrationRevalidationError::FreshnessNotEstablished,
-            owner,
-            offer_metadata,
-            offer_assessment,
-            (
-                installation_evidence_paths,
-                freshness_anchor_paths,
-                fresh_inspection,
-                fresh_metadata,
-                fresh_assessment,
-                anchor_observation,
-            ),
-        );
+        return Err(ProductionDatabaseMigrationRevalidationError::FreshnessNotEstablished);
     }
 
+    #[cfg(test)]
+    tests::panic_if_selected(tests::RevalidationPanicPhase::BeforeFinalInstallationObservation);
     // This is intentionally the final external observation in the transition.
     let final_installation_evidence =
-        observe_production_installation_evidence(&installation_evidence_paths);
+        observe_production_installation_evidence(installation_evidence_paths);
     if !installation_is_initialized_and_present(final_installation_evidence) {
-        return finish_failed_revalidation(
+        return Err(
             ProductionDatabaseMigrationRevalidationError::InstallationNotInitializedAndPresent,
-            owner,
-            offer_metadata,
-            offer_assessment,
-            (
-                installation_evidence_paths,
-                freshness_anchor_paths,
-                fresh_inspection,
-                fresh_metadata,
-                fresh_assessment,
-                anchor_observation,
-                final_installation_evidence,
-            ),
         );
     }
 
-    discard_success_temporaries((
-        offer_metadata,
-        offer_assessment,
-        fresh_inspection,
-        anchor_observation,
-        final_installation_evidence,
-        installation_evidence_paths,
-        freshness_anchor_paths,
-    ));
-
-    ProductionDatabaseMigrationRevalidationOutcome::Revalidated(
-        RevalidatedProductionDatabaseMigrationOpportunity {
-            owner,
-            metadata_contract: fresh_metadata,
-            trusted_assessment: fresh_assessment,
-        },
-    )
+    Ok((fresh_metadata, fresh_assessment))
 }
 
 #[cfg(test)]
@@ -536,7 +498,7 @@ fn retry_failed_revalidation_close_using(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fs, mem::needs_drop};
+    use std::{cell::Cell, fs, fs::OpenOptions, mem::needs_drop};
 
     use super::*;
     use crate::{
@@ -567,8 +529,8 @@ mod tests {
             synthetic_inspected_file_with_parent_file_id_mismatch,
         },
         storage_foundation::{
-            APPLICATION_DATABASE_FORMAT_IDENTITY, freshness_anchor_persistence_paths,
-            installation_evidence_persistence_paths,
+            APPLICATION_DATABASE_FORMAT_IDENTITY, PRODUCTION_DATABASE_FILENAME,
+            freshness_anchor_persistence_paths, installation_evidence_persistence_paths,
         },
     };
 
@@ -580,6 +542,47 @@ mod tests {
     const EVIDENCE_KEY_GENERATION: [u8; 16] = [0x87; 16];
     const ANCHOR_KEY: [u8; 32] = [0x98; 32];
     const ANCHOR_KEY_GENERATION: [u8; 16] = [0xa9; 16];
+    const PANIC_PAYLOAD_MARKER: &str = "sensitive synthetic panic payload";
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    pub(super) enum RevalidationPanicPhase {
+        SourceIdentity,
+        MetadataAndHeaders,
+        EvidenceAndCorrespondence,
+        AnchorAndFreshness,
+        BeforeFinalInstallationObservation,
+    }
+
+    std::thread_local! {
+        static PANIC_PHASE: Cell<Option<RevalidationPanicPhase>> = const { Cell::new(None) };
+    }
+
+    struct PanicPhaseReset(Option<RevalidationPanicPhase>);
+
+    impl Drop for PanicPhaseReset {
+        fn drop(&mut self) {
+            PANIC_PHASE.with(|phase| phase.set(self.0));
+        }
+    }
+
+    fn with_revalidation_panic_injected<T>(
+        selected: RevalidationPanicPhase,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let reset = PanicPhaseReset(PANIC_PHASE.with(|phase| phase.replace(Some(selected))));
+        let outcome = operation();
+        drop(reset);
+        outcome
+    }
+
+    pub(super) fn panic_if_selected(current: RevalidationPanicPhase) {
+        PANIC_PHASE.with(|phase| {
+            if phase.get() == Some(current) {
+                phase.set(None);
+                panic!("{PANIC_PAYLOAD_MARKER}");
+            }
+        });
+    }
 
     struct DropProbe<'a>(&'a Cell<bool>);
 
@@ -701,6 +704,128 @@ mod tests {
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
         root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn every_injected_revalidation_panic_maps_only_to_redacted_internal_failure_and_closes() {
+        for phase in [
+            RevalidationPanicPhase::SourceIdentity,
+            RevalidationPanicPhase::MetadataAndHeaders,
+            RevalidationPanicPhase::EvidenceAndCorrespondence,
+            RevalidationPanicPhase::AnchorAndFreshness,
+            RevalidationPanicPhase::BeforeFinalInstallationObservation,
+        ] {
+            let (root, opportunity) = super::super::production_database_migration_opportunity::genuine_production_database_migration_opportunity_for_test();
+            let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
+            let outcome = with_revalidation_panic_injected(phase, || {
+                revalidate_production_database_migration_opportunity(
+                    opportunity,
+                    matching_context(root.path()),
+                )
+            });
+            assert_eq!(format!("{outcome:?}"), "Failed(InternalFailure)");
+            assert!(!format!("{outcome:?}").contains(PANIC_PAYLOAD_MARKER));
+            assert!(matches!(
+                outcome,
+                ProductionDatabaseMigrationRevalidationOutcome::Failed(
+                    ProductionDatabaseMigrationRevalidationError::InternalFailure
+                )
+            ));
+            assert!(OpenOptions::new().write(true).open(&database).is_ok());
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn panic_close_failure_retains_same_guarded_owner_until_close_only_retry_succeeds() {
+        let (root, opportunity) = super::super::production_database_migration_opportunity::genuine_production_database_migration_opportunity_for_test();
+        let expected_connection = unsafe { opportunity.owner.connection.handle() };
+        let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
+        let outcome =
+            super::super::super::super::super::with_production_database_close_failure_injected(
+                || {
+                    with_revalidation_panic_injected(RevalidationPanicPhase::SourceIdentity, || {
+                        revalidate_production_database_migration_opportunity(
+                            opportunity,
+                            matching_context(root.path()),
+                        )
+                    })
+                },
+            );
+        let ProductionDatabaseMigrationRevalidationOutcome::CloseFailed(failure) = outcome else {
+            panic!("caught panic plus close failure must retain ownership");
+        };
+        assert_eq!(
+            failure.category,
+            ProductionDatabaseMigrationRevalidationError::InternalFailure
+        );
+        assert_eq!(
+            unsafe { failure.owner.connection.handle() },
+            expected_connection
+        );
+        assert_eq!(
+            format!("{failure:?}"),
+            "ProductionDatabaseMigrationRevalidationCloseFailure([REDACTED])"
+        );
+        assert!(!format!("{failure:?}").contains(PANIC_PAYLOAD_MARKER));
+        assert!(OpenOptions::new().write(true).open(&database).is_err());
+
+        let ProductionDatabaseMigrationRevalidationCloseRetryOutcome::Failed(failure) =
+            super::super::super::super::super::with_production_database_close_failure_injected(
+                || failure.retry_close(),
+            )
+        else {
+            panic!("repeated close failure must retain the panic category and owner");
+        };
+        assert_eq!(
+            failure.category,
+            ProductionDatabaseMigrationRevalidationError::InternalFailure
+        );
+        assert_eq!(
+            unsafe { failure.owner.connection.handle() },
+            expected_connection
+        );
+        assert!(OpenOptions::new().write(true).open(&database).is_err());
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseMigrationRevalidationCloseRetryOutcome::Closed(
+                ProductionDatabaseMigrationRevalidationError::InternalFailure
+            )
+        ));
+        assert!(OpenOptions::new().write(true).open(&database).is_ok());
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn existing_semantic_failure_categories_and_internal_failure_are_exact_and_coarse() {
+        for (category, expected) in [
+            (
+                ProductionDatabaseMigrationRevalidationError::SourceIdentityUnavailableOrChanged,
+                "SourceIdentityUnavailableOrChanged",
+            ),
+            (
+                ProductionDatabaseMigrationRevalidationError::MetadataOrHeadersUnavailableOrChanged,
+                "MetadataOrHeadersUnavailableOrChanged",
+            ),
+            (
+                ProductionDatabaseMigrationRevalidationError::TrustedEvidenceUnavailableOrNonCorresponding,
+                "TrustedEvidenceUnavailableOrNonCorresponding",
+            ),
+            (
+                ProductionDatabaseMigrationRevalidationError::FreshnessNotEstablished,
+                "FreshnessNotEstablished",
+            ),
+            (
+                ProductionDatabaseMigrationRevalidationError::InstallationNotInitializedAndPresent,
+                "InstallationNotInitializedAndPresent",
+            ),
+            (
+                ProductionDatabaseMigrationRevalidationError::InternalFailure,
+                "InternalFailure",
+            ),
+        ] {
+            assert_eq!(format!("{category:?}"), expected);
+        }
     }
 
     #[test]
@@ -1019,6 +1144,31 @@ mod tests {
                     .find("observe_production_installation_evidence")
                     .unwrap()
         );
+        assert_eq!(production.matches("catch_unwind(").count(), 1);
+        let body_signature = production
+            .split_once("fn run_production_database_migration_revalidation_body(")
+            .unwrap()
+            .1
+            .split_once(") -> Result<")
+            .unwrap()
+            .0;
+        assert!(body_signature.contains("owner: &ConnectionLifetimeOwner"));
+        assert!(!body_signature.contains("owner: ConnectionLifetimeOwner"));
+        let unwind_boundary = transition
+            .split_once("let computation = catch_unwind")
+            .unwrap()
+            .1
+            .split_once("match computation")
+            .unwrap()
+            .0;
+        assert!(unwind_boundary.contains("&owner"));
+        assert!(!unwind_boundary.contains("close_lifetime_owner"));
+        assert!(!production.contains("resume_unwind"));
+        assert!(!production.contains("ManuallyDrop"));
+        assert!(!production.contains("mem::forget"));
+        assert!(!production.contains("format!("));
+        assert!(!production.contains("std::thread"));
+        assert!(!production.contains("spawn("));
 
         for forbidden in [
             "open_keyed_production_database_read_only",
