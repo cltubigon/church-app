@@ -125,7 +125,7 @@ The engine, dependency/raw-key primitive, guarded connection-handoff, readabilit
 - **Bootstrap scope:** setup creates encrypted `parish-data.db` and initializes only the production V1 metadata/header bootstrap contract. This is not a parish/business schema, defines no parish workflow tables, and does not complete broad product schema creation.
 - **Completion rule:** setup validates the database, prepares and publishes the protected installation artifacts under the existing publication rules, completes final active verification, and then reports restart-required.
 - **Fresh-process rule:** setup completion never installs same-process `Ready`. Only a fresh process that passes the ordinary startup trust chain may install the operational owner and report `Ready`.
-- **Migration status:** migration is the next unimplemented gated storage stage. The private full-integrity boundary now supplies only one reusable prerequisite capability; it does not approve or implement migration or maintenance. Separate design and approval still must compose that capability with an exact target schema/version, maintenance authorization and writable owner, verified recoverable encrypted backup, forward-only and downgrade-refusal rules, interruption/restart classification, ordered metadata/`user_version`/evidence/freshness/lineage updates, exclusivity, and close-failure ownership. Whether maintenance must repeat cipher-integrity validation before mutation is undecided. No migration, schema V2, or parish/business schema is approved, and migration cannot become a startup/setup fallback. Ordinary startup and setup remain unchanged; full integrity is not part of either path.
+- **Migration status:** migration is the next unimplemented gated storage stage. The private full-integrity boundary now supplies only one reusable prerequisite capability; it does not approve or implement migration or maintenance. Separate design and approval still must compose that capability with an exact target schema/version, maintenance authorization and writable owner, verified recoverable encrypted backup, forward-only and downgrade-refusal rules, interruption/restart classification, ordered metadata/`user_version`/evidence/freshness/lineage updates, exclusivity, and close-failure ownership. Whether maintenance must repeat cipher-integrity validation before mutation is undecided. No migration, schema V2, or physical parish/business schema is approved, and migration cannot become a startup/setup fallback. Ordinary startup and setup remain unchanged; full integrity is not part of either path.
 
 ### Locked maintenance authorization trigger and taxonomy decision
 
@@ -169,6 +169,48 @@ The engine, dependency/raw-key primitive, guarded connection-handoff, readabilit
 
 - **Loader contract:** the anchor loader proves bounded, stable selection and validation of the current active wrapper pair, not absolute historical continuity. Disappearance without replacement is rejected; after recreation the loader may reject or may succeed only with the fully validated current recreated pair. Stale or mixed-pair success is forbidden. The accepted test correction changed no production loader bytes and is not a production-security weakening.
 
+## Approved first business-schema product direction (not implemented)
+
+This section records product and domain decisions only. The approved conceptual first business-schema scope is exactly `ServiceRequest`, `RequestScheduleOccurrence`, and `RequestCancellationReview`. These names describe domain scope, not approved physical table names. No SQL, column names, SQL types, persisted enum codes, indexes, constraints, foreign-key names, schema version, migration, Rust business type, IPC, form, or frontend workflow is approved or implemented by this direction. In particular, the first business schema must not be called schema V2 until an exact physical schema contract and version are separately approved. The current production V1 metadata/bootstrap contract and every existing startup, setup, evidence, correspondence, freshness, SQLCipher, migration-authorization, Rust-authority, and React non-authority boundary remain unchanged.
+
+### Service categories and request identity
+
+- The fixed built-in service categories are exactly Baptism, Confirmation, Wedding/Marriage, Burial/Funeral, and First Communion. Wedding/Marriage is one category, and Burial/Funeral is one category.
+- No configurable service catalog or service-administration table is approved for the first business schema. Persisted category codes or values remain unresolved until physical schema design; no code scheme is approved here.
+- An internal database key is sufficient for a request. No human-facing request number or request-number format is required. The key type remains unresolved until physical schema design.
+
+### Primary request status and cancellation review
+
+- Primary request statuses are exactly `Pending`, `Scheduled`, `Completed`, and `Cancelled`. Every newly created request begins as `Pending`.
+- The only approved first-version primary-status transitions are `Pending -> Scheduled`, `Pending -> Cancelled`, `Scheduled -> Completed`, and `Scheduled -> Cancelled`. No reverse transition, reopening, or reactivation is approved, and no generic workflow engine is approved.
+- Cancellation review is separate from primary request status. Requesting cancellation neither changes the primary status immediately nor creates a fifth primary status. A request remains `Pending` or `Scheduled`, as applicable, while review is unresolved, and the UI must not show a primary-status indicator named **Cancellation requested**.
+- Cancellation review dispositions are conceptually `Pending`, `Approved`, and `Rejected`; their exact persisted values remain unresolved. At most one unresolved cancellation review may exist at a time for a request.
+- Staff approval changes a `Pending` or `Scheduled` request to `Cancelled`. Staff rejection leaves the primary status unchanged. Resolved reviews are retained rather than overwritten, and after rejection a later new cancellation request may be submitted.
+- Requests must prioritize staff discovery and review of pending cancellation requests and provide a dedicated filter. This does not approve generic event sourcing, a generic audit framework, or generic status-history infrastructure.
+
+### Schedule occurrences, conflict, and location
+
+- Scheduling uses separate conceptual occurrences rather than one schedule timestamp embedded on every request. Baptism, Confirmation, Wedding/Marriage, and First Communion each use one primary service occurrence.
+- Burial/Funeral may contain two distinct occurrences, `Funeral` and `Burial`, so their schedule facts remain separately representable. Whether either occurrence is mandatory or optional remains unresolved.
+- Either a Funeral date/time or a Burial date/time can block the same schedule slot. Initially, a conflict is exact equality of scheduled local calendar date and local clock time in one shared parish schedule domain.
+- Interval overlap, duration, end time, clergy scheduling, resource scheduling, capacity scheduling, and resource-scoped conflict rules are not modeled or approved.
+- Location belongs to each schedule occurrence and is conceptually bounded free text. No normalized location entity, lookup, or catalog is approved. Wedding/Marriage and First Communion require a final occurrence location; Funeral and Burial may have different locations.
+- Location storage type, maximum length, normalization, whether other services require it, and whether location affects conflict detection remain unresolved.
+
+### Date, time, requester snapshot, and timestamps
+
+- The system schedule timezone is `Asia/Manila`. Schedule facts represent a local calendar date and local clock time under that system-wide invariant. `MM/DD/YYYY` and 12-hour AM/PM are presentation conventions only, not approved persisted formatted values. No per-row timezone column is required merely to repeat the invariant; exact SQL types and encodings remain unresolved.
+- Person normalization is deferred. A request-local requester/contact snapshot contains only requester full name, mobile/phone number, and optional email address. It does not establish durable person identity.
+- No normalized Person or parishioner table, household/family model, birth date, address, government identifier, account or login identity, sacramental-subject identity, duplicate/person matching, or contact history is approved. Field lengths, formatting, validation, and retention mechanics remain unresolved.
+- A request requires `created_at`. Each cancellation review requires `requested_at` and, when resolved, `resolved_at`, so prioritization and retained-review chronology are deterministic. Exact clock representation and SQL encoding remain unresolved.
+- These timestamp decisions do not approve generic `updated_at`, audit timestamps, status-history timestamps, `deleted_at`, or soft-delete infrastructure.
+
+### Deferred person relationships and permanent records
+
+- Normalized person/parishioner identity remains deferred because applicant/requester, sacramental subject, recipient, parent, sponsor, witness, clergy, and household relationships are not yet sufficiently specified. No person table is approved in the first business schema.
+- Sacramental and permanent records are outside the first business schema, and no sacramental-record entity is approved. Completing a request does not yet imply creating a permanent record.
+- Record subjects, canonical fields, registers, certificates, parents, sponsors, witnesses, clergy, annotations, corrections, retention, and record linkage remain separate future product design.
+
 ## Other locked future direction (not implemented)
 
 - Desktop-first and offline-capable; Windows 10 and Windows 11 are intended targets.
@@ -182,8 +224,6 @@ The engine, dependency/raw-key primitive, guarded connection-handoff, readabilit
 - Local parish data will be authoritative; future central Supabase services will be non-authoritative.
 - The public Next.js application and canonical contracts belong in separate repositories.
 - The first release direction is English only.
-- Schedule timezone: `Asia/Manila`; dates: `MM/DD/YYYY`; times: 12-hour with AM/PM.
-- Future primary request statuses are Pending, Scheduled, Completed, and Cancelled.
-- The prior visible **Cancellation requested** primary-status indicator rule is superseded: no such primary-status indicator is to be shown.
+- Schedule timezone, UI formatting, service categories, request statuses, cancellation review, scheduling, location, requester snapshot, timestamps, and explicit deferrals are governed by the approved first business-schema product direction above.
 
 The implemented initialization-state model remains separate decision logic. Parsing establishes no authentication, protection, persistence, provenance, database match, startup authority, or operational trust. Each live trust-chain owner establishes only its named transition. Operational activation occurs only after the independently supplied final installation observation authorizes startup, and it does not imply setup, database creation, writable business operations, schema completeness, migration, authentication, recovery, backup, or parish workflows.
