@@ -15,4 +15,4 @@
 - [ ] Health success is non-sensitive and typed on both sides; failures are calm and safe.
 - [ ] Exact validation evidence, failures, skipped checks, and environment limits are reported.
 - [ ] Manual Windows 11, intended Windows 10, navigation, health, accessibility/scaling, logging, and exclusion tests are recorded.
-- [ ] No file was staged, committed, or pushed and no Git configuration changed.
+- [ ] Staging, commit, and push actions match the task's explicit authorization; no Git configuration changed.
