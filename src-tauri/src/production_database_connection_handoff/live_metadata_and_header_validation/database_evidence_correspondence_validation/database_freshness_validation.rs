@@ -16,6 +16,7 @@ use crate::{
 use super::super::super::{ConnectionLifetimeOwner, ProductionDatabaseConnectionCloseOutcome};
 use super::DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection;
 
+mod production_database_migration_opportunity;
 mod startup_authorization;
 
 pub(crate) use startup_authorization::{
