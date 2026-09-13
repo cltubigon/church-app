@@ -3,10 +3,7 @@
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::{
-    fmt,
-    panic::{AssertUnwindSafe, catch_unwind},
-};
+use std::fmt;
 
 use crate::{
     database_freshness_classification::{
@@ -208,14 +205,14 @@ pub(crate) fn revalidate_production_database_migration_opportunity(
         freshness_anchor_paths,
     } = context;
 
-    let computation = catch_unwind(AssertUnwindSafe(|| {
+    let computation = crate::scoped_panic_output_suppression::catch_unwind_without_output(|| {
         run_production_database_migration_revalidation_body(
             &owner,
             &offer_metadata,
             &installation_evidence_paths,
             &freshness_anchor_paths,
         )
-    }));
+    });
 
     match computation {
         Ok(Ok((fresh_metadata, fresh_assessment))) => {
@@ -498,7 +495,7 @@ fn retry_failed_revalidation_close_using(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fs, fs::OpenOptions, mem::needs_drop};
+    use std::{cell::Cell, fs, fs::OpenOptions, mem::needs_drop, process::Command};
 
     use super::*;
     use crate::{
@@ -543,6 +540,8 @@ mod tests {
     const ANCHOR_KEY: [u8; 32] = [0x98; 32];
     const ANCHOR_KEY_GENERATION: [u8; 16] = [0xa9; 16];
     const PANIC_PAYLOAD_MARKER: &str = "sensitive synthetic panic payload";
+    const UNRELATED_HOOK_MARKER: &str = "unrelated-thread-prior-hook-invoked";
+    const CHILD_SUCCESS_MARKER: &str = "panic-diagnostic-child-complete";
 
     #[derive(Clone, Copy, Eq, PartialEq)]
     pub(super) enum RevalidationPanicPhase {
@@ -708,6 +707,32 @@ mod tests {
 
     #[test]
     fn every_injected_revalidation_panic_maps_only_to_redacted_internal_failure_and_closes() {
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, module)| module);
+        let child_test = format!("{module}::panic_diagnostic_child");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &child_test,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+
+        assert!(
+            output.status.success(),
+            "child stdout: {stdout}\nchild stderr: {stderr}"
+        );
+        assert!(stdout.contains(CHILD_SUCCESS_MARKER));
+        assert_eq!(stderr.trim(), UNRELATED_HOOK_MARKER);
+    }
+
+    fn exercise_every_injected_panic_category_and_close() {
         for phase in [
             RevalidationPanicPhase::SourceIdentity,
             RevalidationPanicPhase::MetadataAndHeaders,
@@ -736,8 +761,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn panic_close_failure_retains_same_guarded_owner_until_close_only_retry_succeeds() {
+    fn exercise_panic_close_failure_and_close_only_retry() {
         let (root, opportunity) = super::super::production_database_migration_opportunity::genuine_production_database_migration_opportunity_for_test();
         let expected_connection = unsafe { opportunity.owner.connection.handle() };
         let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
@@ -794,6 +818,20 @@ mod tests {
         ));
         assert!(OpenOptions::new().write(true).open(&database).is_ok());
         root.assert_exact_cleanup();
+    }
+
+    #[test]
+    #[ignore = "executed in an isolated child process by the diagnostic-channel test"]
+    fn panic_diagnostic_child() {
+        std::panic::set_hook(Box::new(|_| eprintln!("{UNRELATED_HOOK_MARKER}")));
+        crate::scoped_panic_output_suppression::install_before_worker_threads();
+
+        exercise_every_injected_panic_category_and_close();
+        exercise_panic_close_failure_and_close_only_retry();
+
+        let unrelated = std::thread::spawn(|| panic!("unrelated panic remains delegated"));
+        assert!(unrelated.join().is_err());
+        println!("{CHILD_SUCCESS_MARKER}");
     }
 
     #[test]
@@ -1144,7 +1182,10 @@ mod tests {
                     .find("observe_production_installation_evidence")
                     .unwrap()
         );
-        assert_eq!(production.matches("catch_unwind(").count(), 1);
+        assert_eq!(
+            production.matches("catch_unwind_without_output(").count(),
+            1
+        );
         let body_signature = production
             .split_once("fn run_production_database_migration_revalidation_body(")
             .unwrap()
@@ -1155,7 +1196,7 @@ mod tests {
         assert!(body_signature.contains("owner: &ConnectionLifetimeOwner"));
         assert!(!body_signature.contains("owner: ConnectionLifetimeOwner"));
         let unwind_boundary = transition
-            .split_once("let computation = catch_unwind")
+            .split_once("let computation = crate::scoped_panic_output_suppression::catch_unwind_without_output")
             .unwrap()
             .1
             .split_once("match computation")

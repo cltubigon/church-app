@@ -43,6 +43,8 @@ mod parish_identifier_generation;
 #[cfg(windows)]
 mod production_database_connection_handoff;
 mod production_database_file;
+#[cfg(windows)]
+mod scoped_panic_output_suppression;
 mod setup_publication_identifier_generation;
 #[cfg(windows)]
 mod sqlcipher_database_key_application;
@@ -99,6 +101,9 @@ fn health_check() -> Result<HealthResponse, HealthError> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    scoped_panic_output_suppression::install_before_worker_threads();
+
     use application_lifecycle::{
         ApplicationLifecycle, lifecycle_from_app, request_first_time_setup, startup_status,
     };
@@ -162,5 +167,25 @@ mod tests {
         assert_eq!(error.message, SAFE_HEALTH_MESSAGE);
         assert!(!error.message.contains("path"));
         assert!(!error.message.contains("environment"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn panic_router_installation_precedes_application_and_worker_construction() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let run = SOURCE
+            .split_once("pub fn run() {")
+            .unwrap()
+            .1
+            .split_once("tauri::Builder::default()")
+            .unwrap()
+            .0;
+        let install = run
+            .find("scoped_panic_output_suppression::install_before_worker_threads()")
+            .unwrap();
+
+        assert!(install < run.find("ApplicationLifecycle::new()").unwrap());
+        assert!(!run[..install].contains("spawn"));
+        assert!(!run[..install].contains("Builder"));
     }
 }
