@@ -24,7 +24,7 @@ pub(crate) use database_freshness_validation::{
     DatabaseFreshnessValidatedProductionDatabaseConnection, OperationalProductionDatabase,
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
-    ProductionDatabaseFreshnessValidationOutcome,
+    ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
     ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
@@ -32,6 +32,9 @@ pub(crate) use database_freshness_validation::{
     activate_production_database_for_operational_use, authorize_production_database_startup,
     validate_production_database_freshness,
 };
+
+#[cfg(test)]
+pub(crate) use database_freshness_validation::genuine_production_database_migration_opportunity_for_test;
 
 pub(crate) struct DatabaseEvidenceCorrespondenceMismatch;
 

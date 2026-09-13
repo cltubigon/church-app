@@ -36,7 +36,7 @@ pub(crate) use database_evidence_correspondence_validation::{
     DatabaseFreshnessValidatedProductionDatabaseConnection, OperationalProductionDatabase,
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
-    ProductionDatabaseFreshnessValidationOutcome,
+    ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
     ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
@@ -44,6 +44,9 @@ pub(crate) use database_evidence_correspondence_validation::{
     activate_production_database_for_operational_use, authorize_production_database_startup,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
 };
+
+#[cfg(test)]
+pub(crate) use database_evidence_correspondence_validation::genuine_production_database_migration_opportunity_for_test;
 
 #[cfg(test)]
 const EXPECTED_APPLICATION_ID: i32 = super::PRODUCTION_DATABASE_APPLICATION_ID;

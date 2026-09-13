@@ -166,7 +166,7 @@ pub(crate) use live_metadata_and_header_validation::{
     OperationalProductionDatabase, PreparedMetadataValidatedProductionDatabaseForSetup,
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
-    ProductionDatabaseFreshnessValidationOutcome,
+    ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
     ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
@@ -179,6 +179,9 @@ pub(crate) use live_metadata_and_header_validation::{
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
     validate_production_database_live_metadata_and_headers,
 };
+
+#[cfg(test)]
+pub(crate) use live_metadata_and_header_validation::genuine_production_database_migration_opportunity_for_test;
 
 #[allow(unused_imports)]
 pub(crate) use full_integrity_validation::{

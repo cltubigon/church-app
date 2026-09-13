@@ -1,13 +1,16 @@
 use std::fmt;
 
+use crate::production_database_connection_handoff::ProductionDatabaseMigrationOpportunity;
+
 pub(super) struct ProductionDatabaseMigrationConfirmation {
     state: ProductionDatabaseMigrationConfirmationState,
 }
 
 #[allow(dead_code)]
+#[allow(clippy::large_enum_variant)]
 enum ProductionDatabaseMigrationConfirmationState {
     NotOffered,
-    Pending,
+    Pending(ProductionDatabaseMigrationOpportunity),
     Authorized(ProductionDatabaseMigrationAuthorization),
     Consumed,
     Revoked,
@@ -37,51 +40,42 @@ impl ProductionDatabaseMigrationConfirmation {
     }
 
     #[allow(dead_code)]
-    pub(super) fn confirm(&mut self) -> bool {
+    #[allow(clippy::result_large_err)]
+    pub(super) fn establish_pending(
+        &mut self,
+        opportunity: ProductionDatabaseMigrationOpportunity,
+    ) -> Result<(), ProductionDatabaseMigrationOpportunity> {
         if !matches!(
-            self.state,
-            ProductionDatabaseMigrationConfirmationState::Pending
-        ) {
-            return false;
-        }
-        self.state = ProductionDatabaseMigrationConfirmationState::Authorized(
-            ProductionDatabaseMigrationAuthorization { _private: () },
-        );
-        true
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn cancel(&mut self) -> bool {
-        if !matches!(
-            self.state,
-            ProductionDatabaseMigrationConfirmationState::Pending
-        ) {
-            return false;
-        }
-        self.state = ProductionDatabaseMigrationConfirmationState::Revoked;
-        true
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn revoke_pending(&mut self) -> bool {
-        if !matches!(
-            self.state,
-            ProductionDatabaseMigrationConfirmationState::Pending
-        ) {
-            return false;
-        }
-        self.state = ProductionDatabaseMigrationConfirmationState::Revoked;
-        true
-    }
-
-    pub(super) fn invalidate_for_shutdown(&mut self) {
-        if matches!(
             self.state,
             ProductionDatabaseMigrationConfirmationState::NotOffered
-                | ProductionDatabaseMigrationConfirmationState::Pending
-                | ProductionDatabaseMigrationConfirmationState::Authorized(_)
         ) {
-            self.state = ProductionDatabaseMigrationConfirmationState::Revoked;
+            return Err(opportunity);
+        }
+        self.state = ProductionDatabaseMigrationConfirmationState::Pending(opportunity);
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn cancel(&mut self) -> Option<ProductionDatabaseMigrationOpportunity> {
+        self.extract_pending_and_revoke()
+    }
+
+    pub(super) fn invalidate_for_shutdown(
+        &mut self,
+    ) -> Option<ProductionDatabaseMigrationOpportunity> {
+        let prior = std::mem::replace(
+            &mut self.state,
+            ProductionDatabaseMigrationConfirmationState::Revoked,
+        );
+        match prior {
+            ProductionDatabaseMigrationConfirmationState::Pending(opportunity) => Some(opportunity),
+            ProductionDatabaseMigrationConfirmationState::NotOffered
+            | ProductionDatabaseMigrationConfirmationState::Authorized(_) => None,
+            terminal @ (ProductionDatabaseMigrationConfirmationState::Consumed
+            | ProductionDatabaseMigrationConfirmationState::Revoked) => {
+                self.state = terminal;
+                None
+            }
         }
     }
 
@@ -103,25 +97,47 @@ impl ProductionDatabaseMigrationConfirmation {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn establish_pending_for_test(&mut self) -> bool {
-        if !matches!(
-            self.state,
-            ProductionDatabaseMigrationConfirmationState::NotOffered
-        ) {
-            return false;
+    fn extract_pending_and_revoke(&mut self) -> Option<ProductionDatabaseMigrationOpportunity> {
+        let prior = std::mem::replace(
+            &mut self.state,
+            ProductionDatabaseMigrationConfirmationState::Revoked,
+        );
+        match prior {
+            ProductionDatabaseMigrationConfirmationState::Pending(opportunity) => Some(opportunity),
+            other => {
+                self.state = other;
+                None
+            }
         }
-        self.state = ProductionDatabaseMigrationConfirmationState::Pending;
-        true
+    }
+
+    #[cfg(test)]
+    fn confirm_for_test(&mut self) -> ProductionDatabaseMigrationConfirmationForTestOutcome {
+        use crate::production_database_connection_handoff::ProductionDatabaseConnectionCloseOutcome;
+
+        let Some(opportunity) = self.extract_pending_and_revoke() else {
+            return ProductionDatabaseMigrationConfirmationForTestOutcome::NotPending;
+        };
+        match opportunity.close() {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                self.state = ProductionDatabaseMigrationConfirmationState::Authorized(
+                    ProductionDatabaseMigrationAuthorization { _private: () },
+                );
+                ProductionDatabaseMigrationConfirmationForTestOutcome::Authorized
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                ProductionDatabaseMigrationConfirmationForTestOutcome::CloseFailed(failure)
+            }
+        }
     }
 
     #[cfg(test)]
     pub(super) fn state_for_test(&self) -> ProductionDatabaseMigrationConfirmationStateForTest {
-        match self.state {
+        match &self.state {
             ProductionDatabaseMigrationConfirmationState::NotOffered => {
                 ProductionDatabaseMigrationConfirmationStateForTest::NotOffered
             }
-            ProductionDatabaseMigrationConfirmationState::Pending => {
+            ProductionDatabaseMigrationConfirmationState::Pending(_) => {
                 ProductionDatabaseMigrationConfirmationStateForTest::Pending
             }
             ProductionDatabaseMigrationConfirmationState::Authorized(_) => {
@@ -138,6 +154,15 @@ impl ProductionDatabaseMigrationConfirmation {
 }
 
 #[cfg(test)]
+enum ProductionDatabaseMigrationConfirmationForTestOutcome {
+    Authorized,
+    NotPending,
+    CloseFailed(
+        crate::production_database_connection_handoff::ProductionDatabaseConnectionCloseFailure,
+    ),
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProductionDatabaseMigrationConfirmationStateForTest {
     NotOffered,
@@ -148,60 +173,46 @@ pub(super) enum ProductionDatabaseMigrationConfirmationStateForTest {
 }
 
 #[cfg(test)]
-mod tests {
+mod ownership_tests {
     use std::sync::{Arc, Barrier, Mutex};
+
+    use crate::production_database_connection_handoff::{
+        ProductionDatabaseConnectionCloseOutcome,
+        genuine_production_database_migration_opportunity_for_test,
+    };
 
     use super::*;
 
-    macro_rules! assert_not_impl {
-        ($owner:ty, $bound:path) => {{
-            trait AmbiguousIfImpl<A> {
-                fn check() {}
-            }
-            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
-            struct Implemented;
-            impl<T: ?Sized + $bound> AmbiguousIfImpl<Implemented> for T {}
-            let _ = <$owner as AmbiguousIfImpl<_>>::check;
-        }};
+    fn close(opportunity: ProductionDatabaseMigrationOpportunity) {
+        assert!(matches!(
+            opportunity.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
     }
 
     #[test]
-    fn fresh_state_is_not_offered_and_pending_can_be_established_only_once() {
+    fn genuine_opportunity_is_moved_into_pending_and_second_is_returned_whole() {
         let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
-        assert_eq!(
-            confirmation.state_for_test(),
-            ProductionDatabaseMigrationConfirmationStateForTest::NotOffered
-        );
-        assert!(confirmation.establish_pending_for_test());
-        assert!(!confirmation.establish_pending_for_test());
+        let (first_root, first) = genuine_production_database_migration_opportunity_for_test();
+        assert!(confirmation.establish_pending(first).is_ok());
         assert_eq!(
             confirmation.state_for_test(),
             ProductionDatabaseMigrationConfirmationStateForTest::Pending
         );
-    }
 
-    #[test]
-    fn confirmation_authorizes_once_and_same_process_cannot_renew() {
-        let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
-        assert!(confirmation.establish_pending_for_test());
-        assert!(confirmation.confirm());
-        assert!(!confirmation.confirm());
-        assert!(!confirmation.establish_pending_for_test());
-        assert_eq!(
-            confirmation.state_for_test(),
-            ProductionDatabaseMigrationConfirmationStateForTest::Authorized
+        let (second_root, second) = genuine_production_database_migration_opportunity_for_test();
+        let returned = confirmation
+            .establish_pending(second)
+            .expect_err("a second opportunity must be returned unchanged");
+        close(returned);
+        second_root.assert_exact_cleanup();
+
+        close(
+            confirmation
+                .cancel()
+                .expect("pending owner must be extracted"),
         );
-    }
-
-    #[test]
-    fn cancellation_revokes_without_authorizing_and_prevents_renewal() {
-        let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
-        assert!(confirmation.establish_pending_for_test());
-        assert!(confirmation.cancel());
-        assert!(!confirmation.cancel());
-        assert!(!confirmation.confirm());
-        assert!(!confirmation.consume_authorization());
-        assert!(!confirmation.establish_pending_for_test());
+        first_root.assert_exact_cleanup();
         assert_eq!(
             confirmation.state_for_test(),
             ProductionDatabaseMigrationConfirmationStateForTest::Revoked
@@ -209,29 +220,129 @@ mod tests {
     }
 
     #[test]
-    fn invalidation_revokes_pending_without_authorizing() {
+    fn authorized_consumed_and_revoked_states_reject_and_return_new_opportunities() {
+        for target in [
+            ProductionDatabaseMigrationConfirmationStateForTest::Authorized,
+            ProductionDatabaseMigrationConfirmationStateForTest::Consumed,
+            ProductionDatabaseMigrationConfirmationStateForTest::Revoked,
+        ] {
+            let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
+            let (first_root, first) = genuine_production_database_migration_opportunity_for_test();
+            confirmation.establish_pending(first).unwrap();
+            match target {
+                ProductionDatabaseMigrationConfirmationStateForTest::Authorized => {
+                    assert!(matches!(
+                        confirmation.confirm_for_test(),
+                        ProductionDatabaseMigrationConfirmationForTestOutcome::Authorized
+                    ));
+                }
+                ProductionDatabaseMigrationConfirmationStateForTest::Consumed => {
+                    assert!(matches!(
+                        confirmation.confirm_for_test(),
+                        ProductionDatabaseMigrationConfirmationForTestOutcome::Authorized
+                    ));
+                    assert!(confirmation.consume_authorization());
+                }
+                ProductionDatabaseMigrationConfirmationStateForTest::Revoked => {
+                    close(
+                        confirmation
+                            .cancel()
+                            .expect("pending owner must be extracted"),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            first_root.assert_exact_cleanup();
+
+            let (rejected_root, rejected) =
+                genuine_production_database_migration_opportunity_for_test();
+            let returned = confirmation
+                .establish_pending(rejected)
+                .expect_err("same-process renewal must be rejected");
+            close(returned);
+            rejected_root.assert_exact_cleanup();
+            assert_eq!(confirmation.state_for_test(), target);
+        }
+    }
+
+    #[test]
+    fn cancellation_extracts_before_terminal_revocation_and_never_renews() {
         let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
-        assert!(confirmation.establish_pending_for_test());
-        assert!(confirmation.revoke_pending());
-        assert!(!confirmation.revoke_pending());
-        assert!(!confirmation.confirm());
-        assert!(!confirmation.consume_authorization());
-        assert!(!confirmation.establish_pending_for_test());
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        confirmation.establish_pending(opportunity).unwrap();
+        let returned = confirmation
+            .cancel()
+            .expect("pending owner must be returned");
         assert_eq!(
             confirmation.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::Revoked
+        );
+        assert!(confirmation.cancel().is_none());
+        assert!(matches!(
+            confirmation.confirm_for_test(),
+            ProductionDatabaseMigrationConfirmationForTestOutcome::NotPending
+        ));
+        close(returned);
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn shutdown_extracts_pending_and_revokes_pending_or_not_offered() {
+        let mut pending = ProductionDatabaseMigrationConfirmation::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        pending.establish_pending(opportunity).unwrap();
+        let returned = pending
+            .invalidate_for_shutdown()
+            .expect("shutdown must return pending ownership");
+        assert_eq!(
+            pending.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::Revoked
+        );
+        close(returned);
+        root.assert_exact_cleanup();
+
+        let mut not_offered = ProductionDatabaseMigrationConfirmation::new();
+        assert!(not_offered.invalidate_for_shutdown().is_none());
+        assert_eq!(
+            not_offered.state_for_test(),
             ProductionDatabaseMigrationConfirmationStateForTest::Revoked
         );
     }
 
     #[test]
-    fn authorization_consumption_is_exactly_once_and_terminal() {
+    fn extracted_opportunity_close_failure_retains_canonical_guarded_lifetime() {
+        use crate::production_database_connection_handoff::with_production_database_close_failure_injected;
+
         let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
-        assert!(confirmation.establish_pending_for_test());
-        assert!(confirmation.confirm());
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        confirmation.establish_pending(opportunity).unwrap();
+        let returned = confirmation
+            .cancel()
+            .expect("pending owner must be returned");
+        let ProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            with_production_database_close_failure_injected(|| returned.close())
+        else {
+            panic!("injected close failure must retain the guarded lifetime");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn test_only_confirmation_closes_before_authorizing_and_consumes_once() {
+        let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        confirmation.establish_pending(opportunity).unwrap();
+        assert!(matches!(
+            confirmation.confirm_for_test(),
+            ProductionDatabaseMigrationConfirmationForTestOutcome::Authorized
+        ));
+        root.assert_exact_cleanup();
         assert!(confirmation.consume_authorization());
         assert!(!confirmation.consume_authorization());
-        assert!(!confirmation.confirm());
-        assert!(!confirmation.establish_pending_for_test());
         assert_eq!(
             confirmation.state_for_test(),
             ProductionDatabaseMigrationConfirmationStateForTest::Consumed
@@ -239,34 +350,38 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_invalidation_revokes_pending_and_unconsumed_authorization() {
-        for confirm_first in [false, true] {
-            let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
-            assert!(confirmation.establish_pending_for_test());
-            if confirm_first {
-                assert!(confirmation.confirm());
-            }
-            confirmation.invalidate_for_shutdown();
-            assert_eq!(
-                confirmation.state_for_test(),
-                ProductionDatabaseMigrationConfirmationStateForTest::Revoked
-            );
-            assert!(!confirmation.confirm());
-            assert!(!confirmation.consume_authorization());
-            assert!(!confirmation.establish_pending_for_test());
-        }
+    fn test_only_confirmation_close_failure_returns_the_canonical_owner() {
+        use crate::production_database_connection_handoff::with_production_database_close_failure_injected;
+
+        let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        confirmation.establish_pending(opportunity).unwrap();
+        let ProductionDatabaseMigrationConfirmationForTestOutcome::CloseFailed(failure) =
+            with_production_database_close_failure_injected(|| confirmation.confirm_for_test())
+        else {
+            panic!("injected close failure must be returned to the test caller");
+        };
+        assert_eq!(
+            confirmation.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::Revoked
+        );
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
     }
 
     #[test]
-    fn confirmation_racing_shutdown_cannot_retain_authorization() {
-        for _ in 0..64 {
+    fn confirmation_racing_shutdown_cannot_retain_authorization_or_drop_pending() {
+        for _ in 0..16 {
             let confirmation = Arc::new(Mutex::new(ProductionDatabaseMigrationConfirmation::new()));
-            assert!(
-                confirmation
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .establish_pending_for_test()
-            );
+            let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+            confirmation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .establish_pending(opportunity)
+                .unwrap();
             let barrier = Arc::new(Barrier::new(3));
 
             let confirming_state = Arc::clone(&confirmation);
@@ -276,7 +391,7 @@ mod tests {
                 confirming_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .confirm()
+                    .confirm_for_test()
             });
 
             let shutdown_state = Arc::clone(&confirmation);
@@ -286,12 +401,20 @@ mod tests {
                 shutdown_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .invalidate_for_shutdown();
+                    .invalidate_for_shutdown()
             });
 
             barrier.wait();
-            let _confirmation_won_race = confirming.join().expect("confirmation thread");
-            shutdown.join().expect("shutdown thread");
+            let confirmation_outcome = confirming.join().expect("confirmation thread");
+            if let Some(opportunity) = shutdown.join().expect("shutdown thread") {
+                close(opportunity);
+            } else {
+                assert!(matches!(
+                    confirmation_outcome,
+                    ProductionDatabaseMigrationConfirmationForTestOutcome::Authorized
+                        | ProductionDatabaseMigrationConfirmationForTestOutcome::NotPending
+                ));
+            }
             assert_eq!(
                 confirmation
                     .lock()
@@ -299,34 +422,25 @@ mod tests {
                     .state_for_test(),
                 ProductionDatabaseMigrationConfirmationStateForTest::Revoked
             );
+            root.assert_exact_cleanup();
         }
     }
 
     #[test]
-    fn a_new_process_local_owner_starts_fresh() {
-        let mut prior = ProductionDatabaseMigrationConfirmation::new();
-        assert!(prior.establish_pending_for_test());
-        assert!(prior.confirm());
-        let replacement = ProductionDatabaseMigrationConfirmation::new();
-        assert_eq!(
-            replacement.state_for_test(),
-            ProductionDatabaseMigrationConfirmationStateForTest::NotOffered
-        );
-    }
+    fn authorization_and_confirmation_owner_remain_redacted_and_non_clone() {
+        trait AmbiguousIfClone<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        struct Implemented;
+        impl<T: Clone> AmbiguousIfClone<Implemented> for T {}
+        let _ = <ProductionDatabaseMigrationAuthorization as AmbiguousIfClone<_>>::check;
 
-    #[test]
-    fn capability_and_owner_are_sealed_non_clone_non_copy_non_serde_and_redacted() {
-        assert_not_impl!(ProductionDatabaseMigrationAuthorization, Clone);
-        assert_not_impl!(ProductionDatabaseMigrationAuthorization, Copy);
-        assert_not_impl!(ProductionDatabaseMigrationAuthorization, Default);
-        assert_not_impl!(ProductionDatabaseMigrationAuthorization, serde::Serialize);
-        assert_not_impl!(
-            ProductionDatabaseMigrationAuthorization,
-            serde::Deserialize<'static>
-        );
-        let authorization = ProductionDatabaseMigrationAuthorization { _private: () };
         assert_eq!(
-            format!("{authorization:?}"),
+            format!(
+                "{:?}",
+                ProductionDatabaseMigrationAuthorization { _private: () }
+            ),
             "ProductionDatabaseMigrationAuthorization([REDACTED])"
         );
         assert_eq!(
@@ -336,24 +450,21 @@ mod tests {
     }
 
     #[test]
-    fn production_source_has_no_pending_producer_or_out_of_scope_surface() {
+    fn production_source_has_only_the_genuine_unwired_pending_boundary() {
         const SOURCE: &str = include_str!("production_database_migration_confirmation.rs");
         let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
-        assert!(!production.contains("establish_pending"));
-        let confirmation_transition = production
-            .split_once("pub(super) fn confirm(&mut self) -> bool {")
-            .unwrap()
-            .1
-            .split_once("pub(super) fn cancel(&mut self) -> bool {")
-            .unwrap()
-            .0;
-        assert_eq!(
-            confirmation_transition
-                .matches("ProductionDatabaseMigrationAuthorization { _private: () }")
-                .count(),
-            1
-        );
+        assert!(production.contains("Pending(ProductionDatabaseMigrationOpportunity)"));
+        assert!(production.contains(
+            "pub(super) fn establish_pending(\n        &mut self,\n        opportunity: ProductionDatabaseMigrationOpportunity,\n    ) -> Result<(), ProductionDatabaseMigrationOpportunity>"
+        ));
+        assert!(!production.contains("establish_pending_for_test"));
+        assert!(!production.contains("fn confirm"));
+        assert!(!production.contains("Pending,"));
         for forbidden in [
+            "Revalidating",
+            "PendingMigrationContext",
+            "RevalidatedProductionDatabaseMigrationOpportunity",
+            "AuthorizedMigrationContext",
             "#[tauri::command]",
             "serde::Serialize",
             "serde::Deserialize",
@@ -373,5 +484,9 @@ mod tests {
                 "forbidden surface: {forbidden}"
             );
         }
+
+        const LIFECYCLE: &str = include_str!("../application_lifecycle.rs");
+        let production_lifecycle = LIFECYCLE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        assert!(!production_lifecycle.contains(".establish_pending("));
     }
 }

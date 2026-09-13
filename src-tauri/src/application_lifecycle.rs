@@ -429,9 +429,16 @@ struct LifecycleInner {
 }
 
 impl LifecycleInner {
-    fn begin_shutdown(&mut self) -> ShutdownAction<OperationalProductionDatabase> {
-        self.migration_confirmation.invalidate_for_shutdown();
-        self.state.begin_shutdown()
+    fn begin_shutdown(
+        &mut self,
+    ) -> (
+        ShutdownAction<OperationalProductionDatabase>,
+        Option<
+            crate::production_database_connection_handoff::ProductionDatabaseMigrationOpportunity,
+        >,
+    ) {
+        let pending_migration = self.migration_confirmation.invalidate_for_shutdown();
+        (self.state.begin_shutdown(), pending_migration)
     }
 }
 
@@ -655,13 +662,16 @@ impl ApplicationLifecycle {
     }
 
     pub(crate) fn request_shutdown(self: &Arc<Self>, app: AppHandle) {
-        let action = {
+        let (action, pending_migration) = {
             let mut inner = self.lock();
-            let action = inner.begin_shutdown();
+            let (action, pending_migration) = inner.begin_shutdown();
             if matches!(action, ShutdownAction::WaitForSetup) {
                 inner.setup_shutdown_app = Some(app.clone());
             }
-            action
+            (action, pending_migration)
+        };
+        let None = pending_migration else {
+            unreachable!("no production caller can establish a pending migration opportunity");
         };
         eprintln!(r#"event="application_shutdown" outcome="requested""#);
         match action {
@@ -2316,16 +2326,35 @@ mod tests {
 
     #[test]
     fn lifecycle_shutdown_revokes_migration_confirmation_under_the_same_lock() {
+        use crate::production_database_connection_handoff::{
+            ProductionDatabaseConnectionCloseOutcome,
+            genuine_production_database_migration_opportunity_for_test,
+        };
         use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
 
         let lifecycle = ApplicationLifecycle::new();
         let mut inner = lifecycle.lock();
-        assert!(inner.migration_confirmation.establish_pending_for_test());
-        assert!(matches!(inner.begin_shutdown(), ShutdownAction::Exit));
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        assert!(
+            inner
+                .migration_confirmation
+                .establish_pending(opportunity)
+                .is_ok()
+        );
+        let (action, pending_migration) = inner.begin_shutdown();
+        assert!(matches!(action, ShutdownAction::Exit));
         assert_eq!(
             inner.migration_confirmation.state_for_test(),
             ProductionDatabaseMigrationConfirmationStateForTest::Revoked
         );
+        drop(inner);
+        assert!(matches!(
+            pending_migration
+                .expect("lifecycle shutdown must return pending ownership")
+                .close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
 
         const SOURCE: &str = include_str!("application_lifecycle.rs");
         let helper = SOURCE

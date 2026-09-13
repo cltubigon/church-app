@@ -229,6 +229,23 @@ fn discard_opportunity_inputs<T, U>(metadata_contract: T, trusted_assessment: U)
 }
 
 #[cfg(test)]
+pub(crate) fn genuine_production_database_migration_opportunity_for_test() -> (
+    super::tests::TestRoot,
+    ProductionDatabaseMigrationOpportunity,
+) {
+    let (root, database) = super::tests::fresh_owner();
+    let ProductionDatabaseMigrationOpportunityOutcome::Offered(opportunity) =
+        offer_production_database_migration_opportunity(
+            database,
+            InstallationEvidence::Initialized(ExpectedStorageEvidence::Present),
+        )
+    else {
+        panic!("synthetic source-1 freshness chain should produce a genuine opportunity");
+    };
+    (root, opportunity)
+}
+
+#[cfg(test)]
 fn offer_production_database_migration_opportunity_using(
     database: DatabaseFreshnessValidatedProductionDatabaseConnection,
     installation_evidence: InstallationEvidence,

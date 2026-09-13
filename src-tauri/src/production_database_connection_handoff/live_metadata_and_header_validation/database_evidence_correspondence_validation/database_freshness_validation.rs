@@ -19,6 +19,11 @@ use super::DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection;
 mod production_database_migration_opportunity;
 mod startup_authorization;
 
+pub(crate) use production_database_migration_opportunity::ProductionDatabaseMigrationOpportunity;
+
+#[cfg(test)]
+pub(crate) use production_database_migration_opportunity::genuine_production_database_migration_opportunity_for_test;
+
 pub(crate) use startup_authorization::{
     OperationalProductionDatabase, ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
@@ -469,7 +474,7 @@ mod tests {
         publication: PUBLICATION,
     };
 
-    pub(super) struct TestRoot(PathBuf);
+    pub(crate) struct TestRoot(PathBuf);
 
     impl TestRoot {
         fn create() -> Self {
@@ -499,7 +504,7 @@ mod tests {
             inspected
         }
 
-        pub(super) fn assert_exact_cleanup(self) {
+        pub(crate) fn assert_exact_cleanup(self) {
             fs::remove_dir_all(&self.0).expect("exact synthetic root cleanup should succeed");
             assert!(!self.0.exists());
         }
@@ -659,7 +664,7 @@ mod tests {
         (root, owner)
     }
 
-    pub(super) fn fresh_owner() -> (
+    pub(crate) fn fresh_owner() -> (
         TestRoot,
         DatabaseFreshnessValidatedProductionDatabaseConnection,
     ) {
