@@ -17,6 +17,7 @@ use super::super::super::{ConnectionLifetimeOwner, ProductionDatabaseConnectionC
 use super::DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection;
 
 mod production_database_migration_opportunity;
+mod production_database_migration_revalidation;
 mod startup_authorization;
 
 pub(crate) use production_database_migration_opportunity::ProductionDatabaseMigrationOpportunity;
@@ -487,7 +488,7 @@ mod tests {
             Self(path)
         }
 
-        fn path(&self) -> &Path {
+        pub(crate) fn path(&self) -> &Path {
             &self.0
         }
 

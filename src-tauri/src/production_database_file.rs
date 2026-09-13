@@ -855,6 +855,18 @@ pub(crate) fn revalidate_borrowed_production_database_file_handle(
     windows::revalidate_borrowed_file(inspected, borrowed_handle)
 }
 
+/// Compares only the retained native parent and database-file identities from
+/// two independently completed production-file inspections.
+#[cfg(windows)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn inspected_production_database_file_identities_match(
+    retained: &InspectedProductionDatabaseFile,
+    fresh: &InspectedProductionDatabaseFile,
+) -> bool {
+    windows::identities_match(retained._parent_identity, fresh._parent_identity)
+        && windows::identities_match(retained._file_identity, fresh._file_identity)
+}
+
 #[cfg(all(test, windows))]
 pub(crate) fn synthetic_inspected_file_with_volume_mismatch(
     mut inspected: InspectedProductionDatabaseFile,
@@ -869,6 +881,15 @@ pub(crate) fn synthetic_inspected_file_with_file_id_mismatch(
     offset: usize,
 ) -> InspectedProductionDatabaseFile {
     inspected._file_identity.file_id[offset] ^= 1;
+    inspected
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn synthetic_inspected_file_with_parent_file_id_mismatch(
+    mut inspected: InspectedProductionDatabaseFile,
+    offset: usize,
+) -> InspectedProductionDatabaseFile {
+    inspected._parent_identity.file_id[offset] ^= 1;
     inspected
 }
 

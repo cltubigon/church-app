@@ -19,9 +19,9 @@ use super::{
 /// Opaque ownership proving only that the exact retained fresh source database
 /// met the fixed schema-1 to schema-2 opportunity policy at offer time.
 pub(crate) struct ProductionDatabaseMigrationOpportunity {
-    owner: ConnectionLifetimeOwner,
-    metadata_contract: DatabaseMetadataContractV1,
-    trusted_assessment: TrustedCurrentInstallationEvidenceAssessment,
+    pub(super) owner: ConnectionLifetimeOwner,
+    pub(super) metadata_contract: DatabaseMetadataContractV1,
+    pub(super) trusted_assessment: TrustedCurrentInstallationEvidenceAssessment,
 }
 
 impl fmt::Debug for ProductionDatabaseMigrationOpportunity {
