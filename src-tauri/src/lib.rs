@@ -43,6 +43,9 @@ mod parish_identifier_generation;
 #[cfg(windows)]
 mod production_database_connection_handoff;
 mod production_database_file;
+#[allow(dead_code)]
+#[cfg(windows)]
+mod production_database_migration_exclusivity;
 #[cfg(windows)]
 mod scoped_panic_output_suppression;
 mod setup_publication_identifier_generation;
