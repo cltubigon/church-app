@@ -1181,6 +1181,10 @@ fn enable_and_verify_query_only(
 
 #[cfg(test)]
 mod tests {
+    mod sqlcipher_backup_feasibility {
+        include!("sqlcipher_backup_feasibility.rs");
+    }
+
     thread_local! {
         pub(super) static PRIMARY_FAILURE: std::cell::Cell<Option<TestPrimaryFailureInjectionState>> = const {
             std::cell::Cell::new(None)

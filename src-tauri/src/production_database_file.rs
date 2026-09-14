@@ -1306,7 +1306,7 @@ mod tests {
         const LIB: &str = include_str!("lib.rs");
         const WINDOWS_DEPENDENCIES: &str = "[target.'cfg(windows)'.dependencies]";
         const WINDOWS_DEV_DEPENDENCIES: &str = "[target.'cfg(windows)'.dev-dependencies]";
-        const RUSQLITE_DECLARATION: &str = "rusqlite = { version = \"=0.39.0\", default-features = false, features = [\"bundled-sqlcipher-vendored-openssl\"] }";
+        const RUSQLITE_DECLARATION: &str = "rusqlite = { version = \"=0.39.0\", default-features = false, features = [\"backup\", \"bundled-sqlcipher-vendored-openssl\"] }";
         assert_eq!(LIB.matches("mod production_database_file;").count(), 1);
         assert!(!LIB.contains("pub mod production_database_file"));
         assert_eq!(

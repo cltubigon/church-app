@@ -294,7 +294,7 @@ mod tests {
         const SOURCE: &str = include_str!("sqlcipher_database_key_application.rs");
         const LIB: &str = include_str!("lib.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
-        let dependency = "rusqlite = { version = \"=0.39.0\", default-features = false, features = [\"bundled-sqlcipher-vendored-openssl\"] }";
+        let dependency = "rusqlite = { version = \"=0.39.0\", default-features = false, features = [\"backup\", \"bundled-sqlcipher-vendored-openssl\"] }";
 
         assert_eq!(CARGO.matches(dependency).count(), 1);
         assert_eq!(CARGO.matches("rusqlite =").count(), 1);
