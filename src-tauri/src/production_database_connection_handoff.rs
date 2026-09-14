@@ -167,6 +167,8 @@ pub(crate) use live_metadata_and_header_validation::{
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
+    ProductionDatabaseMigrationOpportunityCloseFailure,
+    ProductionDatabaseMigrationOpportunityOutcome,
     ProductionDatabaseMigrationRevalidationCloseFailure,
     ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
     ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
@@ -180,6 +182,7 @@ pub(crate) use live_metadata_and_header_validation::{
     StartupAuthorizedProductionDatabaseConnection,
     activate_production_database_for_operational_use, authorize_production_database_startup,
     close_and_preserve_prepared_metadata_validated_production_database_for_setup,
+    offer_production_database_migration_opportunity,
     revalidate_identity_bound_staged_key_production_database_for_setup,
     revalidate_production_database_migration_opportunity,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
@@ -188,6 +191,7 @@ pub(crate) use live_metadata_and_header_validation::{
 
 #[cfg(test)]
 pub(crate) use live_metadata_and_header_validation::{
+    MigrationDiscoveryTestRoot, genuine_operational_production_database_for_test,
     genuine_production_database_migration_opportunity_for_test,
     genuine_production_database_migration_revalidation_context_for_test,
 };
@@ -2468,6 +2472,41 @@ mod tests {
             validated.close(),
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn migration_discovery_dual_guarded_readers_coexist_and_exclude_writes() {
+        let root = TestRoot::create();
+        let first_key = generation_bound_key(&root, CORRECT_DATABASE_KEY);
+        root.create_encrypted_database(&first_key, true);
+        drop(first_key);
+
+        let first = actual_keyed_owner(&root, generation_bound_key(&root, CORRECT_DATABASE_KEY));
+        let ProductionDatabaseValidationOutcome::Validated(first) =
+            validate_production_database_readability_and_integrity(first)
+        else {
+            panic!("first independent guarded reader must validate");
+        };
+        let second = actual_keyed_owner(&root, generation_bound_key(&root, CORRECT_DATABASE_KEY));
+        let ProductionDatabaseValidationOutcome::Validated(second) =
+            validate_production_database_readability_and_integrity(second)
+        else {
+            panic!("second independent guarded reader must validate");
+        };
+
+        let database = root.path().join(PRODUCTION_DATABASE_FILENAME);
+        assert!(OpenOptions::new().write(true).open(&database).is_err());
+        assert!(matches!(
+            first.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(OpenOptions::new().write(true).open(&database).is_err());
+        assert!(matches!(
+            second.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(OpenOptions::new().write(true).open(&database).is_ok());
         root.assert_exact_cleanup();
     }
 

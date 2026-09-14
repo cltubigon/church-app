@@ -16,7 +16,8 @@ use tauri::{AppHandle, Manager};
 mod production_database_migration_confirmation;
 
 use production_database_migration_confirmation::{
-    ProductionDatabaseMigrationConfirmation, ProductionDatabaseMigrationRevalidationCompletion,
+    ProductionDatabaseMigrationConfirmation, ProductionDatabaseMigrationDiscoveryCloseFailure,
+    ProductionDatabaseMigrationPendingContext, ProductionDatabaseMigrationRevalidationCompletion,
     ProductionDatabaseMigrationShutdownOwnership,
 };
 
@@ -47,10 +48,13 @@ use crate::{
         ProductionDatabaseConnectionConstructionCloseFailure,
         ProductionDatabaseFreshnessValidationCloseFailure,
         ProductionDatabaseFreshnessValidationOutcome,
+        ProductionDatabaseMigrationOpportunityOutcome,
+        ProductionDatabaseMigrationRevalidationContext,
         ProductionDatabaseStartupAuthorizationCloseFailure,
         ProductionDatabaseStartupAuthorizationOutcome, ProductionDatabaseValidationCloseFailure,
         ProductionDatabaseValidationOutcome, activate_production_database_for_operational_use,
-        authorize_production_database_startup, open_keyed_production_database_read_only,
+        authorize_production_database_startup, offer_production_database_migration_opportunity,
+        open_keyed_production_database_read_only,
         validate_production_database_evidence_correspondence,
         validate_production_database_freshness,
         validate_production_database_live_metadata_and_headers,
@@ -294,6 +298,28 @@ enum ProductionDatabaseMigrationRevalidationRequestOutcome {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProductionDatabaseMigrationDiscoveryRequestOutcome {
+    Started,
+    NotReady,
+    AlreadyAttempted,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProductionDatabaseMigrationDiscoveryState {
+    NotAttempted,
+    InProgress,
+    Finished,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum ProductionDatabaseMigrationDiscoveryWorkerResult {
+    Candidate(ProductionDatabaseMigrationPendingContext),
+    Unavailable,
+    CloseRetryRequired(ProductionDatabaseMigrationDiscoveryCloseFailure),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum FirstTimeSetupRequestResult {
@@ -429,6 +455,7 @@ struct RetainedCloseFailure;
 struct LifecycleInner {
     state: LifecycleState<OperationalProductionDatabase, RetainedCloseFailure>,
     migration_confirmation: ProductionDatabaseMigrationConfirmation,
+    migration_discovery: ProductionDatabaseMigrationDiscoveryState,
     startup_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     close_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     setup_worker: Option<thread::JoinHandle<()>>,
@@ -450,6 +477,7 @@ impl ApplicationLifecycle {
             inner: Mutex::new(LifecycleInner {
                 state: LifecycleState::NotStarted,
                 migration_confirmation: ProductionDatabaseMigrationConfirmation::new(),
+                migration_discovery: ProductionDatabaseMigrationDiscoveryState::NotAttempted,
                 startup_worker: None,
                 close_worker: None,
                 setup_worker: None,
@@ -586,6 +614,169 @@ impl ApplicationLifecycle {
             FirstTimeSetupRequestOutcome::Unavailable
         } else {
             FirstTimeSetupRequestOutcome::Started
+        }
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn request_production_database_migration_discovery(
+        self: &Arc<Self>,
+        app: AppHandle,
+    ) -> ProductionDatabaseMigrationDiscoveryRequestOutcome {
+        let worker_app = app.clone();
+        self.request_production_database_migration_discovery_with(
+            Some(app),
+            move || run_production_database_migration_discovery(&worker_app),
+            spawn_migration_thread,
+        )
+    }
+
+    #[cfg(windows)]
+    fn request_production_database_migration_discovery_with<Run, Spawn>(
+        self: &Arc<Self>,
+        app: Option<AppHandle>,
+        run: Run,
+        spawn: Spawn,
+    ) -> ProductionDatabaseMigrationDiscoveryRequestOutcome
+    where
+        Run: FnOnce() -> ProductionDatabaseMigrationDiscoveryWorkerResult + Send + 'static,
+        Spawn: FnOnce(MigrationThreadTask) -> std::io::Result<thread::JoinHandle<()>>,
+    {
+        let prior_worker = {
+            let mut inner = self.lock();
+            inner
+                .migration_work_resolved
+                .then(|| inner.migration_worker.take())
+                .flatten()
+        };
+        if let Some(worker) = prior_worker {
+            let _ = worker.join();
+        }
+
+        let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+        let lifecycle = Arc::clone(self);
+        let worker_app = app.clone();
+        let task: MigrationThreadTask = Box::new(move || {
+            if start_receiver.recv().is_err() {
+                lifecycle.complete_migration_discovery(
+                    ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable,
+                    worker_app.as_ref(),
+                );
+                return;
+            }
+            lifecycle.complete_migration_discovery(run(), worker_app.as_ref());
+        });
+
+        let mut inner = self.lock();
+        if !matches!(inner.state, LifecycleState::Ready(_)) {
+            return ProductionDatabaseMigrationDiscoveryRequestOutcome::NotReady;
+        }
+        if inner.migration_discovery != ProductionDatabaseMigrationDiscoveryState::NotAttempted {
+            return ProductionDatabaseMigrationDiscoveryRequestOutcome::AlreadyAttempted;
+        }
+        if inner.migration_worker.is_some()
+            || !inner.migration_work_resolved
+            || !inner.migration_confirmation.is_not_offered()
+        {
+            return ProductionDatabaseMigrationDiscoveryRequestOutcome::Unavailable;
+        }
+
+        inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::InProgress;
+        inner.migration_work_resolved = false;
+        let worker = match spawn(task) {
+            Ok(worker) => worker,
+            Err(_) => {
+                inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
+                inner.migration_work_resolved = true;
+                return ProductionDatabaseMigrationDiscoveryRequestOutcome::Unavailable;
+            }
+        };
+        inner.migration_worker = Some(worker);
+        drop(inner);
+
+        if start_sender.send(()).is_err() {
+            let mut inner = self.lock();
+            inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
+            inner.migration_work_resolved = true;
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::Unavailable
+        } else {
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::Started
+        }
+    }
+
+    #[cfg(windows)]
+    fn complete_migration_discovery(
+        &self,
+        outcome: ProductionDatabaseMigrationDiscoveryWorkerResult,
+        app: Option<&AppHandle>,
+    ) {
+        match outcome {
+            ProductionDatabaseMigrationDiscoveryWorkerResult::Candidate(candidate) => {
+                let candidate = {
+                    let mut inner = self.lock();
+                    let may_install = matches!(inner.state, LifecycleState::Ready(_))
+                        && inner.migration_discovery
+                            == ProductionDatabaseMigrationDiscoveryState::InProgress
+                        && inner.migration_confirmation.is_not_offered();
+                    inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
+                    if may_install {
+                        match inner.migration_confirmation.establish_pending(candidate) {
+                            Ok(()) => {
+                                inner.migration_work_resolved = true;
+                                None
+                            }
+                            Err(candidate) => Some(candidate),
+                        }
+                    } else {
+                        Some(candidate)
+                    }
+                };
+                if let Some(candidate) = candidate {
+                    self.complete_migration_discovery_candidate_close(candidate.close(), app);
+                }
+            }
+            ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable => {
+                let mut inner = self.lock();
+                inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
+                inner.migration_work_resolved = true;
+            }
+            ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(failure) => {
+                let mut inner = self.lock();
+                inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
+                inner
+                    .migration_confirmation
+                    .retain_discovery_close_failure(failure);
+            }
+        }
+        if self.may_exit()
+            && let Some(app) = app
+        {
+            app.exit(0);
+        }
+    }
+
+    #[cfg(windows)]
+    fn complete_migration_discovery_candidate_close(
+        &self,
+        outcome: ProductionDatabaseConnectionCloseOutcome,
+        app: Option<&AppHandle>,
+    ) {
+        let mut inner = self.lock();
+        match outcome {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                inner.migration_work_resolved = true;
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                inner.migration_confirmation.retain_discovery_close_failure(
+                    ProductionDatabaseMigrationDiscoveryCloseFailure::Candidate(failure),
+                );
+            }
+        }
+        drop(inner);
+        if self.may_exit()
+            && let Some(app) = app
+        {
+            app.exit(0);
         }
     }
 
@@ -822,6 +1013,9 @@ impl ApplicationLifecycle {
         let (migration_start_sender, migration_escrow, action) = {
             let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
             let mut inner = self.lock();
+            if inner.migration_discovery == ProductionDatabaseMigrationDiscoveryState::InProgress {
+                inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
+            }
             let migration_owner = inner.migration_confirmation.invalidate_for_shutdown();
             if migration_owner.is_some() {
                 inner.migration_work_resolved = false;
@@ -1041,6 +1235,157 @@ fn close_operational(owner: OperationalProductionDatabase) -> Option<RetainedClo
 #[cfg(not(windows))]
 fn close_operational(_: OperationalProductionDatabase) -> Option<RetainedCloseFailure> {
     None
+}
+
+#[cfg(windows)]
+fn run_production_database_migration_discovery(
+    app: &AppHandle,
+) -> ProductionDatabaseMigrationDiscoveryWorkerResult {
+    let paths = match StartupPaths::from_app(app) {
+        Ok(paths) => paths,
+        Err(_) => return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable,
+    };
+    let StartupPaths {
+        evidence: evidence_paths,
+        database_key: key_paths,
+        freshness_anchor: anchor_paths,
+        database: database_path,
+        ..
+    } = paths;
+
+    let early_installation_evidence = observe_production_installation_evidence(&evidence_paths);
+    if !is_initialized_with_expected_storage(&early_installation_evidence) {
+        return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable;
+    }
+
+    let trusted_assessment =
+        match load_trusted_current_installation_evidence_assessment(&evidence_paths) {
+            Ok(assessment) => assessment,
+            Err(_) => return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable,
+        };
+    let anchor_observation = observe_normalized_current_freshness_anchor(
+        &anchor_paths,
+        trusted_assessment.trusted_identity(),
+    );
+    let key_presence = inspect_database_key_active_presence(&key_paths);
+    let loaded_key = match load_active_database_key_wrapper(&key_paths, key_presence) {
+        Ok(key) => key,
+        Err(_) => return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable,
+    };
+    let key_candidate = match recover_database_key_candidate_from_loaded_wrapper(&loaded_key) {
+        Ok(candidate) => candidate,
+        Err(_) => return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable,
+    };
+    let key = match bind_database_key_candidate_to_trusted_installation_evidence(
+        key_candidate,
+        &trusted_assessment,
+    ) {
+        Ok(key) => key,
+        Err(_) => return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable,
+    };
+
+    let inspected = match inspect_production_database_file(&database_path) {
+        ProductionDatabaseInspection::Present(inspected) => inspected,
+        ProductionDatabaseInspection::Missing
+        | ProductionDatabaseInspection::Unavailable
+        | ProductionDatabaseInspection::Invalid => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable;
+        }
+    };
+    let opened = match open_keyed_production_database_read_only(database_path, inspected, key) {
+        Ok(opened) => opened,
+        Err(crate::production_database_connection_handoff::ProductionDatabaseConnectionOpenError::Failed) => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable;
+        }
+        Err(crate::production_database_connection_handoff::ProductionDatabaseConnectionOpenError::CloseFailed(failure)) => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(
+                ProductionDatabaseMigrationDiscoveryCloseFailure::Construction(failure),
+            );
+        }
+    };
+
+    let validated = match validate_production_database_readability_and_integrity(opened) {
+        ProductionDatabaseValidationOutcome::Validated(owner) => owner,
+        ProductionDatabaseValidationOutcome::Failed(_) => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable;
+        }
+        ProductionDatabaseValidationOutcome::CloseFailed(failure) => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(
+                ProductionDatabaseMigrationDiscoveryCloseFailure::Validation(failure),
+            );
+        }
+    };
+    let metadata = match validate_production_database_live_metadata_and_headers(validated) {
+        LiveMetadataAndHeaderValidationOutcome::Validated(owner) => owner,
+        LiveMetadataAndHeaderValidationOutcome::Failed(_) => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable;
+        }
+        LiveMetadataAndHeaderValidationOutcome::CloseFailed(failure) => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(
+                ProductionDatabaseMigrationDiscoveryCloseFailure::Metadata(failure),
+            );
+        }
+    };
+    let correspondence =
+        match validate_production_database_evidence_correspondence(metadata, trusted_assessment) {
+            DatabaseEvidenceCorrespondenceValidationOutcome::Validated(owner) => owner,
+            DatabaseEvidenceCorrespondenceValidationOutcome::Mismatch(_) => {
+                return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable;
+            }
+            DatabaseEvidenceCorrespondenceValidationOutcome::CloseFailed(failure) => {
+                return ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(
+                    ProductionDatabaseMigrationDiscoveryCloseFailure::Correspondence(failure),
+                );
+            }
+        };
+    let fresh = match validate_production_database_freshness(correspondence, anchor_observation) {
+        ProductionDatabaseFreshnessValidationOutcome::Validated(owner) => owner,
+        ProductionDatabaseFreshnessValidationOutcome::Failed(_) => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable;
+        }
+        ProductionDatabaseFreshnessValidationOutcome::CloseFailed(failure) => {
+            return ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(
+                ProductionDatabaseMigrationDiscoveryCloseFailure::Freshness(failure),
+            );
+        }
+    };
+
+    // This is intentionally the final external observation before the fixed offer transition.
+    let final_installation_evidence = observe_production_installation_evidence(&evidence_paths);
+    if !is_initialized_with_expected_storage(&final_installation_evidence) {
+        return match fresh.close() {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(
+                    ProductionDatabaseMigrationDiscoveryCloseFailure::Candidate(failure),
+                )
+            }
+        };
+    }
+
+    match offer_production_database_migration_opportunity(fresh, final_installation_evidence) {
+        ProductionDatabaseMigrationOpportunityOutcome::Offered(opportunity) => {
+            ProductionDatabaseMigrationDiscoveryWorkerResult::Candidate(
+                ProductionDatabaseMigrationPendingContext::new(
+                    opportunity,
+                    ProductionDatabaseMigrationRevalidationContext::new(
+                        evidence_paths,
+                        anchor_paths,
+                    ),
+                ),
+            )
+        }
+        ProductionDatabaseMigrationOpportunityOutcome::Failed(_) => {
+            ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable
+        }
+        ProductionDatabaseMigrationOpportunityOutcome::CloseFailed(failure) => {
+            ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(
+                ProductionDatabaseMigrationDiscoveryCloseFailure::Opportunity(failure),
+            )
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -2612,6 +2957,405 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn install_ready_owner_for_migration_discovery(
+        lifecycle: &ApplicationLifecycle,
+    ) -> crate::production_database_connection_handoff::MigrationDiscoveryTestRoot {
+        let (root, owner) = crate::production_database_connection_handoff::genuine_operational_production_database_for_test();
+        lifecycle.lock().state = LifecycleState::Ready(owner);
+        root
+    }
+
+    #[cfg(windows)]
+    fn close_ready_owner_for_migration_discovery(lifecycle: &ApplicationLifecycle) {
+        let owner = {
+            let mut inner = lifecycle.lock();
+            let LifecycleState::Ready(owner) = std::mem::replace(
+                &mut inner.state,
+                LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted),
+            ) else {
+                panic!("test lifecycle must still own the operational database in Ready");
+            };
+            owner
+        };
+        assert!(close_operational(owner).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_discovery_non_ready_does_not_consume_not_attempted() {
+        let lifecycle = ApplicationLifecycle::new();
+        for _ in 0..2 {
+            assert_eq!(
+                lifecycle.request_production_database_migration_discovery_with(
+                    None,
+                    || panic!("non-Ready discovery must not run"),
+                    |_| panic!("non-Ready discovery must not spawn"),
+                ),
+                ProductionDatabaseMigrationDiscoveryRequestOutcome::NotReady
+            );
+            assert_eq!(
+                lifecycle.lock().migration_discovery,
+                ProductionDatabaseMigrationDiscoveryState::NotAttempted
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_discovery_ready_is_one_shot_and_keeps_operational_owner_installed() {
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        let (candidate_root, opportunity) = crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test();
+        let context = crate::production_database_connection_handoff::genuine_production_database_migration_revalidation_context_for_test(candidate_root.path());
+
+        assert_eq!(
+            lifecycle.request_production_database_migration_discovery_with(
+                None,
+                move || {
+                    ProductionDatabaseMigrationDiscoveryWorkerResult::Candidate(
+                        ProductionDatabaseMigrationPendingContext::new(opportunity, context),
+                    )
+                },
+                spawn_migration_thread,
+            ),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::Started
+        );
+        lifecycle.join_workers();
+        {
+            let inner = lifecycle.lock();
+            assert!(matches!(inner.state, LifecycleState::Ready(_)));
+            assert_eq!(
+                inner.migration_discovery,
+                ProductionDatabaseMigrationDiscoveryState::Finished
+            );
+            assert_eq!(
+                inner.migration_confirmation.state_for_test(),
+                production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest::Pending
+            );
+            assert!(inner.migration_work_resolved);
+        }
+        assert_eq!(
+            lifecycle.request_production_database_migration_discovery_with(
+                None,
+                || panic!("finished discovery must not run again"),
+                |_| panic!("finished discovery must not spawn again"),
+            ),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::AlreadyAttempted
+        );
+
+        let pending = lifecycle
+            .lock()
+            .migration_confirmation
+            .invalidate_for_shutdown()
+            .expect("pending discovery candidate must remain lifecycle-owned");
+        assert!(matches!(
+            close_migration_shutdown_ownership(pending),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        close_ready_owner_for_migration_discovery(&lifecycle);
+        candidate_root.assert_exact_cleanup();
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_discovery_spawn_failure_consumes_attempt_without_retry() {
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        assert_eq!(
+            lifecycle.request_production_database_migration_discovery_with(
+                None,
+                || ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable,
+                |_| Err(std::io::Error::other("synthetic spawn failure")),
+            ),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::Unavailable
+        );
+        {
+            let inner = lifecycle.lock();
+            assert_eq!(
+                inner.migration_discovery,
+                ProductionDatabaseMigrationDiscoveryState::Finished
+            );
+            assert!(inner.migration_work_resolved);
+            assert!(inner.migration_worker.is_none());
+        }
+        assert_eq!(
+            lifecycle.request_production_database_migration_discovery_with(
+                None,
+                || panic!("spawn failure must consume discovery"),
+                |_| panic!("spawn failure must prevent retry"),
+            ),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::AlreadyAttempted
+        );
+        close_ready_owner_for_migration_discovery(&lifecycle);
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_discovery_start_failure_consumes_attempt_and_resolves_accounting() {
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        assert_eq!(
+            lifecycle.request_production_database_migration_discovery_with(
+                None,
+                || panic!("discarded start-gated work must not run"),
+                |task| {
+                    drop(task);
+                    Ok(thread::spawn(|| {}))
+                },
+            ),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::Unavailable
+        );
+        {
+            let inner = lifecycle.lock();
+            assert_eq!(
+                inner.migration_discovery,
+                ProductionDatabaseMigrationDiscoveryState::Finished
+            );
+            assert!(inner.migration_work_resolved);
+            assert!(inner.migration_worker.is_some());
+        }
+        assert_eq!(
+            lifecycle.request_production_database_migration_discovery_with(
+                None,
+                || panic!("start failure must consume discovery"),
+                |_| panic!("start failure must prevent retry"),
+            ),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::AlreadyAttempted
+        );
+        lifecycle.join_workers();
+        close_ready_owner_for_migration_discovery(&lifecycle);
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_discovery_start_gate_precedes_trust_work_and_blocks_concurrent_request() {
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        let ran = Arc::new(AtomicBool::new(false));
+        let worker_ran = Arc::clone(&ran);
+        let (wrapper_ready_sender, wrapper_ready_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let request_lifecycle = Arc::clone(&lifecycle);
+        let request = thread::spawn(move || {
+            request_lifecycle.request_production_database_migration_discovery_with(
+                None,
+                move || {
+                    worker_ran.store(true, Ordering::SeqCst);
+                    ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable
+                },
+                move |task| {
+                    Ok(thread::spawn(move || {
+                        wrapper_ready_sender.send(()).unwrap();
+                        release_receiver.recv().unwrap();
+                        task();
+                    }))
+                },
+            )
+        });
+        wrapper_ready_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        {
+            let inner = lifecycle.lock();
+            assert_eq!(
+                inner.migration_discovery,
+                ProductionDatabaseMigrationDiscoveryState::InProgress
+            );
+            assert!(!inner.migration_work_resolved);
+            assert!(inner.migration_worker.is_some());
+        }
+        assert!(!ran.load(Ordering::SeqCst));
+        assert_eq!(
+            lifecycle.request_production_database_migration_discovery_with(
+                None,
+                || panic!("concurrent discovery must not run"),
+                |_| panic!("concurrent discovery must not spawn"),
+            ),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::AlreadyAttempted
+        );
+        release_sender.send(()).unwrap();
+        assert_eq!(
+            request.join().unwrap(),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::Started
+        );
+        lifecycle.join_workers();
+        assert!(ran.load(Ordering::SeqCst));
+        assert_eq!(
+            lifecycle.lock().migration_discovery,
+            ProductionDatabaseMigrationDiscoveryState::Finished
+        );
+        assert_eq!(
+            lifecycle.request_production_database_migration_discovery_with(
+                None,
+                || panic!("completed unavailable discovery must not retry"),
+                |_| panic!("completed unavailable discovery must not respawn"),
+            ),
+            ProductionDatabaseMigrationDiscoveryRequestOutcome::AlreadyAttempted
+        );
+        close_ready_owner_for_migration_discovery(&lifecycle);
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_discovery_late_candidate_after_shutdown_is_closed_without_pending() {
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        let (candidate_root, opportunity) = crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test();
+        let context = crate::production_database_connection_handoff::genuine_production_database_migration_revalidation_context_for_test(candidate_root.path());
+        let operational_owner = {
+            let mut inner = lifecycle.lock();
+            inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::InProgress;
+            inner.migration_work_resolved = false;
+            let ShutdownAction::Close(owner) = inner.state.begin_shutdown() else {
+                panic!("Ready shutdown must return the ordinary operational owner");
+            };
+            inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
+            owner
+        };
+        assert!(close_operational(operational_owner).is_none());
+        lifecycle.lock().state.finish_close(None);
+
+        lifecycle.complete_migration_discovery(
+            ProductionDatabaseMigrationDiscoveryWorkerResult::Candidate(
+                ProductionDatabaseMigrationPendingContext::new(opportunity, context),
+            ),
+            None,
+        );
+        {
+            let inner = lifecycle.lock();
+            assert_eq!(
+                inner.migration_confirmation.state_for_test(),
+                production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest::NotOffered
+            );
+            assert_eq!(
+                inner.migration_discovery,
+                ProductionDatabaseMigrationDiscoveryState::Finished
+            );
+            assert!(inner.migration_work_resolved);
+        }
+        candidate_root.assert_exact_cleanup();
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_discovery_late_candidate_close_failure_is_retained_and_blocks_exit() {
+        let lifecycle = ApplicationLifecycle::new();
+        let (candidate_root, opportunity) = crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test();
+        let context = crate::production_database_connection_handoff::genuine_production_database_migration_revalidation_context_for_test(candidate_root.path());
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.startup_work_resolved = true;
+            inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
+            inner.migration_work_resolved = false;
+        }
+        crate::production_database_connection_handoff::with_production_database_close_failure_injected(
+            || {
+                lifecycle.complete_migration_discovery(
+                    ProductionDatabaseMigrationDiscoveryWorkerResult::Candidate(
+                        ProductionDatabaseMigrationPendingContext::new(opportunity, context),
+                    ),
+                    None,
+                );
+            },
+        );
+        {
+            let inner = lifecycle.lock();
+            assert_eq!(
+                inner.migration_confirmation.state_for_test(),
+                production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest::DiscoveryCloseRetryRequired
+            );
+            assert!(!inner.migration_work_resolved);
+        }
+        assert!(!lifecycle.may_exit());
+        assert!(
+            lifecycle
+                .lock()
+                .migration_confirmation
+                .retry_discovery_candidate_close_for_test()
+        );
+        candidate_root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn migration_discovery_producer_is_private_fresh_ordered_and_stops_at_pending() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        const BOOTSTRAP: &str = include_str!("lib.rs");
+        const FRONTEND: &str = include_str!("../../src/App.tsx");
+        let production = SOURCE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let worker = production
+            .split_once("fn run_production_database_migration_discovery(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nfn run_production_startup(")
+            .unwrap()
+            .0;
+        let ordered = [
+            "StartupPaths::from_app(app)",
+            "let early_installation_evidence",
+            "load_trusted_current_installation_evidence_assessment",
+            "observe_normalized_current_freshness_anchor",
+            "inspect_database_key_active_presence",
+            "load_active_database_key_wrapper",
+            "recover_database_key_candidate_from_loaded_wrapper",
+            "bind_database_key_candidate_to_trusted_installation_evidence",
+            "inspect_production_database_file",
+            "open_keyed_production_database_read_only",
+            "validate_production_database_readability_and_integrity",
+            "validate_production_database_live_metadata_and_headers",
+            "validate_production_database_evidence_correspondence",
+            "validate_production_database_freshness",
+            "let final_installation_evidence",
+            "offer_production_database_migration_opportunity",
+            "ProductionDatabaseMigrationPendingContext::new",
+        ];
+        let mut prior = 0;
+        for marker in ordered {
+            let position = worker
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing {marker}"));
+            assert!(position >= prior, "out-of-order {marker}");
+            prior = position;
+        }
+        assert_eq!(
+            worker
+                .matches("observe_production_installation_evidence(&evidence_paths)")
+                .count(),
+            2
+        );
+        for forbidden in [
+            "begin_production_database_migration_revalidation",
+            "spawn_blocking",
+            "integrity_check",
+            "backup",
+            "MigrationPlan",
+        ] {
+            assert!(!worker.contains(forbidden));
+        }
+        let request_name = "request_production_database_migration_discovery(";
+        assert_eq!(production.matches(request_name).count(), 1);
+        assert!(!BOOTSTRAP.contains(request_name));
+        assert!(!FRONTEND.contains(request_name));
+        let shutdown = production
+            .split_once("pub(crate) fn request_shutdown")
+            .unwrap()
+            .1
+            .split_once("fn close_on_worker")
+            .unwrap()
+            .0;
+        let discovery_finished = shutdown
+            .find("ProductionDatabaseMigrationDiscoveryState::Finished")
+            .unwrap();
+        let stopping = shutdown.find("state.begin_shutdown()").unwrap();
+        assert!(discovery_finished < stopping);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn migration_worker_start_gate_installs_handle_and_accounting_before_execution() {
         use crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test;
@@ -2908,7 +3652,7 @@ mod tests {
             .0;
         assert!(!request.contains("spawn_blocking"));
         assert!(!request.contains("catch_unwind"));
-        assert!(!production.contains(".establish_pending("));
+        assert!(!request.contains(".establish_pending("));
         for forbidden in [
             "#[tauri::command]\nfn begin_production_database_migration",
             "ProductionDatabaseMigrationRevalidationRequestResult",

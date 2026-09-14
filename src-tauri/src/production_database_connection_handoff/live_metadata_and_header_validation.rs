@@ -37,6 +37,8 @@ pub(crate) use database_evidence_correspondence_validation::{
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
+    ProductionDatabaseMigrationOpportunityCloseFailure,
+    ProductionDatabaseMigrationOpportunityOutcome,
     ProductionDatabaseMigrationRevalidationCloseFailure,
     ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
     ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
@@ -47,12 +49,14 @@ pub(crate) use database_evidence_correspondence_validation::{
     RevalidatedProductionDatabaseMigrationOpportunity,
     StartupAuthorizedProductionDatabaseConnection,
     activate_production_database_for_operational_use, authorize_production_database_startup,
+    offer_production_database_migration_opportunity,
     revalidate_production_database_migration_opportunity,
     validate_production_database_evidence_correspondence, validate_production_database_freshness,
 };
 
 #[cfg(test)]
 pub(crate) use database_evidence_correspondence_validation::{
+    MigrationDiscoveryTestRoot, genuine_operational_production_database_for_test,
     genuine_production_database_migration_opportunity_for_test,
     genuine_production_database_migration_revalidation_context_for_test,
 };

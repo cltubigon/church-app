@@ -25,6 +25,8 @@ pub(crate) use database_freshness_validation::{
     ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
+    ProductionDatabaseMigrationOpportunityCloseFailure,
+    ProductionDatabaseMigrationOpportunityOutcome,
     ProductionDatabaseMigrationRevalidationCloseFailure,
     ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
     ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
@@ -35,7 +37,13 @@ pub(crate) use database_freshness_validation::{
     RevalidatedProductionDatabaseMigrationOpportunity,
     StartupAuthorizedProductionDatabaseConnection,
     activate_production_database_for_operational_use, authorize_production_database_startup,
+    offer_production_database_migration_opportunity,
     revalidate_production_database_migration_opportunity, validate_production_database_freshness,
+};
+
+#[cfg(test)]
+pub(crate) use database_freshness_validation::{
+    MigrationDiscoveryTestRoot, genuine_operational_production_database_for_test,
 };
 
 #[cfg(test)]

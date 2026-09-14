@@ -246,6 +246,24 @@ pub(crate) fn genuine_production_database_migration_opportunity_for_test() -> (
 }
 
 #[cfg(test)]
+pub(crate) fn genuine_operational_production_database_for_test()
+-> (super::tests::TestRoot, super::OperationalProductionDatabase) {
+    let (root, database) = super::tests::fresh_owner();
+    let super::ProductionDatabaseStartupAuthorizationOutcome::Authorized(authorized) =
+        super::authorize_production_database_startup(
+            database,
+            InstallationEvidence::Initialized(ExpectedStorageEvidence::Present),
+        )
+    else {
+        panic!("synthetic fresh owner must authorize for operational use");
+    };
+    (
+        root,
+        super::activate_production_database_for_operational_use(authorized),
+    )
+}
+
+#[cfg(test)]
 fn offer_production_database_migration_opportunity_using(
     database: DatabaseFreshnessValidatedProductionDatabaseConnection,
     installation_evidence: InstallationEvidence,
@@ -783,12 +801,35 @@ mod tests {
     }
 
     #[test]
-    fn opportunity_transition_is_unwired_outside_its_focused_tests() {
+    fn opportunity_transition_is_wired_only_to_private_post_ready_discovery() {
+        const OFFER: &str = "offer_production_database_migration_opportunity(";
+        const SOURCE: &str = include_str!("production_database_migration_opportunity.rs");
         const PARENT: &str = include_str!("../database_freshness_validation.rs");
         const HANDOFF: &str = include_str!("../../../../production_database_connection_handoff.rs");
         const LIFECYCLE: &str = include_str!("../../../../application_lifecycle.rs");
+        const BOOTSTRAP: &str = include_str!("../../../../lib.rs");
         const CONFIRMATION: &str = include_str!(
             "../../../../application_lifecycle/production_database_migration_confirmation.rs"
+        );
+        const FRONTEND: [&str; 8] = [
+            include_str!("../../../../../../src/App.tsx"),
+            include_str!("../../../../../../src/App.test.tsx"),
+            include_str!("../../../../../../src/main.tsx"),
+            include_str!("../../../../../../src/components/HealthPanel.tsx"),
+            include_str!("../../../../../../src/lib/health.ts"),
+            include_str!("../../../../../../src/lib/startup.ts"),
+            include_str!("../../../../../../src/lib/startup.test.ts"),
+            include_str!("../../../../../../src/test/setup.ts"),
+        ];
+
+        let opportunity_production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            opportunity_production
+                .contains("pub(crate) fn offer_production_database_migration_opportunity(")
+        );
+        assert!(
+            !opportunity_production
+                .contains("pub fn offer_production_database_migration_opportunity(")
         );
 
         assert_eq!(
@@ -797,8 +838,53 @@ mod tests {
                 .count(),
             1
         );
-        for outside_source in [PARENT, HANDOFF, LIFECYCLE, CONFIRMATION] {
-            assert!(!outside_source.contains("offer_production_database_migration_opportunity("));
+        let lifecycle_production = LIFECYCLE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        assert_eq!(lifecycle_production.matches(OFFER).count(), 1);
+
+        let discovery = lifecycle_production
+            .split_once("fn run_production_database_migration_discovery(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nfn run_production_startup(")
+            .unwrap()
+            .0;
+        assert_eq!(discovery.matches(OFFER).count(), 1);
+        assert!(discovery.contains("ProductionDatabaseMigrationPendingContext::new("));
+        assert!(!discovery.contains("begin_production_database_migration_revalidation"));
+
+        let startup = lifecycle_production
+            .split_once("#[cfg(windows)]\nfn run_production_startup(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nstruct StartupPaths")
+            .unwrap()
+            .0;
+        assert!(!startup.contains(OFFER));
+
+        let completion = lifecycle_production
+            .split_once("fn complete_migration_discovery(")
+            .unwrap()
+            .1
+            .split_once("fn complete_migration_discovery_candidate_close(")
+            .unwrap()
+            .0;
+        assert!(completion.contains("matches!(inner.state, LifecycleState::Ready(_))"));
+        assert_eq!(
+            completion.matches(".establish_pending(candidate)").count(),
+            1
+        );
+        assert!(!completion.contains("begin_production_database_migration_revalidation"));
+
+        for outside_source in [PARENT, HANDOFF, BOOTSTRAP, CONFIRMATION] {
+            assert!(!outside_source.contains(OFFER));
         }
+        for frontend_source in FRONTEND {
+            assert!(!frontend_source.contains(OFFER));
+        }
+
+        assert_eq!(lifecycle_production.matches("#[tauri::command]").count(), 2);
+        assert!(BOOTSTRAP.contains(
+            ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup\n        ])"
+        ));
     }
 }

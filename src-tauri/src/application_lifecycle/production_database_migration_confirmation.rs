@@ -3,11 +3,15 @@
 use std::fmt;
 
 use crate::production_database_connection_handoff::{
-    ProductionDatabaseConnectionCloseFailure, ProductionDatabaseConnectionCloseOutcome,
-    ProductionDatabaseMigrationOpportunity, ProductionDatabaseMigrationRevalidationCloseFailure,
+    DatabaseEvidenceCorrespondenceValidationCloseFailure,
+    LiveMetadataAndHeaderValidationCloseFailure, ProductionDatabaseConnectionCloseFailure,
+    ProductionDatabaseConnectionCloseOutcome, ProductionDatabaseConnectionConstructionCloseFailure,
+    ProductionDatabaseFreshnessValidationCloseFailure, ProductionDatabaseMigrationOpportunity,
+    ProductionDatabaseMigrationOpportunityCloseFailure,
+    ProductionDatabaseMigrationRevalidationCloseFailure,
     ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
     ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
-    ProductionDatabaseMigrationRevalidationOutcome,
+    ProductionDatabaseMigrationRevalidationOutcome, ProductionDatabaseValidationCloseFailure,
     RevalidatedProductionDatabaseMigrationOpportunity,
 };
 
@@ -28,6 +32,17 @@ enum ProductionDatabaseMigrationConfirmationState {
     Revoked,
     RevokedCloseRetryRequired(ProductionDatabaseMigrationRevalidationCloseFailure),
     RevokedSourceCloseRetryRequired(ProductionDatabaseConnectionCloseFailure),
+    DiscoveryCloseRetryRequired(ProductionDatabaseMigrationDiscoveryCloseFailure),
+}
+
+pub(super) enum ProductionDatabaseMigrationDiscoveryCloseFailure {
+    Construction(ProductionDatabaseConnectionConstructionCloseFailure),
+    Validation(ProductionDatabaseValidationCloseFailure),
+    Metadata(LiveMetadataAndHeaderValidationCloseFailure),
+    Correspondence(DatabaseEvidenceCorrespondenceValidationCloseFailure),
+    Freshness(ProductionDatabaseFreshnessValidationCloseFailure),
+    Opportunity(ProductionDatabaseMigrationOpportunityCloseFailure),
+    Candidate(ProductionDatabaseConnectionCloseFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,7 +57,6 @@ pub(super) struct ProductionDatabaseMigrationPendingContext {
 }
 
 impl ProductionDatabaseMigrationPendingContext {
-    #[cfg(test)]
     pub(super) fn new(
         opportunity: ProductionDatabaseMigrationOpportunity,
         revalidation_context: ProductionDatabaseMigrationRevalidationContext,
@@ -151,6 +165,25 @@ impl fmt::Debug for ProductionDatabaseMigrationPendingContext {
     }
 }
 
+impl fmt::Debug for ProductionDatabaseMigrationDiscoveryCloseFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Construction(failure) => retain_redacted(failure),
+            Self::Validation(failure) => retain_redacted(failure),
+            Self::Metadata(failure) => retain_redacted(failure),
+            Self::Correspondence(failure) => retain_redacted(failure),
+            Self::Freshness(failure) => retain_redacted(failure),
+            Self::Opportunity(failure) => retain_redacted(failure),
+            Self::Candidate(failure) => retain_redacted(failure),
+        }
+        formatter.write_str("ProductionDatabaseMigrationDiscoveryCloseFailure([REDACTED])")
+    }
+}
+
+fn retain_redacted<T>(retained: &T) {
+    let _ = std::mem::size_of_val(retained);
+}
+
 impl fmt::Debug for ProductionDatabaseMigrationRevalidationWork {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ProductionDatabaseMigrationRevalidationWork([REDACTED])")
@@ -179,6 +212,27 @@ impl ProductionDatabaseMigrationConfirmation {
     pub(super) fn new() -> Self {
         Self {
             state: ProductionDatabaseMigrationConfirmationState::NotOffered,
+        }
+    }
+
+    pub(super) fn is_not_offered(&self) -> bool {
+        matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::NotOffered
+        )
+    }
+
+    pub(super) fn retain_discovery_close_failure(
+        &mut self,
+        failure: ProductionDatabaseMigrationDiscoveryCloseFailure,
+    ) {
+        if matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::NotOffered
+                | ProductionDatabaseMigrationConfirmationState::Revoked
+        ) {
+            self.state =
+                ProductionDatabaseMigrationConfirmationState::DiscoveryCloseRetryRequired(failure);
         }
     }
 
@@ -268,6 +322,7 @@ impl ProductionDatabaseMigrationConfirmation {
             self.state,
             ProductionDatabaseMigrationConfirmationState::RevokedCloseRetryRequired(_)
                 | ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(_)
+                | ProductionDatabaseMigrationConfirmationState::DiscoveryCloseRetryRequired(_)
         )
     }
 
@@ -332,6 +387,9 @@ impl ProductionDatabaseMigrationConfirmation {
                 _,
             )
             | ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(
+                _,
+            )
+            | ProductionDatabaseMigrationConfirmationState::DiscoveryCloseRetryRequired(
                 _,
             )) => {
                 self.state = terminal;
@@ -509,6 +567,34 @@ impl ProductionDatabaseMigrationConfirmation {
             ProductionDatabaseMigrationConfirmationState::RevokedSourceCloseRetryRequired(_) => {
                 ProductionDatabaseMigrationConfirmationStateForTest::RevokedSourceCloseRetryRequired
             }
+            ProductionDatabaseMigrationConfirmationState::DiscoveryCloseRetryRequired(_) => {
+                ProductionDatabaseMigrationConfirmationStateForTest::DiscoveryCloseRetryRequired
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn retry_discovery_candidate_close_for_test(&mut self) -> bool {
+        let prior = std::mem::replace(
+            &mut self.state,
+            ProductionDatabaseMigrationConfirmationState::Revoked,
+        );
+        let ProductionDatabaseMigrationConfirmationState::DiscoveryCloseRetryRequired(
+            ProductionDatabaseMigrationDiscoveryCloseFailure::Candidate(failure),
+        ) = prior
+        else {
+            self.state = prior;
+            return false;
+        };
+        match failure.retry_close() {
+            ProductionDatabaseConnectionCloseOutcome::Closed => true,
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                self.state =
+                    ProductionDatabaseMigrationConfirmationState::DiscoveryCloseRetryRequired(
+                        ProductionDatabaseMigrationDiscoveryCloseFailure::Candidate(failure),
+                    );
+                false
+            }
         }
     }
 }
@@ -525,6 +611,7 @@ pub(super) enum ProductionDatabaseMigrationConfirmationStateForTest {
     Revoked,
     RevokedCloseRetryRequired,
     RevokedSourceCloseRetryRequired,
+    DiscoveryCloseRetryRequired,
 }
 
 #[cfg(test)]
@@ -1024,7 +1111,11 @@ mod ownership_tests {
 
         const LIFECYCLE: &str = include_str!("../application_lifecycle.rs");
         let production_lifecycle = LIFECYCLE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
-        assert!(!production_lifecycle.contains(".establish_pending("));
+        assert_eq!(
+            production_lifecycle.matches(".establish_pending(").count(),
+            1,
+            "only the private post-Ready discovery completion may establish Pending"
+        );
         assert_eq!(
             production_lifecycle.matches(".begin_revalidation(").count(),
             1,
