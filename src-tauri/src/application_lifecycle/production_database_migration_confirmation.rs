@@ -4,15 +4,21 @@ use std::fmt;
 
 use crate::production_database_connection_handoff::{
     DatabaseEvidenceCorrespondenceValidationCloseFailure,
-    LiveMetadataAndHeaderValidationCloseFailure, ProductionDatabaseConnectionCloseFailure,
-    ProductionDatabaseConnectionCloseOutcome, ProductionDatabaseConnectionConstructionCloseFailure,
-    ProductionDatabaseFreshnessValidationCloseFailure, ProductionDatabaseMigrationOpportunity,
-    ProductionDatabaseMigrationOpportunityCloseFailure,
+    FullIntegrityValidatedProductionDatabaseMigrationSource, FullIntegrityValidationCloseFailure,
+    FullIntegrityValidationError, LiveMetadataAndHeaderValidationCloseFailure,
+    ProductionDatabaseConnectionCloseFailure, ProductionDatabaseConnectionCloseOutcome,
+    ProductionDatabaseConnectionConstructionCloseFailure,
+    ProductionDatabaseFreshnessValidationCloseFailure,
+    ProductionDatabaseMigrationFullIntegrityFailedSource,
+    ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome,
+    ProductionDatabaseMigrationFullIntegrityPreparationOutcome,
+    ProductionDatabaseMigrationOpportunity, ProductionDatabaseMigrationOpportunityCloseFailure,
     ProductionDatabaseMigrationRevalidationCloseFailure,
     ProductionDatabaseMigrationRevalidationCloseRetryOutcome,
     ProductionDatabaseMigrationRevalidationContext, ProductionDatabaseMigrationRevalidationError,
     ProductionDatabaseMigrationRevalidationOutcome, ProductionDatabaseValidationCloseFailure,
     RevalidatedProductionDatabaseMigrationOpportunity,
+    prepare_production_database_migration_full_integrity,
 };
 
 pub(super) struct ProductionDatabaseMigrationConfirmation {
@@ -114,16 +120,88 @@ struct AuthorizedProductionDatabaseMigrationHandoff {
     source: RevalidatedProductionDatabaseMigrationOpportunity,
 }
 
+struct FullIntegrityValidatedProductionDatabaseMigrationHandoff {
+    authorization: ProductionDatabaseMigrationAuthorization,
+    source: FullIntegrityValidatedProductionDatabaseMigrationSource,
+}
+
+#[must_use = "the migration full-integrity outcome must be handled"]
+#[allow(clippy::large_enum_variant)]
+enum ProductionDatabaseMigrationFullIntegrityOutcome {
+    Validated(FullIntegrityValidatedProductionDatabaseMigrationHandoff),
+    Failed(FullIntegrityValidationError),
+    CloseFailed(FullIntegrityValidationCloseFailure),
+}
+
 impl AuthorizedProductionDatabaseMigrationHandoff {
+    fn validate_full_integrity(self) -> ProductionDatabaseMigrationFullIntegrityOutcome {
+        self.validate_full_integrity_using(
+            prepare_production_database_migration_full_integrity,
+            ProductionDatabaseMigrationFullIntegrityFailedSource::close,
+        )
+    }
+
+    fn validate_full_integrity_using(
+        self,
+        prepare: impl FnOnce(
+            RevalidatedProductionDatabaseMigrationOpportunity,
+        ) -> ProductionDatabaseMigrationFullIntegrityPreparationOutcome,
+        close_failure: impl FnOnce(
+            ProductionDatabaseMigrationFullIntegrityFailedSource,
+        )
+            -> ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome,
+    ) -> ProductionDatabaseMigrationFullIntegrityOutcome {
+        let Self {
+            authorization,
+            source,
+        } = self;
+        match prepare(source) {
+            ProductionDatabaseMigrationFullIntegrityPreparationOutcome::Validated(source) => {
+                ProductionDatabaseMigrationFullIntegrityOutcome::Validated(
+                    FullIntegrityValidatedProductionDatabaseMigrationHandoff {
+                        authorization,
+                        source,
+                    },
+                )
+            }
+            ProductionDatabaseMigrationFullIntegrityPreparationOutcome::Failed(failure) => {
+                destroy_migration_authorization(authorization);
+                match close_failure(failure) {
+                    ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome::Closed(
+                        category,
+                    ) => ProductionDatabaseMigrationFullIntegrityOutcome::Failed(category),
+                    ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome::CloseFailed(
+                        failure,
+                    ) => ProductionDatabaseMigrationFullIntegrityOutcome::CloseFailed(failure),
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
         let Self {
             authorization,
             source,
         } = self;
-        let ProductionDatabaseMigrationAuthorization { _private: () } = authorization;
+        destroy_migration_authorization(authorization);
         source.close()
     }
+}
+
+impl FullIntegrityValidatedProductionDatabaseMigrationHandoff {
+    fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
+        let Self {
+            authorization,
+            source,
+        } = self;
+        destroy_migration_authorization(authorization);
+        source.close()
+    }
+}
+
+fn destroy_migration_authorization(authorization: ProductionDatabaseMigrationAuthorization) {
+    let ProductionDatabaseMigrationAuthorization { _private: () } = authorization;
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -193,6 +271,22 @@ impl fmt::Debug for ProductionDatabaseMigrationRevalidationWork {
 impl fmt::Debug for AuthorizedProductionDatabaseMigrationHandoff {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("AuthorizedProductionDatabaseMigrationHandoff([REDACTED])")
+    }
+}
+
+impl fmt::Debug for FullIntegrityValidatedProductionDatabaseMigrationHandoff {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FullIntegrityValidatedProductionDatabaseMigrationHandoff([REDACTED])")
+    }
+}
+
+impl fmt::Debug for ProductionDatabaseMigrationFullIntegrityOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validated(_) => formatter.write_str("Validated([REDACTED])"),
+            Self::Failed(category) => formatter.debug_tuple("Failed").field(category).finish(),
+            Self::CloseFailed(_) => formatter.write_str("CloseFailed([REDACTED])"),
+        }
     }
 }
 
@@ -616,12 +710,14 @@ pub(super) enum ProductionDatabaseMigrationConfirmationStateForTest {
 
 #[cfg(test)]
 mod ownership_tests {
-    use std::{mem::needs_drop, path::Path};
+    use std::{cell::Cell, mem::needs_drop, path::Path, rc::Rc};
 
     use crate::production_database_connection_handoff::{
+        FullIntegrityValidationCloseRetryOutcome, MigrationDiscoveryTestRoot,
         ProductionDatabaseConnectionCloseOutcome,
         genuine_production_database_migration_opportunity_for_test,
         genuine_production_database_migration_revalidation_context_for_test,
+        prepare_production_database_migration_full_integrity_using_for_test,
         with_production_database_close_failure_injected,
     };
 
@@ -650,6 +746,138 @@ mod ownership_tests {
             confirmation.complete_revalidation(work.revalidate()),
             Ok(ProductionDatabaseMigrationRevalidationCompletion::Authorized)
         ));
+    }
+
+    fn authorized_handoff() -> (
+        MigrationDiscoveryTestRoot,
+        AuthorizedProductionDatabaseMigrationHandoff,
+    ) {
+        let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
+        let (root, opportunity) = genuine_production_database_migration_opportunity_for_test();
+        confirmation
+            .establish_pending(pending(root.path(), opportunity))
+            .unwrap();
+        authorize(&mut confirmation);
+        let handoff = confirmation.consume_authorization().unwrap();
+        assert_eq!(
+            confirmation.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::Consumed
+        );
+        (root, handoff)
+    }
+
+    #[test]
+    fn migration_full_integrity_accepts_genuine_authorized_source_and_preserves_ownership() {
+        let (root, handoff) = authorized_handoff();
+        let before = handoff
+            .source
+            .full_integrity_preservation_evidence_for_test();
+        let ProductionDatabaseMigrationFullIntegrityOutcome::Validated(validated) =
+            handoff.validate_full_integrity()
+        else {
+            panic!("genuine authorized source must pass fixed full integrity");
+        };
+        assert_eq!(
+            format!("{validated:?}"),
+            "FullIntegrityValidatedProductionDatabaseMigrationHandoff([REDACTED])"
+        );
+        assert_eq!(validated.source.preservation_evidence_for_test(), before);
+        assert!(matches!(
+            validated.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn migration_full_integrity_primary_categories_destroy_authorization_and_close_source() {
+        for category in [
+            FullIntegrityValidationError::FullIntegrityFailed,
+            FullIntegrityValidationError::FullIntegrityUnavailable,
+            FullIntegrityValidationError::FullIntegrityInterruptedOrIncomplete,
+        ] {
+            let (root, handoff) = authorized_handoff();
+            let validation_calls = Rc::new(Cell::new(0));
+            let observed_calls = Rc::clone(&validation_calls);
+            let outcome = handoff.validate_full_integrity_using(
+                |source| {
+                    prepare_production_database_migration_full_integrity_using_for_test(
+                        source,
+                        |_| {
+                            observed_calls.set(observed_calls.get() + 1);
+                            Err(category)
+                        },
+                    )
+                },
+                ProductionDatabaseMigrationFullIntegrityFailedSource::close,
+            );
+            assert!(matches!(
+                outcome,
+                ProductionDatabaseMigrationFullIntegrityOutcome::Failed(observed)
+                    if observed == category
+            ));
+            assert_eq!(validation_calls.get(), 1);
+            root.assert_exact_cleanup();
+        }
+    }
+
+    #[test]
+    fn migration_full_integrity_close_retry_is_authorization_free_and_close_only() {
+        let (root, handoff) = authorized_handoff();
+        let validation_calls = Rc::new(Cell::new(0));
+        let observed_calls = Rc::clone(&validation_calls);
+        let outcome = handoff.validate_full_integrity_using(
+            |source| {
+                prepare_production_database_migration_full_integrity_using_for_test(source, |_| {
+                    observed_calls.set(observed_calls.get() + 1);
+                    Err(FullIntegrityValidationError::FullIntegrityUnavailable)
+                })
+            },
+            |failure| failure.close_using_for_test(Err),
+        );
+        assert_eq!(format!("{outcome:?}"), "CloseFailed([REDACTED])");
+        let ProductionDatabaseMigrationFullIntegrityOutcome::CloseFailed(failure) = outcome else {
+            panic!("injected close failure must retain database ownership");
+        };
+        assert_eq!(validation_calls.get(), 1);
+        let FullIntegrityValidationCloseRetryOutcome::Failed(failure) =
+            with_production_database_close_failure_injected(|| failure.retry_close())
+        else {
+            panic!("repeated close failure must remain retryable");
+        };
+        assert_eq!(validation_calls.get(), 1);
+        assert!(matches!(
+            failure.retry_close(),
+            FullIntegrityValidationCloseRetryOutcome::Closed(
+                FullIntegrityValidationError::FullIntegrityUnavailable
+            )
+        ));
+        assert_eq!(validation_calls.get(), 1);
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn migration_full_integrity_success_close_uses_general_authorization_free_close_owner() {
+        let (root, handoff) = authorized_handoff();
+        let ProductionDatabaseMigrationFullIntegrityOutcome::Validated(validated) =
+            handoff.validate_full_integrity()
+        else {
+            panic!("genuine source must validate");
+        };
+        let ProductionDatabaseConnectionCloseOutcome::Failed(failure) =
+            with_production_database_close_failure_injected(|| validated.close())
+        else {
+            panic!("injected close failure must use the general close owner");
+        };
+        assert_eq!(
+            format!("{failure:?}"),
+            "ProductionDatabaseConnectionCloseFailure([REDACTED])"
+        );
+        assert!(matches!(
+            failure.retry_close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
     }
 
     #[test]
@@ -1048,6 +1276,10 @@ mod ownership_tests {
         struct Implemented;
         impl<T: Clone> AmbiguousIfClone<Implemented> for T {}
         let _ = <ProductionDatabaseMigrationAuthorization as AmbiguousIfClone<_>>::check;
+        let _ = <FullIntegrityValidatedProductionDatabaseMigrationHandoff as AmbiguousIfClone<
+            _,
+        >>::check;
+        let _ = <ProductionDatabaseMigrationFullIntegrityOutcome as AmbiguousIfClone<_>>::check;
 
         assert_eq!(
             format!(
@@ -1063,6 +1295,10 @@ mod ownership_tests {
         assert!(needs_drop::<ProductionDatabaseMigrationPendingContext>());
         assert!(needs_drop::<ProductionDatabaseMigrationRevalidationWork>());
         assert!(needs_drop::<AuthorizedProductionDatabaseMigrationHandoff>());
+        assert!(needs_drop::<
+            FullIntegrityValidatedProductionDatabaseMigrationHandoff,
+        >());
+        assert!(needs_drop::<ProductionDatabaseMigrationFullIntegrityOutcome>());
     }
 
     #[test]
@@ -1096,7 +1332,6 @@ mod ownership_tests {
             "ConfirmedMigrationIntent",
             "rusqlite",
             "backup",
-            "full_integrity",
             "exclusive",
             "migration SQL",
             "std::thread",
@@ -1120,6 +1355,40 @@ mod ownership_tests {
             production_lifecycle.matches(".begin_revalidation(").count(),
             1,
             "only the private lifecycle worker reservation may begin revalidation"
+        );
+        assert!(!production_lifecycle.contains("validate_full_integrity("));
+        assert!(
+            !production_lifecycle.contains("prepare_production_database_migration_full_integrity")
+        );
+
+        let bridge = production
+            .split_once("impl AuthorizedProductionDatabaseMigrationHandoff {")
+            .unwrap()
+            .1
+            .split_once("impl FullIntegrityValidatedProductionDatabaseMigrationHandoff")
+            .unwrap()
+            .0;
+        assert!(bridge.contains("prepare_production_database_migration_full_integrity"));
+        assert!(bridge.contains("destroy_migration_authorization(authorization)"));
+        assert!(!bridge.contains("ProductionDatabaseMigrationAuthorization {"));
+        for forbidden in [
+            "cipher_integrity_check",
+            "open_keyed_production_database_read_only",
+            "recover_and_validate_database_key",
+            "inspect_production_database_file",
+            "observe_fresh_source_metadata",
+            "classify_database_metadata_correspondence",
+            "classify_database_freshness",
+            "observe_production_installation_evidence",
+        ] {
+            assert!(!bridge.contains(forbidden), "bridge reran {forbidden}");
+        }
+        assert_eq!(
+            production
+                .matches("ProductionDatabaseMigrationAuthorization {\n                                _private: (),\n                            }")
+                .count(),
+            1,
+            "only revalidation completion may construct authorization"
         );
     }
 }

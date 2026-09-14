@@ -73,15 +73,51 @@ impl fmt::Debug for RevalidatedProductionDatabaseMigrationOpportunity {
 }
 
 impl RevalidatedProductionDatabaseMigrationOpportunity {
-    /// Discards revalidation-only trust state before using the canonical
-    /// production database close outcome and retry owner.
-    pub(crate) fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
+    /// Borrows only the already-retained connection for the fixed migration
+    /// full-integrity operation. No path, key, or reopening capability crosses
+    /// this boundary.
+    pub(in crate::production_database_connection_handoff) fn connection_for_full_integrity(
+        &self,
+    ) -> &rusqlite::Connection {
+        &self.owner.connection
+    }
+
+    /// Consumes revalidation trust state after a later validation failure and
+    /// returns the unchanged lifetime unit for canonical explicit close.
+    pub(in crate::production_database_connection_handoff) fn into_owner_discarding_revalidation_state(
+        self,
+    ) -> ConnectionLifetimeOwner {
         let Self {
             owner,
             metadata_contract,
             trusted_assessment,
         } = self;
         discard_revalidation_inputs(metadata_contract, trusted_assessment);
+        owner
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_integrity_preservation_evidence_for_test(
+        &self,
+    ) -> (
+        usize,
+        DatabaseMetadataContractV1,
+        crate::installation_evidence_contract::EncodedInstallationEvidence,
+    ) {
+        (
+            // SAFETY: The handle is observed only as an opaque identity value;
+            // no SQLite API is called through it and the owning connection
+            // remains alive for the entire comparison.
+            unsafe { self.owner.connection.handle() as usize },
+            self.metadata_contract,
+            self.trusted_assessment.evidence().encode_v1(),
+        )
+    }
+
+    /// Discards revalidation-only trust state before using the canonical
+    /// production database close outcome and retry owner.
+    pub(crate) fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
+        let owner = self.into_owner_discarding_revalidation_state();
         super::super::super::super::close_lifetime_owner(owner)
     }
 
@@ -90,12 +126,7 @@ impl RevalidatedProductionDatabaseMigrationOpportunity {
         self,
         close: impl FnOnce(rusqlite::Connection) -> Result<(), rusqlite::Connection>,
     ) -> ProductionDatabaseConnectionCloseOutcome {
-        let Self {
-            owner,
-            metadata_contract,
-            trusted_assessment,
-        } = self;
-        discard_revalidation_inputs(metadata_contract, trusted_assessment);
+        let owner = self.into_owner_discarding_revalidation_state();
         super::super::super::super::close_lifetime_owner_using(owner, close)
     }
 }
@@ -1223,7 +1254,6 @@ mod tests {
             "tauri::command",
             "ProductionDatabaseMigrationAuthorization",
             "backup",
-            "full_integrity",
             "exclusive",
         ] {
             assert!(
@@ -1231,6 +1261,13 @@ mod tests {
                 "forbidden production surface: {forbidden}"
             );
         }
+        assert_eq!(
+            production.matches("connection_for_full_integrity(").count(),
+            1,
+            "only the narrow retained-connection borrow may support full integrity"
+        );
+        assert!(!production.contains("PRAGMA main.integrity_check"));
+        assert!(!production.contains("cipher_integrity_check"));
 
         const FRESHNESS_PARENT: &str = include_str!("../database_freshness_validation.rs");
         const OPPORTUNITY: &str = include_str!("production_database_migration_opportunity.rs");

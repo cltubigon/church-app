@@ -198,10 +198,18 @@ pub(crate) use live_metadata_and_header_validation::{
 
 #[allow(unused_imports)]
 pub(crate) use full_integrity_validation::{
-    FullIntegrityValidatedProductionDatabaseConnection, FullIntegrityValidationCloseFailure,
+    FullIntegrityValidatedProductionDatabaseConnection,
+    FullIntegrityValidatedProductionDatabaseMigrationSource, FullIntegrityValidationCloseFailure,
     FullIntegrityValidationCloseRetryOutcome, FullIntegrityValidationError,
-    FullIntegrityValidationOutcome, validate_production_database_full_integrity,
+    FullIntegrityValidationOutcome, ProductionDatabaseMigrationFullIntegrityFailedSource,
+    ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome,
+    ProductionDatabaseMigrationFullIntegrityPreparationOutcome,
+    prepare_production_database_migration_full_integrity,
+    validate_production_database_full_integrity,
 };
+
+#[cfg(test)]
+pub(crate) use full_integrity_validation::prepare_production_database_migration_full_integrity_using_for_test;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const PRODUCTION_DATABASE_APPLICATION_ID: i32 = 0x4348_4150;

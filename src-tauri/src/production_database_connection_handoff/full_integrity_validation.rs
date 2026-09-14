@@ -7,13 +7,52 @@ use rusqlite::{Connection, ffi::ErrorCode, types::ValueRef};
 
 use super::{
     ConnectionLifetimeOwner, ProductionDatabaseConnectionCloseOutcome,
-    ReadabilityAndIntegrityValidatedProductionDatabaseConnection, close_lifetime_owner_using,
+    ReadabilityAndIntegrityValidatedProductionDatabaseConnection,
+    RevalidatedProductionDatabaseMigrationOpportunity, close_lifetime_owner_using,
 };
 
 const FULL_INTEGRITY_CHECK: &str = "PRAGMA main.integrity_check";
 
 pub(crate) struct FullIntegrityValidatedProductionDatabaseConnection {
     owner: ConnectionLifetimeOwner,
+}
+
+/// Opaque migration source retaining the exact freshly revalidated lifetime
+/// and trust state after the fixed full SQLite integrity operation succeeds.
+pub(crate) struct FullIntegrityValidatedProductionDatabaseMigrationSource {
+    source: RevalidatedProductionDatabaseMigrationOpportunity,
+}
+
+impl fmt::Debug for FullIntegrityValidatedProductionDatabaseMigrationSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FullIntegrityValidatedProductionDatabaseMigrationSource([REDACTED])")
+    }
+}
+
+impl FullIntegrityValidatedProductionDatabaseMigrationSource {
+    /// Discards the migration-only trust proof and explicitly closes the same
+    /// retained SQLite lifetime through the canonical close owner.
+    pub(crate) fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
+        close_lifetime_owner_using(
+            self.source.into_owner_discarding_revalidation_state(),
+            |connection| {
+                connection
+                    .close()
+                    .map_err(|(returned_connection, _)| returned_connection)
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preservation_evidence_for_test(
+        &self,
+    ) -> (
+        usize,
+        crate::database_metadata_contract::DatabaseMetadataContractV1,
+        crate::installation_evidence_contract::EncodedInstallationEvidence,
+    ) {
+        self.source.full_integrity_preservation_evidence_for_test()
+    }
 }
 
 impl fmt::Debug for FullIntegrityValidatedProductionDatabaseConnection {
@@ -119,6 +158,103 @@ impl FullIntegrityValidatedProductionDatabaseConnection {
     ) -> ProductionDatabaseConnectionCloseOutcome {
         close_lifetime_owner_using(self.owner, close)
     }
+}
+
+/// Internal pre-close result. A failed result still owns the revalidated
+/// source so the confirmation layer can destroy authorization first.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ProductionDatabaseMigrationFullIntegrityPreparationOutcome {
+    Validated(FullIntegrityValidatedProductionDatabaseMigrationSource),
+    Failed(ProductionDatabaseMigrationFullIntegrityFailedSource),
+}
+
+pub(crate) struct ProductionDatabaseMigrationFullIntegrityFailedSource {
+    category: FullIntegrityValidationError,
+    source: RevalidatedProductionDatabaseMigrationOpportunity,
+}
+
+impl fmt::Debug for ProductionDatabaseMigrationFullIntegrityFailedSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProductionDatabaseMigrationFullIntegrityFailedSource([REDACTED])")
+    }
+}
+
+pub(crate) enum ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome {
+    Closed(FullIntegrityValidationError),
+    CloseFailed(FullIntegrityValidationCloseFailure),
+}
+
+impl ProductionDatabaseMigrationFullIntegrityFailedSource {
+    pub(crate) fn close(self) -> ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome {
+        self.close_using(|connection| {
+            connection
+                .close()
+                .map_err(|(returned_connection, _)| returned_connection)
+        })
+    }
+
+    fn close_using(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+    ) -> ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome {
+        let Self { category, source } = self;
+        let owner = source.into_owner_discarding_revalidation_state();
+        match close_lifetime_owner_using(owner, close) {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome::Closed(category)
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome::CloseFailed(
+                    FullIntegrityValidationCloseFailure {
+                        category,
+                        owner: failure.owner,
+                    },
+                )
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_using_for_test(
+        self,
+        close: impl FnOnce(Connection) -> Result<(), Connection>,
+    ) -> ProductionDatabaseMigrationFullIntegrityFailureCloseOutcome {
+        self.close_using(close)
+    }
+}
+
+/// Runs the canonical fixed full-integrity operation on the exact retained
+/// revalidated migration connection, without closing or rebuilding the source.
+pub(crate) fn prepare_production_database_migration_full_integrity(
+    source: RevalidatedProductionDatabaseMigrationOpportunity,
+) -> ProductionDatabaseMigrationFullIntegrityPreparationOutcome {
+    prepare_production_database_migration_full_integrity_using(
+        source,
+        validate_fixed_full_integrity,
+    )
+}
+
+fn prepare_production_database_migration_full_integrity_using(
+    source: RevalidatedProductionDatabaseMigrationOpportunity,
+    validate: impl FnOnce(&Connection) -> Result<(), FullIntegrityValidationError>,
+) -> ProductionDatabaseMigrationFullIntegrityPreparationOutcome {
+    let validation_result = { validate(source.connection_for_full_integrity()) };
+    match validation_result {
+        Ok(()) => ProductionDatabaseMigrationFullIntegrityPreparationOutcome::Validated(
+            FullIntegrityValidatedProductionDatabaseMigrationSource { source },
+        ),
+        Err(category) => ProductionDatabaseMigrationFullIntegrityPreparationOutcome::Failed(
+            ProductionDatabaseMigrationFullIntegrityFailedSource { category, source },
+        ),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_production_database_migration_full_integrity_using_for_test(
+    source: RevalidatedProductionDatabaseMigrationOpportunity,
+    validate: impl FnOnce(&Connection) -> Result<(), FullIntegrityValidationError>,
+) -> ProductionDatabaseMigrationFullIntegrityPreparationOutcome {
+    prepare_production_database_migration_full_integrity_using(source, validate)
 }
 
 /// Consumes only the readability-and-integrity-validated predecessor and runs
@@ -563,6 +699,13 @@ mod tests {
             "invoke_handler",
             "tauri::command",
             "callback",
+            "inspect_production_database_file",
+            "observe_fresh_source_metadata",
+            "classify_database_metadata_correspondence",
+            "classify_database_freshness",
+            "observe_production_installation_evidence",
+            "open_keyed_production_database_read_only",
+            "recover_and_validate_database_key",
         ] {
             assert!(!production.contains(prohibited), "found {prohibited}");
         }
