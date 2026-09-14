@@ -30,6 +30,18 @@ impl fmt::Debug for FullIntegrityValidatedProductionDatabaseMigrationSource {
 }
 
 impl FullIntegrityValidatedProductionDatabaseMigrationSource {
+    pub(crate) fn with_migration_backup_source<R>(
+        &self,
+        operation: impl FnOnce(
+            &Connection,
+            &crate::database_metadata_contract::DatabaseMetadataContractV1,
+            &crate::installation_evidence_protection::TrustedCurrentInstallationEvidenceAssessment,
+        ) -> R,
+    ) -> R {
+        let (connection, metadata, assessment) = self.source.migration_backup_source_parts();
+        operation(connection, metadata, assessment)
+    }
+
     /// Discards the migration-only trust proof and explicitly closes the same
     /// retained SQLite lifetime through the canonical close owner.
     pub(crate) fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
@@ -381,6 +393,14 @@ fn validate_fixed_full_integrity(
                 classify_full_integrity_error(&error, FullIntegrityOperationBoundary::RowStepping)
             })
     })
+}
+
+/// Runs only the canonical fixed full-integrity operation on a borrowed
+/// connection without changing the consuming transition's semantics.
+pub(crate) fn validate_production_database_full_integrity_on_borrowed_connection(
+    connection: &Connection,
+) -> Result<(), FullIntegrityValidationError> {
+    validate_fixed_full_integrity(connection)
 }
 
 fn classify_full_integrity_error(

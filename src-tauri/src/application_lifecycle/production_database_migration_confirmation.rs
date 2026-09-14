@@ -21,6 +21,9 @@ use crate::production_database_connection_handoff::{
     prepare_production_database_migration_full_integrity,
 };
 
+#[path = "../production_database_migration_backup_stage.rs"]
+mod production_database_migration_backup_stage;
+
 pub(super) struct ProductionDatabaseMigrationConfirmation {
     state: ProductionDatabaseMigrationConfirmationState,
 }
@@ -111,7 +114,7 @@ struct AuthorizedProductionDatabaseMigrationContext {
     source: RevalidatedProductionDatabaseMigrationOpportunity,
 }
 
-struct ProductionDatabaseMigrationAuthorization {
+pub(crate) struct ProductionDatabaseMigrationAuthorization {
     _private: (),
 }
 
@@ -120,7 +123,7 @@ struct AuthorizedProductionDatabaseMigrationHandoff {
     source: RevalidatedProductionDatabaseMigrationOpportunity,
 }
 
-struct FullIntegrityValidatedProductionDatabaseMigrationHandoff {
+pub(crate) struct FullIntegrityValidatedProductionDatabaseMigrationHandoff {
     authorization: ProductionDatabaseMigrationAuthorization,
     source: FullIntegrityValidatedProductionDatabaseMigrationSource,
 }
@@ -190,6 +193,15 @@ impl AuthorizedProductionDatabaseMigrationHandoff {
 }
 
 impl FullIntegrityValidatedProductionDatabaseMigrationHandoff {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ProductionDatabaseMigrationAuthorization,
+        FullIntegrityValidatedProductionDatabaseMigrationSource,
+    ) {
+        (self.authorization, self.source)
+    }
+
     fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
         let Self {
             authorization,
@@ -200,7 +212,9 @@ impl FullIntegrityValidatedProductionDatabaseMigrationHandoff {
     }
 }
 
-fn destroy_migration_authorization(authorization: ProductionDatabaseMigrationAuthorization) {
+pub(crate) fn destroy_migration_authorization(
+    authorization: ProductionDatabaseMigrationAuthorization,
+) {
     let ProductionDatabaseMigrationAuthorization { _private: () } = authorization;
 }
 
@@ -706,6 +720,37 @@ pub(super) enum ProductionDatabaseMigrationConfirmationStateForTest {
     RevokedCloseRetryRequired,
     RevokedSourceCloseRetryRequired,
     DiscoveryCloseRetryRequired,
+}
+
+#[cfg(test)]
+pub(crate) fn genuine_full_integrity_validated_migration_handoff_for_test() -> (
+    crate::production_database_connection_handoff::MigrationDiscoveryTestRoot,
+    FullIntegrityValidatedProductionDatabaseMigrationHandoff,
+) {
+    let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
+    let (root, opportunity) = crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test();
+    confirmation
+        .establish_pending(ProductionDatabaseMigrationPendingContext::new(
+            opportunity,
+            crate::production_database_connection_handoff::genuine_production_database_migration_revalidation_context_for_test(root.path()),
+        ))
+        .expect("genuine synthetic opportunity must become pending");
+    let work = confirmation
+        .begin_revalidation()
+        .expect("genuine synthetic opportunity must reserve revalidation");
+    assert!(matches!(
+        confirmation.complete_revalidation(work.revalidate()),
+        Ok(ProductionDatabaseMigrationRevalidationCompletion::Authorized)
+    ));
+    let authorized = confirmation
+        .consume_authorization()
+        .expect("genuine synthetic opportunity must yield authorization once");
+    let ProductionDatabaseMigrationFullIntegrityOutcome::Validated(validated) =
+        authorized.validate_full_integrity()
+    else {
+        panic!("genuine synthetic source must pass full integrity");
+    };
+    (root, validated)
 }
 
 #[cfg(test)]
@@ -1324,6 +1369,12 @@ mod ownership_tests {
             .unwrap()
             .0;
         assert!(!state.contains("\n    Pending,\n"));
+        assert_eq!(
+            production
+                .matches("mod production_database_migration_backup_stage;")
+                .count(),
+            1
+        );
         for forbidden in [
             "#[tauri::command]",
             "serde::Serialize",
@@ -1331,7 +1382,6 @@ mod ownership_tests {
             "MaintenanceOperation",
             "ConfirmedMigrationIntent",
             "rusqlite",
-            "backup",
             "exclusive",
             "migration SQL",
             "std::thread",
@@ -1359,6 +1409,9 @@ mod ownership_tests {
         assert!(!production_lifecycle.contains("validate_full_integrity("));
         assert!(
             !production_lifecycle.contains("prepare_production_database_migration_full_integrity")
+        );
+        assert!(
+            !production_lifecycle.contains("stage_encrypted_production_database_migration_backup")
         );
 
         let bridge = production

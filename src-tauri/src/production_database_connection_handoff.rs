@@ -41,6 +41,23 @@ mod fixed_metadata_and_header_observation;
 mod full_integrity_validation;
 mod live_metadata_and_header_validation;
 
+/// Runs only the canonical fixed cipher-integrity operation on a borrowed
+/// connection. This grants no quick-check or general connection capability.
+pub(crate) fn validate_production_database_cipher_integrity_on_borrowed_connection(
+    connection: &Connection,
+) -> Result<(), ProductionDatabaseValidationError> {
+    run_cipher_integrity_check(connection)
+}
+
+/// Runs only the canonical fixed metadata/header observation on a borrowed
+/// connection and coarsens its internal taxonomy for narrow verification use.
+pub(crate) fn observe_production_database_fixed_metadata_and_headers_on_borrowed_connection(
+    connection: &Connection,
+) -> Result<crate::database_metadata_contract::DatabaseMetadataContractV1, ()> {
+    fixed_metadata_and_header_observation::observe_fixed_metadata_and_headers(connection, None)
+        .map_err(|_| ())
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProductionDatabasePrimaryFailureInjection {
@@ -206,6 +223,7 @@ pub(crate) use full_integrity_validation::{
     ProductionDatabaseMigrationFullIntegrityPreparationOutcome,
     prepare_production_database_migration_full_integrity,
     validate_production_database_full_integrity,
+    validate_production_database_full_integrity_on_borrowed_connection,
 };
 
 #[cfg(test)]

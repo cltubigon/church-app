@@ -73,6 +73,20 @@ impl fmt::Debug for RevalidatedProductionDatabaseMigrationOpportunity {
 }
 
 impl RevalidatedProductionDatabaseMigrationOpportunity {
+    pub(in crate::production_database_connection_handoff) fn migration_backup_source_parts(
+        &self,
+    ) -> (
+        &rusqlite::Connection,
+        &DatabaseMetadataContractV1,
+        &TrustedCurrentInstallationEvidenceAssessment,
+    ) {
+        (
+            &self.owner.connection,
+            &self.metadata_contract,
+            &self.trusted_assessment,
+        )
+    }
+
     /// Borrows only the already-retained connection for the fixed migration
     /// full-integrity operation. No path, key, or reopening capability crosses
     /// this boundary.
@@ -1253,7 +1267,6 @@ mod tests {
             "query_row",
             "tauri::command",
             "ProductionDatabaseMigrationAuthorization",
-            "backup",
             "exclusive",
         ] {
             assert!(
@@ -1266,6 +1279,19 @@ mod tests {
             1,
             "only the narrow retained-connection borrow may support full integrity"
         );
+        let backup_borrow = production
+            .split_once("fn migration_backup_source_parts(")
+            .unwrap()
+            .1
+            .split_once("\n    }")
+            .unwrap()
+            .0;
+        assert!(backup_borrow.contains("&self.owner.connection"));
+        assert!(backup_borrow.contains("&self.metadata_contract"));
+        assert!(backup_borrow.contains("&self.trusted_assessment"));
+        for forbidden in ["Backup::", "open_with_flags", "recover_", "execute("] {
+            assert!(!backup_borrow.contains(forbidden));
+        }
         assert!(!production.contains("PRAGMA main.integrity_check"));
         assert!(!production.contains("cipher_integrity_check"));
 
