@@ -38,6 +38,13 @@ impl Drop for EncodedMigrationRecoveryKeyCustodyV1 {
 }
 
 impl EncodedMigrationRecoveryKeyCustodyV1 {
+    pub(crate) fn with_native_display_bytes<R>(
+        &self,
+        operation: impl FnOnce(&[u8; MIGRATION_RECOVERY_KEY_CUSTODY_V1_LENGTH]) -> R,
+    ) -> R {
+        operation(&self.bytes)
+    }
+
     #[cfg(test)]
     pub(crate) fn bytes_for_test(&self) -> &[u8; MIGRATION_RECOVERY_KEY_CUSTODY_V1_LENGTH] {
         &self.bytes
@@ -1067,6 +1074,35 @@ mod tests {
         }
         assert!(key_region.contains("fn expose_bytes<R>"));
         assert!(key_region.contains("fn from_bytes"));
+    }
+
+    #[test]
+    fn native_display_seam_is_scoped_closure_only_and_does_not_widen_access() {
+        let source = production_region(include_str!("custody.rs"));
+        let implementation = source
+            .split_once("impl EncodedMigrationRecoveryKeyCustodyV1")
+            .unwrap()
+            .1
+            .split_once("pub(crate) struct ParsedUntrustedMigrationRecoveryKeyCustodyV1")
+            .unwrap()
+            .0;
+        assert!(implementation.contains("pub(crate) fn with_native_display_bytes<R>("));
+        assert!(implementation.contains("operation: impl FnOnce("));
+        assert!(implementation.contains("operation(&self.bytes)"));
+        for forbidden in [
+            "fn as_bytes",
+            "fn as_str",
+            "-> String",
+            "-> Vec",
+            "-> &[u8]",
+            "impl Clone",
+            "impl Copy",
+        ] {
+            assert!(
+                !implementation.contains(forbidden),
+                "widened seam: {forbidden}"
+            );
+        }
     }
 
     #[test]

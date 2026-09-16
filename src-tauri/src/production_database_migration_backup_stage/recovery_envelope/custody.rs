@@ -1,5 +1,9 @@
 //! Private, unwired ownership states for the two-readback custody ceremony.
 
+#[cfg(windows)]
+#[path = "custody/native_windows.rs"]
+mod native_windows;
+
 use std::fmt;
 
 use crate::production_database_migration_recovery_envelope::{
@@ -61,6 +65,7 @@ pub(crate) struct UndisclosedMigrationRecoveryKeyCustodyInterruption {
 pub(crate) enum MigrationRecoveryKeyCustodyError {
     CancelledBeforeCustodyExposure,
     CancelledAfterCustodyExposure,
+    NativeCeremonyFailedAfterCustodyExposure,
     FirstCustodyCopyVerificationFailed,
     SecondCustodyCopyVerificationFailed,
 }
@@ -117,6 +122,9 @@ impl fmt::Debug for MigrationRecoveryKeyCustodyError {
         formatter.write_str(match self {
             Self::CancelledBeforeCustodyExposure => "CancelledBeforeCustodyExposure",
             Self::CancelledAfterCustodyExposure => "CancelledAfterCustodyExposure",
+            Self::NativeCeremonyFailedAfterCustodyExposure => {
+                "NativeCeremonyFailedAfterCustodyExposure"
+            }
             Self::FirstCustodyCopyVerificationFailed => "FirstCustodyCopyVerificationFailed",
             Self::SecondCustodyCopyVerificationFailed => "SecondCustodyCopyVerificationFailed",
         })
@@ -608,6 +616,46 @@ mod tests {
     }
 
     #[test]
+    fn native_callback_panic_before_disclosure_preserves_prepared_ownership() {
+        let (source_root, _stage_root, backup) = verified_backup();
+        let prepared = prepare_migration_recovery_key_custody(backup);
+        let outcome = native_windows::contain_pre_exposure_panic_for_test(prepared);
+        let native_windows::NativeMigrationRecoveryKeyCustodyOutcome::UnavailableBeforeExposure(
+            prepared,
+        ) = outcome
+        else {
+            panic!("pre-exposure callback panic must preserve prepared ownership");
+        };
+        let failure = prepared.disclose().cancel();
+        assert!(matches!(
+            failure.artifacts.source_close,
+            SourceCloseState::Closed
+        ));
+        drop(source_root);
+    }
+
+    #[test]
+    fn native_callback_panic_after_disclosure_is_terminal() {
+        let (source_root, _stage_root, backup) = verified_backup();
+        let prepared = prepare_migration_recovery_key_custody(backup);
+        let outcome = native_windows::contain_post_exposure_panic_for_test(prepared);
+        let native_windows::NativeMigrationRecoveryKeyCustodyOutcome::FailedAfterExposure(failure) =
+            outcome
+        else {
+            panic!("post-exposure callback panic must be terminal");
+        };
+        assert_eq!(
+            failure.category,
+            MigrationRecoveryKeyCustodyError::NativeCeremonyFailedAfterCustodyExposure
+        );
+        assert!(matches!(
+            failure.artifacts.source_close,
+            SourceCloseState::Closed
+        ));
+        drop(source_root);
+    }
+
+    #[test]
     fn success_preserves_exact_stage_and_envelope_owners() {
         let (source_root, _stage_root, backup) = verified_backup();
         let envelope_before = *backup.verified_envelope.encoded.as_bytes();
@@ -701,6 +749,10 @@ mod tests {
             (
                 MigrationRecoveryKeyCustodyError::CancelledAfterCustodyExposure,
                 "CancelledAfterCustodyExposure",
+            ),
+            (
+                MigrationRecoveryKeyCustodyError::NativeCeremonyFailedAfterCustodyExposure,
+                "NativeCeremonyFailedAfterCustodyExposure",
             ),
             (
                 MigrationRecoveryKeyCustodyError::FirstCustodyCopyVerificationFailed,
