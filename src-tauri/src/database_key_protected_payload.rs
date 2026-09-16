@@ -72,6 +72,16 @@ pub(crate) struct DecodedDatabaseKeyCandidate {
 }
 
 impl DecodedDatabaseKeyCandidate {
+    pub(crate) fn from_authenticated_parts(
+        key: DatabaseKey,
+        generation_identifier: DatabaseKeyGenerationIdentifier,
+    ) -> Self {
+        Self {
+            key,
+            generation_identifier,
+        }
+    }
+
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, DatabaseKeyPayloadError> {
         if bytes.len() != DATABASE_KEY_PAYLOAD_LENGTH {
             return Err(DatabaseKeyPayloadError::MalformedPayload);

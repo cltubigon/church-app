@@ -46,6 +46,7 @@ mod production_database_file;
 #[allow(dead_code)]
 #[cfg(windows)]
 mod production_database_migration_exclusivity;
+mod production_database_migration_recovery_envelope;
 #[cfg(windows)]
 mod scoped_panic_output_suppression;
 mod setup_publication_identifier_generation;
