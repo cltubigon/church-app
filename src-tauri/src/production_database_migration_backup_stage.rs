@@ -54,6 +54,16 @@ use super::{
     ProductionDatabaseMigrationAuthorization, destroy_migration_authorization,
 };
 
+#[path = "production_database_migration_backup_stage/recovery_envelope.rs"]
+mod recovery_envelope;
+
+#[allow(unused_imports)]
+pub(crate) use recovery_envelope::{
+    ProductionDatabaseMigrationRecoveryEnvelopeOutcome,
+    VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup,
+    verify_production_database_migration_recovery_envelope,
+};
+
 const STAGE_LEAF_NAME: &str = "production-database-migration-backup.stage";
 const MAIN_DATABASE_NAME: &str = "main";
 const BACKUP_PAGES_PER_STEP: i32 = 16;
@@ -69,7 +79,7 @@ const VERIFIER_OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_ONLY
     .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-struct ParentIdentity {
+struct FileIdentity {
     volume_serial: u64,
     file_id: [u8; 16],
 }
@@ -81,7 +91,7 @@ struct ProductionDatabaseMigrationBackupStagePath(PathBuf);
 pub(crate) struct PreparedProductionDatabaseMigrationBackupStage {
     path: ProductionDatabaseMigrationBackupStagePath,
     parent: File,
-    parent_identity: ParentIdentity,
+    parent_identity: FileIdentity,
 }
 
 /// Narrow canonical-key reload context. It contains only Rust-owned typed
@@ -96,12 +106,15 @@ struct CreatedProductionDatabaseMigrationBackupStage {
 
 pub(crate) struct VerifiedEncryptedProductionDatabaseMigrationBackupStageProof {
     created: CreatedProductionDatabaseMigrationBackupStage,
+    leaf: File,
+    leaf_identity: FileIdentity,
 }
 
 pub(crate) struct VerifiedEncryptedProductionDatabaseMigrationBackupStage {
     authorization: ProductionDatabaseMigrationAuthorization,
     source: FullIntegrityValidatedProductionDatabaseMigrationSource,
     backup_stage_proof: VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
+    context: ProductionDatabaseMigrationBackupContext,
 }
 
 enum RetainedProductionDatabaseMigrationBackupStage {
@@ -311,9 +324,11 @@ impl VerifiedEncryptedProductionDatabaseMigrationBackupStage {
             authorization,
             source,
             backup_stage_proof,
+            context,
         } = self;
         destroy_migration_authorization(authorization);
         drop(backup_stage_proof);
+        drop(context);
         source.close()
     }
 }
@@ -522,7 +537,7 @@ fn prepare_stage_path(
     })
 }
 
-fn file_identity(file: &File) -> Option<ParentIdentity> {
+fn file_identity(file: &File) -> Option<FileIdentity> {
     let mut information = FILE_ID_INFO::default();
     // SAFETY: `file` owns a live handle and `information` is initialized,
     // writable output of the exact documented type.
@@ -537,13 +552,13 @@ fn file_identity(file: &File) -> Option<ParentIdentity> {
     {
         return None;
     }
-    Some(ParentIdentity {
+    Some(FileIdentity {
         volume_serial: information.VolumeSerialNumber,
         file_id: information.FileId.Identifier,
     })
 }
 
-fn parent_identity(path: &Path) -> Result<ParentIdentity, ()> {
+fn parent_identity(path: &Path) -> Result<FileIdentity, ()> {
     let parent = OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ)
@@ -551,6 +566,72 @@ fn parent_identity(path: &Path) -> Result<ParentIdentity, ()> {
         .open(path)
         .map_err(|_| ())?;
     file_identity(&parent).ok_or(())
+}
+
+fn retain_verified_stage_leaf(
+    created: CreatedProductionDatabaseMigrationBackupStage,
+) -> Result<
+    VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
+    CreatedProductionDatabaseMigrationBackupStage,
+> {
+    if !created.prepared.parent_is_unchanged() {
+        return Err(created);
+    }
+    let leaf = match OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(created.prepared.path())
+    {
+        Ok(leaf) => leaf,
+        Err(_) => return Err(created),
+    };
+    let metadata = match leaf.metadata() {
+        Ok(metadata)
+            if metadata.is_file()
+                && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 =>
+        {
+            metadata
+        }
+        _ => return Err(created),
+    };
+    let _ = metadata;
+    let leaf_identity = match file_identity(&leaf) {
+        Some(identity) => identity,
+        None => return Err(created),
+    };
+    let fresh_identity = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(created.prepared.path())
+        .ok()
+        .and_then(|fresh| file_identity(&fresh));
+    if fresh_identity != Some(leaf_identity) || !created.prepared.parent_is_unchanged() {
+        return Err(created);
+    }
+    Ok(
+        VerifiedEncryptedProductionDatabaseMigrationBackupStageProof {
+            created,
+            leaf,
+            leaf_identity,
+        },
+    )
+}
+
+impl VerifiedEncryptedProductionDatabaseMigrationBackupStageProof {
+    fn identity_is_unchanged(&self) -> bool {
+        self.created.prepared.parent_is_unchanged()
+            && file_identity(&self.leaf) == Some(self.leaf_identity)
+            && OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(self.created.prepared.path())
+                .ok()
+                .and_then(|fresh| file_identity(&fresh))
+                == Some(self.leaf_identity)
+    }
 }
 
 fn create_stage_file(
@@ -874,7 +955,12 @@ fn run_stage(
             RetainedProductionDatabaseMigrationBackupStage::Created(created),
         ));
     }
-    Ok(VerifiedEncryptedProductionDatabaseMigrationBackupStageProof { created })
+    retain_verified_stage_leaf(created).map_err(|created| {
+        InternalFailure::Primary(
+            ProductionDatabaseMigrationBackupStageError::StageLocationUnavailableOrChanged,
+            RetainedProductionDatabaseMigrationBackupStage::Created(created),
+        )
+    })
 }
 
 fn close_source(
@@ -909,13 +995,13 @@ pub(crate) fn stage_encrypted_production_database_migration_backup(
     let result = source.with_migration_backup_source(|connection, metadata, assessment| {
         run_stage(connection, metadata, assessment, prepared, &context)
     });
-    drop(context);
     match result {
         Ok(backup_stage_proof) => ProductionDatabaseMigrationBackupStageOutcome::Verified(
             VerifiedEncryptedProductionDatabaseMigrationBackupStage {
                 authorization,
                 source,
                 backup_stage_proof,
+                context,
             },
         ),
         Err(failure) => {
@@ -1332,7 +1418,6 @@ mod tests {
             "publish_stage",
             "delete_stage",
             "restore_stage",
-            "RecoveryEnvelope",
             "RetentionPolicy",
         ] {
             assert!(

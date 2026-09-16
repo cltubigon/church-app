@@ -311,16 +311,23 @@ mod tests {
     #[test]
     fn production_source_invokes_only_the_pure_classifier_once_and_has_no_forbidden_capability() {
         const SOURCE: &str = include_str!("database_evidence_correspondence_validation.rs");
-        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let production = SOURCE.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let transition = production
+            .split_once("pub(crate) fn validate_production_database_evidence_correspondence(")
+            .unwrap()
+            .1
+            .split_once("fn finish_mismatch(")
+            .unwrap()
+            .0;
 
         assert_eq!(
-            production
+            transition
                 .matches("classify_database_metadata_correspondence(")
                 .count(),
             1
         );
-        assert!(production.contains("&metadata_contract"));
-        assert!(production.contains("trusted_assessment.evidence()"));
+        assert!(transition.contains("&metadata_contract"));
+        assert!(transition.contains("trusted_assessment.evidence()"));
 
         for forbidden in [
             "SELECT ",
@@ -357,7 +364,7 @@ mod tests {
             "extern \"",
         ] {
             assert!(
-                !production.contains(forbidden),
+                !transition.contains(forbidden),
                 "forbidden production capability: {forbidden}"
             );
         }

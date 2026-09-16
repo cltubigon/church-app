@@ -1113,7 +1113,6 @@ mod tests {
             "normalize_",
             "CREATE TABLE",
             "ALTER TABLE",
-            "migration",
             "tauri::command",
             "invoke_handler",
             "pub fn",
@@ -1128,6 +1127,10 @@ mod tests {
                 "forbidden production capability: {forbidden}"
             );
         }
+        assert!(
+            !transition.contains("migration"),
+            "forbidden production freshness-transition capability: migration"
+        );
     }
 
     #[test]

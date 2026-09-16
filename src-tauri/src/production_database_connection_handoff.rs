@@ -58,6 +58,61 @@ pub(crate) fn observe_production_database_fixed_metadata_and_headers_on_borrowed
         .map_err(|_| ())
 }
 
+/// Opens one migration-backup stage verifier with the canonical fixed win32
+/// VFS, read-only flags, pre-key policy, single key application, and verified
+/// query-only policy. The caller remains responsible for explicit close.
+pub(crate) fn open_production_database_migration_backup_stage_verifier(
+    path: &std::path::Path,
+    key: &GenerationBoundDatabaseKey,
+) -> Result<Connection, ProductionDatabaseMigrationBackupStageVerifierOpenError> {
+    let connection = Connection::open_with_flags_and_vfs(path, OPEN_FLAGS, WIN32_VFS_NAME)
+        .map_err(|_| ProductionDatabaseMigrationBackupStageVerifierOpenError::Open)?;
+    if configure_pre_key_policy(&connection)
+        .and_then(|_| apply_key_once(&connection, key))
+        .and_then(|_| enable_and_verify_query_only(&connection))
+        .is_err()
+    {
+        return match connection.close() {
+            Ok(()) => Err(ProductionDatabaseMigrationBackupStageVerifierOpenError::KeyOrPolicy),
+            Err((connection, _)) => {
+                Err(ProductionDatabaseMigrationBackupStageVerifierOpenError::Close(connection))
+            }
+        };
+    }
+    Ok(connection)
+}
+
+pub(crate) enum ProductionDatabaseMigrationBackupStageVerifierOpenError {
+    Open,
+    KeyOrPolicy,
+    Close(Connection),
+}
+
+/// Explicitly closes a migration-backup stage verifier. Test builds route this
+/// narrow close boundary through the existing deterministic close-failure
+/// injector; production builds call SQLite close directly.
+pub(crate) fn close_production_database_migration_backup_stage_verifier(
+    connection: Connection,
+) -> Result<(), Connection> {
+    #[cfg(test)]
+    if test_close_failure_is_injected() {
+        return Err(connection);
+    }
+    connection
+        .close()
+        .map_err(|(returned_connection, _)| returned_connection)
+}
+
+impl fmt::Debug for ProductionDatabaseMigrationBackupStageVerifierOpenError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => formatter.write_str("Open"),
+            Self::KeyOrPolicy => formatter.write_str("KeyOrPolicy"),
+            Self::Close(_) => formatter.write_str("Close([REDACTED])"),
+        }
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProductionDatabasePrimaryFailureInjection {
@@ -1466,8 +1521,9 @@ mod tests {
             production
                 .matches(&["Connection::open_with_flags_", "and_vfs("].concat())
                 .count(),
-            1
+            2
         );
+        assert!(production.contains("open_production_database_migration_backup_stage_verifier"));
         assert_eq!(production.matches("CreateFileW(").count(), 1);
         for required in [
             "OpenFlags::SQLITE_OPEN_READ_ONLY",
