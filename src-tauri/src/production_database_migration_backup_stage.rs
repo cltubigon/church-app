@@ -59,9 +59,11 @@ mod recovery_envelope;
 
 #[allow(unused_imports)]
 pub(crate) use recovery_envelope::{
+    PreparedUndisclosedMigrationRecoveryKeyCustody,
     ProductionDatabaseMigrationRecoveryEnvelopeOutcome,
+    RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup,
-    verify_production_database_migration_recovery_envelope,
+    prepare_migration_recovery_key_custody, verify_production_database_migration_recovery_envelope,
 };
 
 const STAGE_LEAF_NAME: &str = "production-database-migration-backup.stage";

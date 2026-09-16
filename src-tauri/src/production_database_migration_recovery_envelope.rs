@@ -22,6 +22,14 @@ use crate::{
     installation_evidence_contract::DatabaseKeyGenerationIdentifier,
 };
 
+#[path = "production_database_migration_recovery_envelope/custody.rs"]
+mod custody;
+
+pub(crate) use custody::{
+    EncodedMigrationRecoveryKeyCustodyV1, encode_migration_recovery_key_custody_v1,
+    validate_migration_recovery_key_custody_v1,
+};
+
 pub(crate) const MIGRATION_RECOVERY_PAYLOAD_V1_LENGTH: usize = 96;
 pub(crate) const MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH: usize = 182;
 pub(crate) const MIGRATION_RECOVERY_AAD_V1_LENGTH: usize = 44;
@@ -468,6 +476,16 @@ impl ParsedUntrustedMigrationRecoveryEnvelopeV1 {
             ciphertext: read_envelope_array(bytes, CIPHERTEXT_OFFSET)?,
             tag: read_envelope_array(bytes, TAG_OFFSET)?,
         })
+    }
+
+    pub(crate) fn recovery_key_generation_identifier(
+        &self,
+    ) -> MigrationRecoveryKeyGenerationIdentifier {
+        self.recovery_key_generation_identifier
+    }
+
+    pub(crate) fn backup_set_identifier(&self) -> MigrationBackupSetIdentifier {
+        self.backup_set_identifier
     }
 }
 

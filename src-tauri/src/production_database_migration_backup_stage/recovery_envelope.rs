@@ -37,6 +37,16 @@ use super::{
     destroy_migration_authorization, load_fresh_bound_key, retry_source_close_state,
 };
 
+#[path = "recovery_envelope/custody.rs"]
+mod custody;
+
+#[allow(unused_imports)]
+pub(crate) use custody::{
+    PreparedUndisclosedMigrationRecoveryKeyCustody,
+    RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    prepare_migration_recovery_key_custody,
+};
+
 const HASH_BUFFER_LENGTH: usize = 64 * 1024;
 
 pub(crate) struct IndependentlyVerifiedMigrationRecoveryEnvelopeV1 {
