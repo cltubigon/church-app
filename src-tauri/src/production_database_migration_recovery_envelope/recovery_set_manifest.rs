@@ -127,6 +127,26 @@ pub(crate) struct RecoverySetManifestV1 {
 }
 
 impl RecoverySetManifestV1 {
+    pub(crate) fn from_trusted_internal_facts(
+        backup_set_identifier: MigrationBackupSetIdentifier,
+        database_byte_length: u64,
+        database_sha256: [u8; 32],
+        recovery_envelope_sha256: [u8; 32],
+    ) -> Result<Self, RecoverySetManifestV1ValidationError> {
+        if !(MINIMUM_DATABASE_BYTE_LENGTH..=MAXIMUM_DATABASE_BYTE_LENGTH)
+            .contains(&database_byte_length)
+        {
+            return Err(RecoverySetManifestV1ValidationError::InvalidDatabaseByteLength);
+        }
+
+        Ok(Self {
+            backup_set_identifier,
+            database_byte_length,
+            database_sha256,
+            recovery_envelope_sha256,
+        })
+    }
+
     pub(crate) fn encode(&self) -> [u8; RECOVERY_SET_MANIFEST_V1_LENGTH] {
         let mut encoded = [0_u8; RECOVERY_SET_MANIFEST_V1_LENGTH];
         encoded[..VERSION_OFFSET].copy_from_slice(&MAGIC);
@@ -340,6 +360,42 @@ mod tests {
         ] {
             assert_eq!(
                 parse_and_validate(&fixture(IDENTIFIER, rejected, [0; 32], [0; 32])).unwrap_err(),
+                RecoverySetManifestV1ValidationError::InvalidDatabaseByteLength
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_internal_construction_enforces_exact_length_boundaries() {
+        let identifier = MigrationBackupSetIdentifier::from_bytes(IDENTIFIER).unwrap();
+        for accepted in [MINIMUM_DATABASE_BYTE_LENGTH, MAXIMUM_DATABASE_BYTE_LENGTH] {
+            assert_eq!(
+                RecoverySetManifestV1::from_trusted_internal_facts(
+                    identifier,
+                    accepted,
+                    DATABASE_DIGEST,
+                    ENVELOPE_DIGEST,
+                )
+                .unwrap()
+                .encode(),
+                fixture(IDENTIFIER, accepted, DATABASE_DIGEST, ENVELOPE_DIGEST)
+            );
+        }
+        for rejected in [
+            0,
+            1,
+            MINIMUM_DATABASE_BYTE_LENGTH - 1,
+            MAXIMUM_DATABASE_BYTE_LENGTH + 1,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                RecoverySetManifestV1::from_trusted_internal_facts(
+                    identifier,
+                    rejected,
+                    DATABASE_DIGEST,
+                    ENVELOPE_DIGEST,
+                )
+                .unwrap_err(),
                 RecoverySetManifestV1ValidationError::InvalidDatabaseByteLength
             );
         }

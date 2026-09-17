@@ -11,9 +11,12 @@ pub(crate) use native_windows::{
 
 use std::fmt;
 
+use sha2::{Digest, Sha256};
+
 use crate::production_database_migration_recovery_envelope::{
     EncodedMigrationRecoveryKeyCustodyV1, ParsedUntrustedMigrationRecoveryEnvelopeV1,
-    encode_migration_recovery_key_custody_v1, validate_migration_recovery_key_custody_v1,
+    RecoverySetManifestV1, encode_migration_recovery_key_custody_v1,
+    validate_migration_recovery_key_custody_v1,
 };
 
 use super::super::{
@@ -21,7 +24,7 @@ use super::super::{
     destroy_migration_authorization, retry_source_close_state,
 };
 use super::{
-    IndependentlyVerifiedMigrationRecoveryEnvelopeV1,
+    IndependentlyVerifiedMigrationRecoveryEnvelopeV1, StageObservationError,
     VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup,
 };
 
@@ -48,6 +51,13 @@ pub(crate) struct RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
     encrypted_stage: super::super::VerifiedEncryptedProductionDatabaseMigrationBackupStage,
     verified_envelope: IndependentlyVerifiedMigrationRecoveryEnvelopeV1,
     custody: VerifiedMigrationRecoveryKeyCustody,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RecoverySetManifestPreparationError {
+    SourceObservationUnavailable,
+    StageIdentityUnavailableOrChanged,
+    ManifestConstructionRejected,
 }
 
 struct PossiblyExposedMigrationRecoveryKeyCustodyFailureArtifacts {
@@ -95,6 +105,16 @@ redacted_debug!(
     PreparedUndisclosedMigrationRecoveryKeyCustody,
     "PreparedUndisclosedMigrationRecoveryKeyCustody"
 );
+
+impl fmt::Debug for RecoverySetManifestPreparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::SourceObservationUnavailable => "SourceObservationUnavailable",
+            Self::StageIdentityUnavailableOrChanged => "StageIdentityUnavailableOrChanged",
+            Self::ManifestConstructionRejected => "ManifestConstructionRejected",
+        })
+    }
+}
 redacted_debug!(
     DisclosedMigrationRecoveryKeyCustody,
     "DisclosedMigrationRecoveryKeyCustody"
@@ -363,6 +383,36 @@ impl PossiblyExposedMigrationRecoveryKeyCustodyFailure {
 }
 
 impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn prepare_recovery_set_manifest_v1(
+        &self,
+    ) -> Result<RecoverySetManifestV1, RecoverySetManifestPreparationError> {
+        let envelope_bytes = self.verified_envelope.encoded.as_bytes();
+        let backup_set_identifier =
+            ParsedUntrustedMigrationRecoveryEnvelopeV1::parse(envelope_bytes)
+                .map_err(|_| RecoverySetManifestPreparationError::SourceObservationUnavailable)?
+                .backup_set_identifier();
+        let stage_observation = super::stage_manifest_observation(
+            &self.encrypted_stage.backup_stage_proof,
+        )
+        .map_err(|error| match error {
+            StageObservationError::ObservationUnavailable => {
+                RecoverySetManifestPreparationError::SourceObservationUnavailable
+            }
+            StageObservationError::IdentityUnavailableOrChanged => {
+                RecoverySetManifestPreparationError::StageIdentityUnavailableOrChanged
+            }
+        })?;
+        let recovery_envelope_sha256 = Sha256::digest(envelope_bytes).into();
+
+        RecoverySetManifestV1::from_trusted_internal_facts(
+            backup_set_identifier,
+            stage_observation.database_byte_length,
+            stage_observation.database_sha256,
+            recovery_envelope_sha256,
+        )
+        .map_err(|_| RecoverySetManifestPreparationError::ManifestConstructionRejected)
+    }
+
     pub(crate) fn abort_for_shutdown(
         self,
     ) -> super::super::UndisclosedMigrationRecoveryKeyCustodyShutdown {
@@ -475,6 +525,23 @@ mod tests {
         (source_root, stage_root, verified)
     }
 
+    fn custody_verified_backup() -> (
+        impl Drop,
+        StageRoot,
+        RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    ) {
+        let (source_root, stage_root, backup) = verified_backup();
+        let prepared = prepare_migration_recovery_key_custody(backup);
+        let readback = *prepared.encoded_for_test();
+        let verified = prepared
+            .disclose()
+            .verify_first_copy(&readback)
+            .unwrap()
+            .verify_second_copy(&readback)
+            .unwrap();
+        (source_root, stage_root, verified)
+    }
+
     fn production_region(source: &str) -> &str {
         source.split("#[cfg(test)]\nmod tests").next().unwrap()
     }
@@ -511,6 +578,150 @@ mod tests {
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
         drop(source_root);
+    }
+
+    #[test]
+    fn custody_verified_owner_prepares_manifest_from_fresh_retained_source_observations() {
+        let (source_root, _stage_root, verified) = custody_verified_backup();
+        let stage_bytes = fs::read(verified.encrypted_stage.stage_path_for_test()).unwrap();
+        let envelope_bytes = *verified.verified_envelope.encoded.as_bytes();
+        let expected_identifier =
+            ParsedUntrustedMigrationRecoveryEnvelopeV1::parse(&envelope_bytes)
+                .unwrap()
+                .backup_set_identifier();
+        let expected_database_digest: [u8; 32] = Sha256::digest(&stage_bytes).into();
+        let expected_envelope_digest: [u8; 32] = Sha256::digest(envelope_bytes).into();
+
+        let encoded = verified
+            .prepare_recovery_set_manifest_v1()
+            .unwrap()
+            .encode();
+
+        assert_eq!(encoded.len(), 98);
+        assert_eq!(&encoded[10..26], &expected_identifier.bytes_for_test());
+        assert_eq!(
+            &encoded[26..34],
+            &u64::try_from(stage_bytes.len()).unwrap().to_be_bytes()
+        );
+        assert_eq!(&encoded[34..66], &expected_database_digest);
+        assert_eq!(&encoded[66..98], &expected_envelope_digest);
+        assert!(stage_bytes.len() >= 512);
+
+        assert_eq!(
+            verified.verified_envelope.encoded.as_bytes(),
+            &envelope_bytes
+        );
+        assert!(
+            verified
+                .encrypted_stage
+                .backup_stage_proof
+                .identity_is_unchanged()
+        );
+        assert_eq!(
+            format!("{:?}", verified.custody),
+            "VerifiedMigrationRecoveryKeyCustody"
+        );
+        let shutdown = verified.abort_for_shutdown();
+        assert!(matches!(shutdown.source_close, SourceCloseState::Closed));
+        drop(source_root);
+    }
+
+    #[test]
+    fn manifest_observation_identity_failure_is_redacted_and_preserves_owner() {
+        let (source_root, _stage_root, verified) = custody_verified_backup();
+        let (result, _) = super::super::test_orchestration::run(
+            Some(super::super::TestFailurePoint::ManifestStageIdentity),
+            false,
+            || verified.prepare_recovery_set_manifest_v1(),
+        );
+        let error = result.unwrap_err();
+        assert_eq!(
+            error,
+            RecoverySetManifestPreparationError::StageIdentityUnavailableOrChanged
+        );
+        assert_eq!(format!("{error:?}"), "StageIdentityUnavailableOrChanged");
+        assert!(
+            verified
+                .encrypted_stage
+                .backup_stage_proof
+                .identity_is_unchanged()
+        );
+        let shutdown = verified.abort_for_shutdown();
+        assert!(matches!(shutdown.source_close, SourceCloseState::Closed));
+        drop(source_root);
+    }
+
+    #[test]
+    fn manifest_preparation_errors_are_fixed_and_redacted() {
+        for (error, expected) in [
+            (
+                RecoverySetManifestPreparationError::SourceObservationUnavailable,
+                "SourceObservationUnavailable",
+            ),
+            (
+                RecoverySetManifestPreparationError::StageIdentityUnavailableOrChanged,
+                "StageIdentityUnavailableOrChanged",
+            ),
+            (
+                RecoverySetManifestPreparationError::ManifestConstructionRejected,
+                "ManifestConstructionRejected",
+            ),
+        ] {
+            let debug = format!("{error:?}");
+            assert_eq!(debug, expected);
+            for sensitive in [
+                "CHMRECV",
+                "parish-data",
+                "migration-backup",
+                "182",
+                "512",
+                "sha256",
+                "FileIdentity",
+                "os error",
+            ] {
+                assert!(!debug.contains(sensitive));
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_preparation_surface_adds_no_authority_or_publication_capability() {
+        let production = production_region(include_str!("custody.rs"));
+        let boundary = declaration_region(
+            production,
+            "pub(crate) fn prepare_recovery_set_manifest_v1",
+            "pub(crate) fn abort_for_shutdown",
+        );
+        for required in [
+            "&self",
+            "ParsedUntrustedMigrationRecoveryEnvelopeV1::parse",
+            "stage_manifest_observation",
+            "Sha256::digest(envelope_bytes)",
+            "RecoverySetManifestV1::from_trusted_internal_facts",
+        ] {
+            assert!(boundary.contains(required), "missing boundary: {required}");
+        }
+        for forbidden in [
+            "File",
+            "Path",
+            "Connection",
+            "authorization",
+            "MigrationRecoveryKey",
+            "custody:",
+            "tauri::command",
+            "publish",
+            "destination",
+            "device",
+            "write(",
+            "create(",
+            "restore",
+            "execute",
+        ] {
+            assert!(
+                !boundary.contains(forbidden),
+                "unexpected manifest-preparation capability: {forbidden}"
+            );
+        }
     }
 
     #[test]

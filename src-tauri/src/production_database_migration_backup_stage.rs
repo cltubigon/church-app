@@ -72,7 +72,7 @@ pub(crate) use recovery_envelope::{
     ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseFailure,
     ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome,
     RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
-    UndisclosedMigrationRecoveryKeyCustodyInterruption,
+    RecoverySetManifestPreparationError, UndisclosedMigrationRecoveryKeyCustodyInterruption,
     VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup,
     prepare_migration_recovery_key_custody, run_migration_recovery_key_custody_native_ceremony,
     verify_production_database_migration_recovery_envelope,

@@ -46,8 +46,8 @@ pub(crate) use custody::{
     PossiblyExposedMigrationRecoveryKeyCustodyFailure,
     PreparedUndisclosedMigrationRecoveryKeyCustody,
     RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
-    UndisclosedMigrationRecoveryKeyCustodyInterruption, prepare_migration_recovery_key_custody,
-    run_migration_recovery_key_custody_native_ceremony,
+    RecoverySetManifestPreparationError, UndisclosedMigrationRecoveryKeyCustodyInterruption,
+    prepare_migration_recovery_key_custody, run_migration_recovery_key_custody_native_ceremony,
 };
 
 const HASH_BUFFER_LENGTH: usize = 64 * 1024;
@@ -224,6 +224,7 @@ enum TestFailurePoint {
     CipherIntegrity,
     MetadataOrHeader,
     FinalStageIdentity,
+    ManifestStageIdentity,
 }
 
 #[cfg(test)]
@@ -324,31 +325,75 @@ fn destroy_construction_key_for_test(
     record_test_event(TestEvent::ConstructionKeyDestroyed);
 }
 
-fn stage_digest(
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StageObservationError {
+    ObservationUnavailable,
+    IdentityUnavailableOrChanged,
+}
+
+struct MigrationBackupStageManifestObservation {
+    database_byte_length: u64,
+    database_sha256: [u8; 32],
+}
+
+fn stage_manifest_observation(
     proof: &VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
-) -> Result<MigrationBackupStageSha256Digest, ()> {
-    if !proof.identity_is_unchanged() {
-        return Err(());
+) -> Result<MigrationBackupStageManifestObservation, StageObservationError> {
+    #[cfg(test)]
+    if injected_test_failure(TestFailurePoint::ManifestStageIdentity) {
+        return Err(StageObservationError::IdentityUnavailableOrChanged);
     }
+    if !proof.identity_is_unchanged() {
+        return Err(StageObservationError::IdentityUnavailableOrChanged);
+    }
+    let database_byte_length = proof
+        .leaf
+        .metadata()
+        .map_err(|_| StageObservationError::ObservationUnavailable)?
+        .len();
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; HASH_BUFFER_LENGTH];
     let mut offset = 0_u64;
     loop {
-        let read = proof.leaf.seek_read(&mut buffer, offset).map_err(|_| ())?;
+        let read = proof
+            .leaf
+            .seek_read(&mut buffer, offset)
+            .map_err(|_| StageObservationError::ObservationUnavailable)?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
         offset = offset
-            .checked_add(u64::try_from(read).map_err(|_| ())?)
-            .ok_or(())?;
+            .checked_add(
+                u64::try_from(read).map_err(|_| StageObservationError::ObservationUnavailable)?,
+            )
+            .ok_or(StageObservationError::ObservationUnavailable)?;
     }
     if !proof.identity_is_unchanged() {
-        return Err(());
+        return Err(StageObservationError::IdentityUnavailableOrChanged);
     }
-    Ok(MigrationBackupStageSha256Digest::from_bytes(
-        hasher.finalize().into(),
-    ))
+    let final_database_byte_length = proof
+        .leaf
+        .metadata()
+        .map_err(|_| StageObservationError::ObservationUnavailable)?
+        .len();
+    if database_byte_length != final_database_byte_length || offset != database_byte_length {
+        return Err(StageObservationError::ObservationUnavailable);
+    }
+    Ok(MigrationBackupStageManifestObservation {
+        database_byte_length,
+        database_sha256: hasher.finalize().into(),
+    })
+}
+
+fn stage_digest(
+    proof: &VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
+) -> Result<MigrationBackupStageSha256Digest, ()> {
+    stage_manifest_observation(proof)
+        .map(|observation| {
+            MigrationBackupStageSha256Digest::from_bytes(observation.database_sha256)
+        })
+        .map_err(|_| ())
 }
 
 fn map_key_load_error(
