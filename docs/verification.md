@@ -543,7 +543,7 @@ Parsing and opening tests prove authentication-before-release: framing, exact ve
 
 The version-1 rejection matrix includes: wrong recovery key; altered format/domain identity; unsupported version; unsupported algorithm; zero or invalid generation identifier; altered nonce; altered ciphertext; altered tag; truncation; trailing bytes; altered authenticated backup-set association; altered authenticated digest/binding; and association with a different encrypted backup database. Each outcome fails closed and exposes no key candidate.
 
-Independent recovery verification evidence exercises this exact order: consume `VerifiedEncryptedProductionDatabaseMigrationBackupStage`; generate key, generation identifier, set identifier, and nonce; hash the exact retained stage; independently reload/recover/exactly bind the active protected wrapper for construction; seal; destroy/drop that wrapper-derived `GenerationBoundDatabaseKey`; independently parse/authenticate/decrypt without reloading the wrapper; reconstruct a fresh generation-bound candidate through the existing trusted installation assessment; hash and match the exact stage a second time; and reopen it using only that candidate. The verifier opens with `READ_ONLY`, `FULL_MUTEX`, `PRIVATE_CACHE`, `NOFOLLOW`, fixed win32 VFS, no `CREATE`, canonical pre-key hardening, one key application, and enabled/verified `query_only`; reruns only canonical cipher integrity and fixed metadata/header observation with exact source equality; explicitly closes; and performs final stage-identity continuity before returning `VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup`. Cross-process migration exclusivity is not owned by this private transition and remains an unwired orchestration prerequisite for the later complete execution chain.
+Independent recovery verification evidence exercises this exact order: consume `VerifiedEncryptedProductionDatabaseMigrationBackupStage`; generate key, generation identifier, set identifier, and nonce; hash the exact retained stage; independently reload/recover/exactly bind the active protected wrapper for construction; seal; destroy/drop that wrapper-derived `GenerationBoundDatabaseKey`; independently parse/authenticate/decrypt without reloading the wrapper; reconstruct a fresh generation-bound candidate through the existing trusted installation assessment; hash and match the exact stage a second time; and reopen it using only that candidate. The verifier opens with `READ_ONLY`, `FULL_MUTEX`, `PRIVATE_CACHE`, `NOFOLLOW`, fixed win32 VFS, no `CREATE`, canonical pre-key hardening, one key application, and enabled/verified `query_only`; reruns only canonical cipher integrity and fixed metadata/header observation with exact source equality; explicitly closes; and performs final stage-identity continuity before returning `VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup`. Cross-process migration exclusivity is not owned by this private transition; the lifecycle preparation worker now owns that separate gate around the composed chain.
 
 Full SQLite integrity is deliberately not repeated during this verifier because the prior encrypted stage passed canonical full integrity, authenticated SHA-256 equality proves exact stage-byte identity, recovered-key cipher integrity succeeds, and exact metadata/header equality is re-established. If byte equality cannot be established, verification fails; it does not substitute a weaker check. Tests also prove the transition never mutates the staged database. This is not a general integrity skip.
 
@@ -625,6 +625,38 @@ The existing vendored OpenSSL missing-static-PDB warnings were non-fatal. This C
 The existing `windows-sys = "=0.61.2"` dependency remains pinned with default features disabled and the UI features `Win32_UI_Controls`, `Win32_UI_Input_KeyboardAndMouse`, and `Win32_UI_WindowsAndMessaging` available. No new crate was added, and compile/test availability of these bindings does not make the ceremony operational.
 
 Current recovery-layer status is: A implemented; B implemented; C1 implemented; C2a implemented but unwired and manually untested; C2b lifecycle/main-thread/real-main-window integration and operational ceremony unimplemented; D publication unimplemented; E restore unimplemented; and F retention/deletion unimplemented. C2a adds no migration execution, publication, restore, filesystem export, printing, QR, DPAPI custody, password/KDF, secret sharing, recovery-key regeneration, backup-set regeneration, or envelope resealing, and grants none of the authorities prohibited by the custody contract.
+
+## Accepted lifecycle migration-preparation orchestration evidence
+
+The committed implementation composes authorized/revalidated migration through migration exclusivity, operational-owner retirement, exact authorization consumption, canonical full integrity, verified encrypted backup staging, independent recovery-envelope verification, and C1 custody preparation. It runs on the existing dedicated `production-database-migration` OS thread and stops at worker-retained `PreparedUndisclosedMigrationRecoveryKeyCustody`. Lifecycle stores only coarse `CustodyPrepared`; it does not own the Prepared owner, plaintext custody data, or exclusivity. The worker blocks on `control.recv()` rather than busy-spinning.
+
+Source-order evidence confirms exclusivity acquisition precedes operational close, operational close precedes authorization consumption, and authorization consumption precedes the preparation chain. The operational owner is removed from `Ready` and explicitly closed first. Operational close failure remains worker-owned with exclusivity retained. Authorization still comes only from successful existing revalidation and is consumed once; no new `Pending` opportunity or renewal path was added.
+
+The canonical stage-path test confirms exact fixed leaf `production-database-migration-backup.stage` directly below the Rust/Tauri-resolved application-local-data root, represented by redacted `ProductionDatabaseMigrationBackupStagePath`. The production preparation boundary accepts the Tauri `AppHandle`, resolves no caller/frontend/environment path, and derives backup context only through canonical database-key persistence paths.
+
+Prepared ownership keeps `migration_work_resolved` false until it is resolved. The same is true during active preparation and migration close-only retry ownership. `may_exit` independently requires resolved startup, ordinary close, setup, and migration work; ordinary failed/stopped lifecycle state; and resolved migration-confirmation ownership. Tests specifically establish that confirmation `Consumed` does not permit exit while worker-held migration ownership remains.
+
+The implemented `abort_before_exposure_for_shutdown` test proves no disclosure; destruction of encoded custody text, recovery-key material, and migration authorization; backup-context drop; explicit source close; retention of keyless encrypted-stage/envelope proof; and canonical close-only retry on close failure. Source exclusions prove the transition cannot disclose, invoke the native ceremony, retry custody, publish, or execute migration.
+
+Shutdown-race tests cover the exact claim variants `NoWork`, `Ready(OperationalProductionDatabase)`, and `ShutdownWon(AuthorizedProductionDatabaseMigrationHandoff)`. The `ShutdownWon` path consumes exact authorization once, performs none of full integrity/staging/envelope/custody, closes the exact authorized source, and retains worker-local close-only retry plus exclusivity on failure. The ordinary operational owner already extracted by shutdown remains in the ordinary close path, proving no double-close.
+
+Recorded initial migration-preparation validation was:
+
+- migration exclusivity tests: 9 passed;
+- migration confirmation ownership tests: 17 passed;
+- migration backup-stage tests: 8 passed;
+- recovery-envelope tests: 28 passed;
+- custody tests: 43 passed;
+- initial migration lifecycle tests: 16 passed;
+- canonical stage-path test: 1 passed;
+- `cargo check --locked --all-targets`: passed;
+- `cargo fmt --check`: passed;
+- `cargo clippy --locked --all-targets -- -D warnings`: passed; and
+- `git diff --check`: passed.
+
+The shutdown-race correction recorded final `application_lifecycle::tests::migration_` results of 20 passed and 0 failed, with the transient discovery timing case independently rerun once and passed. `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `git diff --check` passed. Commit-staging validation recorded `git diff --cached --check` passed. Existing vendored OpenSSL missing-PDB warnings were non-fatal, and existing SQLCipher `VirtualLock` warnings appeared in custody tests.
+
+For this implementation slice, the full Rust suite, npm/frontend validation, Tauri runtime, production app-data, native custody dialog, manual custody ceremony, and integrated migration runtime test were not run. No result for those checks is implied. Operational reachability remains incomplete because production migration-discovery invocation, migration confirmation/cancellation commands, frontend migration UI, and C2b native ceremony dispatch are absent. No manual integrated migration ceremony, publication, or migration execution occurred.
 
 ## Remaining production database verification gates
 
