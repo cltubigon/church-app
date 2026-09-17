@@ -16,9 +16,27 @@ use tauri::{AppHandle, Manager};
 mod production_database_migration_confirmation;
 
 use production_database_migration_confirmation::{
-    ProductionDatabaseMigrationConfirmation, ProductionDatabaseMigrationDiscoveryCloseFailure,
-    ProductionDatabaseMigrationPendingContext, ProductionDatabaseMigrationRevalidationCompletion,
+    AuthorizedProductionDatabaseMigrationHandoff, ProductionDatabaseMigrationConfirmation,
+    ProductionDatabaseMigrationCrossProcessExclusivity,
+    ProductionDatabaseMigrationCrossProcessExclusivityOutcome,
+    ProductionDatabaseMigrationDiscoveryCloseFailure, ProductionDatabaseMigrationPendingContext,
+    ProductionDatabaseMigrationPreparationFailure, ProductionDatabaseMigrationPreparationOutcome,
+    ProductionDatabaseMigrationRevalidationCompletion,
     ProductionDatabaseMigrationShutdownOwnership,
+    acquire_production_database_migration_cross_process_exclusivity,
+    prepare_authorized_production_database_migration,
+};
+
+#[cfg(windows)]
+use production_database_migration_confirmation::production_database_migration_backup_stage::{
+    PreparedUndisclosedMigrationRecoveryKeyCustody,
+    ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome,
+    ProductionDatabaseMigrationBackupStageVerifierCloseRetryOutcome,
+    ProductionDatabaseMigrationBackupStageWriterCloseRetryOutcome,
+    ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome,
+    ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome,
+    UndisclosedMigrationRecoveryKeyCustodyShutdown,
+    UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome,
 };
 
 #[cfg(windows)]
@@ -42,7 +60,7 @@ use crate::{
     installation_state::{ExpectedStorageEvidence, InstallationEvidence},
     production_database_connection_handoff::{
         DatabaseEvidenceCorrespondenceValidationCloseFailure,
-        DatabaseEvidenceCorrespondenceValidationOutcome,
+        DatabaseEvidenceCorrespondenceValidationOutcome, FullIntegrityValidationCloseRetryOutcome,
         LiveMetadataAndHeaderValidationCloseFailure, LiveMetadataAndHeaderValidationOutcome,
         OperationalProductionDatabase, ProductionDatabaseConnectionCloseOutcome,
         ProductionDatabaseConnectionConstructionCloseFailure,
@@ -320,6 +338,44 @@ enum ProductionDatabaseMigrationDiscoveryWorkerResult {
     CloseRetryRequired(ProductionDatabaseMigrationDiscoveryCloseFailure),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MigrationPreparationState {
+    Inactive,
+    Preparing,
+    CustodyPrepared,
+    CloseRetryRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MigrationWorkerCommand {
+    Shutdown,
+}
+
+#[cfg(windows)]
+#[allow(clippy::large_enum_variant)]
+enum MigrationWorkerParkedOwnership {
+    OperationalClose(
+        crate::production_database_connection_handoff::ProductionDatabaseConnectionCloseFailure,
+    ),
+    PreparationClose(ProductionDatabaseMigrationPreparationFailure),
+    Prepared(PreparedUndisclosedMigrationRecoveryKeyCustody),
+    PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
+}
+
+#[cfg(windows)]
+#[allow(clippy::large_enum_variant)]
+enum MigrationWorkerRetryOutcome {
+    Resolved,
+    Retained(MigrationWorkerParkedOwnership),
+}
+
+#[cfg(windows)]
+enum MigrationPreparationClaim {
+    NoWork,
+    Ready(OperationalProductionDatabase),
+    ShutdownWon(AuthorizedProductionDatabaseMigrationHandoff),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum FirstTimeSetupRequestResult {
@@ -460,6 +516,8 @@ struct LifecycleInner {
     close_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     setup_worker: Option<thread::JoinHandle<()>>,
     migration_worker: Option<thread::JoinHandle<()>>,
+    migration_control: Option<std::sync::mpsc::SyncSender<MigrationWorkerCommand>>,
+    migration_preparation: MigrationPreparationState,
     startup_work_resolved: bool,
     close_work_resolved: bool,
     setup_work_resolved: bool,
@@ -482,6 +540,8 @@ impl ApplicationLifecycle {
                 close_worker: None,
                 setup_worker: None,
                 migration_worker: None,
+                migration_control: None,
+                migration_preparation: MigrationPreparationState::Inactive,
                 startup_work_resolved: false,
                 close_work_resolved: true,
                 setup_work_resolved: true,
@@ -802,6 +862,7 @@ impl ApplicationLifecycle {
         Spawn: FnOnce(MigrationThreadTask) -> std::io::Result<thread::JoinHandle<()>>,
     {
         let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+        let (control_sender, control_receiver) = std::sync::mpsc::sync_channel(1);
         let lifecycle = Arc::clone(self);
         let mut inner = self.lock();
         if inner.migration_worker.is_some() || !inner.migration_work_resolved {
@@ -825,7 +886,9 @@ impl ApplicationLifecycle {
                 .take()
                 .expect("migration work escrow must contain exactly one owner");
             let outcome = work.revalidate();
-            lifecycle.complete_migration_revalidation(outcome, worker_app.as_ref());
+            if lifecycle.complete_migration_revalidation(outcome, worker_app.as_ref()) {
+                lifecycle.run_migration_preparation_worker(worker_app, control_receiver);
+            }
         });
         let worker = match spawn(task) {
             Ok(worker) => worker,
@@ -844,8 +907,10 @@ impl ApplicationLifecycle {
             }
         };
         inner.migration_worker = Some(worker);
+        inner.migration_control = Some(control_sender);
         drop(inner);
         if start_sender.send(()).is_err() {
+            self.lock().migration_control = None;
             let work = escrow
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -867,7 +932,7 @@ impl ApplicationLifecycle {
         &self,
         outcome: crate::production_database_connection_handoff::ProductionDatabaseMigrationRevalidationOutcome,
         app: Option<&AppHandle>,
-    ) {
+    ) -> bool {
         let completion = {
             let mut inner = self.lock();
             let completion = inner
@@ -875,18 +940,186 @@ impl ApplicationLifecycle {
                 .complete_revalidation(outcome)
                 .expect("only the reserved migration worker may complete revalidation");
             match completion {
-                ProductionDatabaseMigrationRevalidationCompletion::Authorized
-                | ProductionDatabaseMigrationRevalidationCompletion::Failed(_) => {
+                ProductionDatabaseMigrationRevalidationCompletion::Failed(_) => {
                     inner.migration_work_resolved = true;
+                    inner.migration_control = None;
                 }
+                ProductionDatabaseMigrationRevalidationCompletion::Authorized => {}
                 ProductionDatabaseMigrationRevalidationCompletion::CloseRetryRequired
-                | ProductionDatabaseMigrationRevalidationCompletion::Revoked(_) => {}
+                | ProductionDatabaseMigrationRevalidationCompletion::Revoked(_) => {
+                    inner.migration_control = None;
+                }
             }
             completion
         };
+        let authorized = matches!(
+            completion,
+            ProductionDatabaseMigrationRevalidationCompletion::Authorized
+        );
         if let ProductionDatabaseMigrationRevalidationCompletion::Revoked(source) = completion {
             self.complete_migration_source_close(source.close(), app);
         } else if self.may_exit()
+            && let Some(app) = app
+        {
+            app.exit(0);
+        }
+        authorized
+    }
+
+    #[cfg(windows)]
+    fn run_migration_preparation_worker(
+        self: &Arc<Self>,
+        app: Option<AppHandle>,
+        control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+    ) {
+        let Some(app) = app else {
+            let mut inner = self.lock();
+            inner.migration_work_resolved = true;
+            inner.migration_control = None;
+            return;
+        };
+        let exclusivity = match acquire_production_database_migration_cross_process_exclusivity() {
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::Acquired(owner) => owner,
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::AlreadyHeld
+            | ProductionDatabaseMigrationCrossProcessExclusivityOutcome::Unavailable => {
+                let mut inner = self.lock();
+                inner.migration_work_resolved = true;
+                inner.migration_control = None;
+                return;
+            }
+        };
+
+        let claim = {
+            let mut inner = self.lock();
+            claim_migration_preparation(&mut inner)
+        };
+        let operational = match claim {
+            MigrationPreparationClaim::NoWork => {
+                drop(exclusivity);
+                self.finish_migration_preparation_worker(Some(&app));
+                return;
+            }
+            MigrationPreparationClaim::ShutdownWon(authorized) => {
+                match close_authorized_migration_for_shutdown(authorized) {
+                    MigrationWorkerRetryOutcome::Resolved => {
+                        drop(exclusivity);
+                        self.finish_migration_preparation_worker(Some(&app));
+                    }
+                    MigrationWorkerRetryOutcome::Retained(owner) => {
+                        self.park_migration_worker(owner, control, exclusivity, &app)
+                    }
+                }
+                return;
+            }
+            MigrationPreparationClaim::Ready(operational) => operational,
+        };
+
+        if let Some(failure) = close_operational(operational) {
+            let RetainedCloseFailure::Operational(failure) = failure else {
+                unreachable!("operational close returns only its exact failure owner")
+            };
+            self.park_migration_worker(
+                MigrationWorkerParkedOwnership::OperationalClose(failure),
+                control,
+                exclusivity,
+                &app,
+            );
+            return;
+        }
+
+        let authorized = {
+            let mut inner = self.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner
+                .migration_confirmation
+                .consume_authorization()
+                .expect("only the exact lifecycle Authorized state enters preparation")
+        };
+
+        if control.try_recv().is_ok() {
+            match authorized.close() {
+                ProductionDatabaseConnectionCloseOutcome::Closed => {
+                    drop(exclusivity);
+                    self.finish_migration_preparation_worker(Some(&app));
+                }
+                ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                    self.park_migration_worker(
+                        MigrationWorkerParkedOwnership::PreparationClose(
+                            ProductionDatabaseMigrationPreparationFailure::SourceClose(failure),
+                        ),
+                        control,
+                        exclusivity,
+                        &app,
+                    );
+                }
+            }
+            return;
+        }
+
+        match prepare_authorized_production_database_migration(&app, authorized) {
+            ProductionDatabaseMigrationPreparationOutcome::Prepared(prepared) => {
+                self.lock().migration_preparation = MigrationPreparationState::CustodyPrepared;
+                self.park_migration_worker(
+                    MigrationWorkerParkedOwnership::Prepared(prepared),
+                    control,
+                    exclusivity,
+                    &app,
+                );
+            }
+            ProductionDatabaseMigrationPreparationOutcome::Failed => {
+                drop(exclusivity);
+                self.finish_migration_preparation_worker(Some(&app));
+            }
+            ProductionDatabaseMigrationPreparationOutcome::CloseRetryRequired(failure) => {
+                self.park_migration_worker(
+                    MigrationWorkerParkedOwnership::PreparationClose(failure),
+                    control,
+                    exclusivity,
+                    &app,
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn park_migration_worker(
+        &self,
+        mut owner: MigrationWorkerParkedOwnership,
+        control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+        exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
+        app: &AppHandle,
+    ) {
+        self.lock().migration_preparation = match &owner {
+            MigrationWorkerParkedOwnership::Prepared(_) => {
+                MigrationPreparationState::CustodyPrepared
+            }
+            _ => MigrationPreparationState::CloseRetryRequired,
+        };
+        loop {
+            let _ = control.recv();
+            match retry_migration_worker_ownership(owner, self) {
+                MigrationWorkerRetryOutcome::Resolved => {
+                    drop(exclusivity);
+                    self.finish_migration_preparation_worker(Some(app));
+                    return;
+                }
+                MigrationWorkerRetryOutcome::Retained(retained) => owner = retained,
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn finish_migration_preparation_worker(&self, app: Option<&AppHandle>) {
+        {
+            let mut inner = self.lock();
+            inner.migration_preparation = MigrationPreparationState::Inactive;
+            inner.migration_work_resolved = true;
+            inner.migration_control = None;
+            if matches!(inner.state, LifecycleState::Stopping) {
+                inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            }
+        }
+        if self.may_exit()
             && let Some(app) = app
         {
             app.exit(0);
@@ -904,6 +1137,7 @@ impl ApplicationLifecycle {
             match outcome {
                 ProductionDatabaseConnectionCloseOutcome::Closed => {
                     inner.migration_work_resolved = true;
+                    inner.migration_control = None;
                 }
                 ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
                     inner
@@ -1010,13 +1244,18 @@ impl ApplicationLifecycle {
             let _ = worker.join();
         }
 
-        let (migration_start_sender, migration_escrow, action) = {
+        let (migration_start_sender, migration_escrow, migration_control, action) = {
             let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
             let mut inner = self.lock();
             if inner.migration_discovery == ProductionDatabaseMigrationDiscoveryState::InProgress {
                 inner.migration_discovery = ProductionDatabaseMigrationDiscoveryState::Finished;
             }
-            let migration_owner = inner.migration_confirmation.invalidate_for_shutdown();
+            let migration_control = inner.migration_control.clone();
+            let migration_owner = if migration_control.is_some() {
+                None
+            } else {
+                inner.migration_confirmation.invalidate_for_shutdown()
+            };
             if migration_owner.is_some() {
                 inner.migration_work_resolved = false;
             }
@@ -1051,8 +1290,17 @@ impl ApplicationLifecycle {
                 }
                 migration_escrow = Some(escrow);
             }
-            (migration_start_sender, migration_escrow, action)
+            (
+                migration_start_sender,
+                migration_escrow,
+                migration_control,
+                action,
+            )
         };
+
+        if let Some(control) = migration_control {
+            let _ = control.try_send(MigrationWorkerCommand::Shutdown);
+        }
 
         if let Some(start_sender) = migration_start_sender {
             if start_sender.send(()).is_err()
@@ -1164,6 +1412,250 @@ impl ApplicationLifecycle {
         }
         if let Some(worker) = migration {
             let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn claim_migration_preparation(inner: &mut LifecycleInner) -> MigrationPreparationClaim {
+    if !inner.migration_confirmation.is_authorized() {
+        return MigrationPreparationClaim::NoWork;
+    }
+    if !matches!(inner.state, LifecycleState::Ready(_)) {
+        return MigrationPreparationClaim::ShutdownWon(
+            inner
+                .migration_confirmation
+                .consume_authorization()
+                .expect("only the exact lifecycle Authorized state is consumed after shutdown"),
+        );
+    }
+    inner.migration_preparation = MigrationPreparationState::Preparing;
+    let LifecycleState::Ready(operational) =
+        std::mem::replace(&mut inner.state, LifecycleState::Stopping)
+    else {
+        unreachable!("Ready state was checked before migration ownership transfer")
+    };
+    MigrationPreparationClaim::Ready(operational)
+}
+
+#[cfg(windows)]
+fn close_authorized_migration_for_shutdown(
+    authorized: AuthorizedProductionDatabaseMigrationHandoff,
+) -> MigrationWorkerRetryOutcome {
+    match authorized.close() {
+        ProductionDatabaseConnectionCloseOutcome::Closed => MigrationWorkerRetryOutcome::Resolved,
+        ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+            MigrationWorkerRetryOutcome::Retained(MigrationWorkerParkedOwnership::PreparationClose(
+                ProductionDatabaseMigrationPreparationFailure::SourceClose(failure),
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn retry_migration_worker_ownership(
+    owner: MigrationWorkerParkedOwnership,
+    lifecycle: &ApplicationLifecycle,
+) -> MigrationWorkerRetryOutcome {
+    match owner {
+        MigrationWorkerParkedOwnership::OperationalClose(failure) => match failure.retry_close() {
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::OperationalClose(failure),
+                )
+            }
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                let authorized = {
+                    let mut inner = lifecycle.lock();
+                    inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+                    inner
+                        .migration_confirmation
+                        .consume_authorization()
+                        .expect("shutdown consumes the retained exact Authorized migration")
+                };
+                match authorized.close() {
+                    ProductionDatabaseConnectionCloseOutcome::Closed => {
+                        MigrationWorkerRetryOutcome::Resolved
+                    }
+                    ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                        MigrationWorkerRetryOutcome::Retained(
+                            MigrationWorkerParkedOwnership::PreparationClose(
+                                ProductionDatabaseMigrationPreparationFailure::SourceClose(failure),
+                            ),
+                        )
+                    }
+                }
+            }
+        },
+        MigrationWorkerParkedOwnership::PreparationClose(failure) => {
+            retry_migration_preparation_failure(failure)
+        }
+        MigrationWorkerParkedOwnership::Prepared(prepared) => {
+            let shutdown = prepared.abort_before_exposure_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::PreparedShutdown(shutdown) => {
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn retry_migration_preparation_failure(
+    failure: ProductionDatabaseMigrationPreparationFailure,
+) -> MigrationWorkerRetryOutcome {
+    use ProductionDatabaseMigrationPreparationFailure as Failure;
+
+    match failure {
+        Failure::FullIntegrityClose(failure) => match failure.retry_close() {
+            FullIntegrityValidationCloseRetryOutcome::Closed(_) => {
+                MigrationWorkerRetryOutcome::Resolved
+            }
+            FullIntegrityValidationCloseRetryOutcome::Failed(failure) => {
+                MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparationClose(
+                        Failure::FullIntegrityClose(failure),
+                    ),
+                )
+            }
+        },
+        Failure::SourceClose(failure) => match failure.retry_close() {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                MigrationWorkerRetryOutcome::Resolved
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparationClose(Failure::SourceClose(failure)),
+                )
+            }
+        },
+        Failure::BackupStage(failure) => match failure.retry_source_close() {
+            ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome::Closed(failure) => {
+                drop(failure);
+                MigrationWorkerRetryOutcome::Resolved
+            }
+            ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome::Failed(failure) => {
+                MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparationClose(Failure::BackupStage(failure)),
+                )
+            }
+        },
+        Failure::BackupStageWriterClose(failure) => match failure.retry_source_close() {
+            ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome::Failed(failure) => {
+                MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparationClose(
+                        Failure::BackupStageWriterClose(failure),
+                    ),
+                )
+            }
+            ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome::Closed(failure) => {
+                match failure.retry_close() {
+                    ProductionDatabaseMigrationBackupStageWriterCloseRetryOutcome::Closed(
+                        failure,
+                    ) => {
+                        drop(failure);
+                        MigrationWorkerRetryOutcome::Resolved
+                    }
+                    ProductionDatabaseMigrationBackupStageWriterCloseRetryOutcome::Failed(
+                        failure,
+                    ) => MigrationWorkerRetryOutcome::Retained(
+                        MigrationWorkerParkedOwnership::PreparationClose(
+                            Failure::BackupStageWriterClose(failure),
+                        ),
+                    ),
+                }
+            }
+        },
+        Failure::BackupStageVerifierClose(failure) => match failure.retry_source_close() {
+            ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome::Failed(failure) => {
+                MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparationClose(
+                        Failure::BackupStageVerifierClose(failure),
+                    ),
+                )
+            }
+            ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome::Closed(failure) => {
+                match failure.retry_close() {
+                    ProductionDatabaseMigrationBackupStageVerifierCloseRetryOutcome::Closed(
+                        failure,
+                    ) => {
+                        drop(failure);
+                        MigrationWorkerRetryOutcome::Resolved
+                    }
+                    ProductionDatabaseMigrationBackupStageVerifierCloseRetryOutcome::Failed(
+                        failure,
+                    ) => MigrationWorkerRetryOutcome::Retained(
+                        MigrationWorkerParkedOwnership::PreparationClose(
+                            Failure::BackupStageVerifierClose(failure),
+                        ),
+                    ),
+                }
+            }
+        },
+        Failure::RecoveryEnvelope(failure) => match failure.retry_source_close() {
+            ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome::Closed(failure) => {
+                drop(failure);
+                MigrationWorkerRetryOutcome::Resolved
+            }
+            ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome::Failed(failure) => {
+                MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparationClose(
+                        Failure::RecoveryEnvelope(failure),
+                    ),
+                )
+            }
+        },
+        Failure::RecoveryEnvelopeVerifierClose(failure) => {
+            match failure.retry_source_close() {
+                ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome::Failed(
+                    failure,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparationClose(
+                        Failure::RecoveryEnvelopeVerifierClose(failure),
+                    ),
+                ),
+                ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome::Closed(
+                    failure,
+                ) => match failure.retry_close() {
+                    ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome::Closed(
+                        failure,
+                    ) => {
+                        drop(failure);
+                        MigrationWorkerRetryOutcome::Resolved
+                    }
+                    ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome::Failed(
+                        failure,
+                    ) => MigrationWorkerRetryOutcome::Retained(
+                        MigrationWorkerParkedOwnership::PreparationClose(
+                            Failure::RecoveryEnvelopeVerifierClose(failure),
+                        ),
+                    ),
+                },
+            }
         }
     }
 }
@@ -2943,6 +3435,22 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn authorize_migration(lifecycle: &ApplicationLifecycle) {
+        let work = lifecycle
+            .lock()
+            .migration_confirmation
+            .begin_revalidation()
+            .expect("test must begin genuine pending revalidation");
+        assert!(matches!(
+            lifecycle
+                .lock()
+                .migration_confirmation
+                .complete_revalidation(work.revalidate()),
+            Ok(ProductionDatabaseMigrationRevalidationCompletion::Authorized)
+        ));
+    }
+
+    #[cfg(windows)]
     fn wait_for_migration_state(
         lifecycle: &ApplicationLifecycle,
         expected: production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest,
@@ -3631,8 +4139,272 @@ mod tests {
         root.assert_exact_cleanup();
     }
 
+    #[cfg(windows)]
     #[test]
-    fn migration_worker_surface_remains_private_unwired_and_non_executing() {
+    fn migration_shutdown_won_race_consumes_and_closes_authorized_source() {
+        use crate::production_database_connection_handoff::genuine_production_database_migration_opportunity_for_test;
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        let (source_root, opportunity) =
+            genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, source_root.path(), opportunity);
+        authorize_migration(&lifecycle);
+        let (control, _receiver) = std::sync::mpsc::sync_channel(1);
+        {
+            let mut inner = lifecycle.lock();
+            inner.startup_work_resolved = true;
+            inner.migration_work_resolved = false;
+            inner.migration_control = Some(control);
+        }
+        let exclusivity = match acquire_production_database_migration_cross_process_exclusivity() {
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::Acquired(owner) => owner,
+            _ => panic!("test must acquire migration exclusivity"),
+        };
+        let operational = {
+            let mut inner = lifecycle.lock();
+            let ShutdownAction::Close(operational) = inner.state.begin_shutdown() else {
+                panic!("shutdown must win the Ready operational owner");
+            };
+            inner.close_work_resolved = false;
+            assert_eq!(
+                inner.migration_confirmation.state_for_test(),
+                ProductionDatabaseMigrationConfirmationStateForTest::Authorized
+            );
+            operational
+        };
+
+        let authorized = {
+            let mut inner = lifecycle.lock();
+            let MigrationPreparationClaim::ShutdownWon(authorized) =
+                claim_migration_preparation(&mut inner)
+            else {
+                panic!("authorized non-Ready worker must claim shutdown-only ownership");
+            };
+            assert_eq!(
+                inner.migration_confirmation.state_for_test(),
+                ProductionDatabaseMigrationConfirmationStateForTest::Consumed
+            );
+            assert!(
+                inner
+                    .migration_confirmation
+                    .consume_authorization()
+                    .is_err()
+            );
+            assert_eq!(
+                inner.migration_preparation,
+                MigrationPreparationState::Inactive
+            );
+            authorized
+        };
+        assert!(matches!(
+            close_authorized_migration_for_shutdown(authorized),
+            MigrationWorkerRetryOutcome::Resolved
+        ));
+        assert!(matches!(
+            acquire_production_database_migration_cross_process_exclusivity(),
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::AlreadyHeld
+        ));
+        assert!(!lifecycle.lock().migration_work_resolved);
+        drop(exclusivity);
+        lifecycle.finish_migration_preparation_worker(None);
+        assert!(lifecycle.lock().migration_work_resolved);
+        assert!(!lifecycle.may_exit());
+
+        assert!(close_operational(operational).is_none());
+        {
+            let mut inner = lifecycle.lock();
+            inner.close_work_resolved = true;
+            inner.state.finish_close(None);
+        }
+        assert!(lifecycle.may_exit());
+        source_root.assert_exact_cleanup();
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_shutdown_won_source_close_failure_retries_only_close() {
+        use crate::production_database_connection_handoff::{
+            genuine_production_database_migration_opportunity_for_test,
+            with_production_database_close_failure_injected,
+        };
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        let (source_root, opportunity) =
+            genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, source_root.path(), opportunity);
+        authorize_migration(&lifecycle);
+        let (control, _receiver) = std::sync::mpsc::sync_channel(1);
+        {
+            let mut inner = lifecycle.lock();
+            inner.startup_work_resolved = true;
+            inner.migration_work_resolved = false;
+            inner.migration_control = Some(control);
+        }
+        let exclusivity = match acquire_production_database_migration_cross_process_exclusivity() {
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::Acquired(owner) => owner,
+            _ => panic!("test must acquire migration exclusivity"),
+        };
+        let operational = {
+            let mut inner = lifecycle.lock();
+            let ShutdownAction::Close(operational) = inner.state.begin_shutdown() else {
+                panic!("shutdown must win the Ready operational owner");
+            };
+            inner.close_work_resolved = false;
+            operational
+        };
+        let authorized = {
+            let mut inner = lifecycle.lock();
+            let MigrationPreparationClaim::ShutdownWon(authorized) =
+                claim_migration_preparation(&mut inner)
+            else {
+                panic!("authorized non-Ready worker must claim shutdown-only ownership");
+            };
+            authorized
+        };
+        let retained = with_production_database_close_failure_injected(|| {
+            close_authorized_migration_for_shutdown(authorized)
+        });
+        let MigrationWorkerRetryOutcome::Retained(
+            MigrationWorkerParkedOwnership::PreparationClose(failure),
+        ) = retained
+        else {
+            panic!("injected source close failure must remain worker-owned");
+        };
+        assert!(matches!(
+            &failure,
+            ProductionDatabaseMigrationPreparationFailure::SourceClose(_)
+        ));
+        lifecycle.lock().migration_preparation = MigrationPreparationState::CloseRetryRequired;
+        assert!(!lifecycle.lock().migration_work_resolved);
+        assert!(!lifecycle.may_exit());
+        assert!(matches!(
+            acquire_production_database_migration_cross_process_exclusivity(),
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::AlreadyHeld
+        ));
+
+        let retained = with_production_database_close_failure_injected(|| {
+            retry_migration_preparation_failure(failure)
+        });
+        let MigrationWorkerRetryOutcome::Retained(
+            MigrationWorkerParkedOwnership::PreparationClose(failure),
+        ) = retained
+        else {
+            panic!("repeated failure must retain only preparation source-close ownership");
+        };
+        assert!(matches!(
+            &failure,
+            ProductionDatabaseMigrationPreparationFailure::SourceClose(_)
+        ));
+        assert!(!lifecycle.lock().migration_work_resolved);
+        assert!(matches!(
+            acquire_production_database_migration_cross_process_exclusivity(),
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::AlreadyHeld
+        ));
+        assert!(matches!(
+            retry_migration_preparation_failure(failure),
+            MigrationWorkerRetryOutcome::Resolved
+        ));
+        assert!(!lifecycle.lock().migration_work_resolved);
+        drop(exclusivity);
+        lifecycle.finish_migration_preparation_worker(None);
+        let released = match acquire_production_database_migration_cross_process_exclusivity() {
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::Acquired(owner) => owner,
+            _ => panic!("resolved migration worker must release exclusivity"),
+        };
+        drop(released);
+        assert_eq!(
+            lifecycle.lock().migration_confirmation.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::Consumed
+        );
+        assert!(lifecycle.lock().migration_work_resolved);
+
+        assert!(close_operational(operational).is_none());
+        {
+            let mut inner = lifecycle.lock();
+            inner.close_work_resolved = true;
+            inner.state.finish_close(None);
+        }
+        assert!(lifecycle.may_exit());
+        source_root.assert_exact_cleanup();
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_authorized_ready_claim_preserves_preparation_transfer() {
+        use crate::production_database_connection_handoff::{
+            ProductionDatabaseConnectionCloseOutcome,
+            genuine_production_database_migration_opportunity_for_test,
+        };
+        use production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest;
+
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        let (source_root, opportunity) =
+            genuine_production_database_migration_opportunity_for_test();
+        establish_migration_pending(&lifecycle, source_root.path(), opportunity);
+        authorize_migration(&lifecycle);
+
+        let operational = {
+            let mut inner = lifecycle.lock();
+            let MigrationPreparationClaim::Ready(operational) =
+                claim_migration_preparation(&mut inner)
+            else {
+                panic!("authorized Ready worker must transfer the operational owner");
+            };
+            assert_eq!(
+                inner.migration_preparation,
+                MigrationPreparationState::Preparing
+            );
+            assert_eq!(
+                inner.migration_confirmation.state_for_test(),
+                ProductionDatabaseMigrationConfirmationStateForTest::Authorized
+            );
+            operational
+        };
+        assert!(close_operational(operational).is_none());
+        let authorized = lifecycle
+            .lock()
+            .migration_confirmation
+            .consume_authorization()
+            .expect("normal preparation path must retain exact authorization until transfer");
+        assert!(matches!(
+            authorized.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        source_root.assert_exact_cleanup();
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_non_authorized_claim_remains_no_work() {
+        let lifecycle = ApplicationLifecycle::new();
+        let operational_root = install_ready_owner_for_migration_discovery(&lifecycle);
+        {
+            let mut inner = lifecycle.lock();
+            assert!(matches!(
+                claim_migration_preparation(&mut inner),
+                MigrationPreparationClaim::NoWork
+            ));
+            assert!(matches!(inner.state, LifecycleState::Ready(_)));
+            assert_eq!(
+                inner.migration_preparation,
+                MigrationPreparationState::Inactive
+            );
+            assert!(inner.migration_confirmation.is_not_offered());
+        }
+        close_ready_owner_for_migration_discovery(&lifecycle);
+        operational_root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn migration_worker_surface_remains_private_and_non_executing() {
         const LIFECYCLE: &str = include_str!("application_lifecycle.rs");
         const BOOTSTRAP: &str = include_str!("lib.rs");
         const FRONTEND: &str = include_str!("../../src/App.tsx");
@@ -3661,6 +4433,119 @@ mod tests {
             assert!(
                 !production.contains(forbidden),
                 "forbidden surface: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_preparation_order_and_worker_retention_are_explicit_and_private() {
+        const LIFECYCLE: &str = include_str!("application_lifecycle.rs");
+        const CONFIRMATION: &str =
+            include_str!("application_lifecycle/production_database_migration_confirmation.rs");
+        let production = LIFECYCLE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let worker = production
+            .split_once("fn run_migration_preparation_worker")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        let exclusivity = worker
+            .find("acquire_production_database_migration_cross_process_exclusivity()")
+            .unwrap();
+        let operational_close = worker.find("close_operational(operational)").unwrap();
+        let consume = worker.find(".consume_authorization()").unwrap();
+        let preparation = worker
+            .find("prepare_authorized_production_database_migration(&app, authorized)")
+            .unwrap();
+        assert!(exclusivity < operational_close);
+        assert!(operational_close < consume);
+        assert!(consume < preparation);
+
+        let shutdown_won = worker
+            .split_once("MigrationPreparationClaim::ShutdownWon(authorized)")
+            .unwrap()
+            .1
+            .split_once("MigrationPreparationClaim::Ready(operational)")
+            .unwrap()
+            .0;
+        assert!(shutdown_won.contains("close_authorized_migration_for_shutdown(authorized)"));
+        assert!(shutdown_won.contains("MigrationWorkerRetryOutcome::Retained(owner)"));
+        let shutdown_close = production
+            .split_once("fn close_authorized_migration_for_shutdown")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .0;
+        assert!(shutdown_close.contains("authorized.close()"));
+        assert!(shutdown_close.contains("MigrationWorkerParkedOwnership::PreparationClose"));
+        assert!(
+            shutdown_close.contains("ProductionDatabaseMigrationPreparationFailure::SourceClose")
+        );
+        for forbidden in [
+            "prepare_authorized_production_database_migration",
+            "validate_full_integrity",
+            "stage_encrypted_production_database_migration_backup",
+            "verify_production_database_migration_recovery_envelope",
+            "prepare_migration_recovery_key_custody",
+        ] {
+            assert!(!shutdown_won.contains(forbidden));
+            assert!(!shutdown_close.contains(forbidden));
+        }
+
+        let orchestration = CONFIRMATION
+            .split_once("pub(super) fn prepare_authorized_production_database_migration")
+            .unwrap()
+            .1
+            .split_once("impl FullIntegrityValidatedProductionDatabaseMigrationHandoff")
+            .unwrap()
+            .0;
+        let full_integrity = orchestration.find("validate_full_integrity()").unwrap();
+        let stage_prepare = orchestration
+            .find("prepare_production_database_migration_backup_stage(app)")
+            .unwrap();
+        let encrypted_stage = orchestration
+            .find("stage_encrypted_production_database_migration_backup")
+            .unwrap();
+        let envelope = orchestration
+            .find("verify_production_database_migration_recovery_envelope")
+            .unwrap();
+        let custody = orchestration
+            .find("prepare_migration_recovery_key_custody")
+            .unwrap();
+        assert!(full_integrity < stage_prepare);
+        assert!(stage_prepare < encrypted_stage);
+        assert!(encrypted_stage < envelope);
+        assert!(envelope < custody);
+
+        let lifecycle_inner = production
+            .split_once("struct LifecycleInner {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(!lifecycle_inner.contains("PreparedUndisclosedMigrationRecoveryKeyCustody"));
+        assert!(!lifecycle_inner.contains("ProductionDatabaseMigrationCrossProcessExclusivity"));
+        assert!(production.contains("MigrationPreparationState::CustodyPrepared"));
+        assert!(production.contains("control.recv()"));
+        assert!(production.contains("drop(exclusivity)"));
+
+        for forbidden in [
+            "run_migration_recovery_key_custody_native_ceremony",
+            "get_webview_window(\"main\")",
+            "run_on_main_thread",
+            "DialogBoxIndirectParamW",
+            ".hwnd()",
+            "#[tauri::command]",
+            "publish",
+            "CREATE TABLE",
+            "user_version",
+        ] {
+            assert!(
+                !worker.contains(forbidden) && !orchestration.contains(forbidden),
+                "forbidden orchestration surface: {forbidden}"
             );
         }
     }

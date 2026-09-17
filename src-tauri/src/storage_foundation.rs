@@ -42,6 +42,8 @@ pub(crate) const DATABASE_KEY_DIRECTORY_NAME: &str = "database-key";
 pub(crate) const ACTIVE_DATABASE_KEY_FILENAME: &str = "active-database-key.dpapi";
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const STAGED_DATABASE_KEY_FILENAME: &str = "active-database-key.dpapi.stage";
+pub(crate) const PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME: &str =
+    "production-database-migration-backup.stage";
 
 const DEVELOPMENT_STORAGE_IDENTITY: &str = "io.github.cltubigon.churchapp.development";
 const AUTOMATED_TEST_STORAGE_IDENTITY: &str = "church-app-automated-tests";
@@ -157,6 +159,7 @@ redacted_persistence_path!(StagedAuthenticatedFreshnessAnchorPath);
 redacted_persistence_path!(DatabaseKeyDirectoryPath);
 redacted_persistence_path!(ActiveDatabaseKeyPath);
 redacted_persistence_path!(StagedDatabaseKeyPath);
+redacted_persistence_path!(ProductionDatabaseMigrationBackupStagePath);
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Eq, PartialEq)]
@@ -283,6 +286,15 @@ pub(crate) fn resolve_database_key_persistence_paths(
     Ok(database_key_persistence_paths(&app_local_data_directory))
 }
 
+pub(crate) fn resolve_production_database_migration_backup_stage_path(
+    app: &tauri::AppHandle,
+) -> Result<ProductionDatabaseMigrationBackupStagePath, tauri::Error> {
+    let app_local_data_directory = app.path().app_local_data_dir()?;
+    Ok(production_database_migration_backup_stage_path(
+        &app_local_data_directory,
+    ))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidTestStorageIdentifier;
 
@@ -373,6 +385,14 @@ pub(crate) fn database_key_persistence_paths(
             database_key_directory.join(STAGED_DATABASE_KEY_FILENAME),
         ),
     }
+}
+
+pub(crate) fn production_database_migration_backup_stage_path(
+    app_local_data_root: &Path,
+) -> ProductionDatabaseMigrationBackupStagePath {
+    ProductionDatabaseMigrationBackupStagePath(
+        app_local_data_root.join(PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME),
+    )
 }
 
 fn restore_staging_database_path(app_local_data_directory: PathBuf) -> RestoreStagingDatabasePath {
@@ -1026,6 +1046,29 @@ mod tests {
                 .as_path()
                 .ends_with(Path::new(RESTORE_STAGING_DIRECTORY).join(PRODUCTION_DATABASE_FILENAME))
         );
+    }
+
+    #[test]
+    fn migration_backup_stage_path_is_one_fixed_stage_only_leaf_under_canonical_root() {
+        let root = Path::new(r"X:\synthetic-local-app-data\church-app");
+        let stage = production_database_migration_backup_stage_path(root);
+
+        assert_eq!(
+            stage.as_path(),
+            root.join(PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME)
+        );
+        assert_eq!(stage.as_path().parent(), Some(root));
+        assert_eq!(
+            PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME,
+            "production-database-migration-backup.stage"
+        );
+        assert_eq!(
+            format!("{stage:?}"),
+            "ProductionDatabaseMigrationBackupStagePath([REDACTED])"
+        );
+        for excluded in ["publish", "restore", "final", "backup-set"] {
+            assert!(!PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME.contains(excluded));
+        }
     }
 
     #[test]

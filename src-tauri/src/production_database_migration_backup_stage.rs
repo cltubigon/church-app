@@ -15,7 +15,7 @@ use std::{
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawHandle,
     },
-    path::{Path, PathBuf},
+    path::Path,
     time::Duration,
 };
 
@@ -46,7 +46,11 @@ use crate::{
         validate_production_database_full_integrity_on_borrowed_connection,
     },
     sqlcipher_database_key_application::apply_generation_bound_database_key_to_handle,
-    storage_foundation::DatabaseKeyPersistencePaths,
+    storage_foundation::{
+        DatabaseKeyPersistencePaths, PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME,
+        ProductionDatabaseMigrationBackupStagePath, resolve_database_key_persistence_paths,
+        resolve_production_database_migration_backup_stage_path,
+    },
 };
 
 use super::{
@@ -60,13 +64,17 @@ mod recovery_envelope;
 #[allow(unused_imports)]
 pub(crate) use recovery_envelope::{
     PreparedUndisclosedMigrationRecoveryKeyCustody,
+    ProductionDatabaseMigrationRecoveryEnvelopeFailure,
     ProductionDatabaseMigrationRecoveryEnvelopeOutcome,
+    ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome,
+    ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseFailure,
+    ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome,
     RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup,
     prepare_migration_recovery_key_custody, verify_production_database_migration_recovery_envelope,
 };
 
-const STAGE_LEAF_NAME: &str = "production-database-migration-backup.stage";
+const STAGE_LEAF_NAME: &str = PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME;
 const MAIN_DATABASE_NAME: &str = "main";
 const BACKUP_PAGES_PER_STEP: i32 = 16;
 const PLAINTEXT_SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -85,8 +93,6 @@ struct FileIdentity {
     volume_serial: u64,
     file_id: [u8; 16],
 }
-
-struct ProductionDatabaseMigrationBackupStagePath(PathBuf);
 
 /// Opaque proof that one application-owned stage parent was accepted and the
 /// fixed stage leaf was absent. It carries no general path mutation API.
@@ -117,6 +123,18 @@ pub(crate) struct VerifiedEncryptedProductionDatabaseMigrationBackupStage {
     source: FullIntegrityValidatedProductionDatabaseMigrationSource,
     backup_stage_proof: VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
     context: ProductionDatabaseMigrationBackupContext,
+}
+
+pub(crate) struct UndisclosedMigrationRecoveryKeyCustodyShutdown {
+    backup_stage_proof: VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
+    verified_envelope: recovery_envelope::IndependentlyVerifiedMigrationRecoveryEnvelopeV1,
+    source_close: SourceCloseState,
+}
+
+#[must_use = "a pre-exposure shutdown source-close retry outcome must be handled"]
+pub(crate) enum UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome {
+    Closed(UndisclosedMigrationRecoveryKeyCustodyShutdown),
+    Failed(UndisclosedMigrationRecoveryKeyCustodyShutdown),
 }
 
 enum RetainedProductionDatabaseMigrationBackupStage {
@@ -218,6 +236,10 @@ redacted_debug!(
     "VerifiedEncryptedProductionDatabaseMigrationBackupStage"
 );
 redacted_debug!(
+    UndisclosedMigrationRecoveryKeyCustodyShutdown,
+    "UndisclosedMigrationRecoveryKeyCustodyShutdown"
+);
+redacted_debug!(
     ProductionDatabaseMigrationBackupStageFailure,
     "ProductionDatabaseMigrationBackupStageFailure"
 );
@@ -278,13 +300,13 @@ impl PreparedProductionDatabaseMigrationBackupStage {
         if !root.is_absolute() || !root.starts_with(&temporary) || root == temporary {
             return Err(());
         }
-        prepare_stage_path(ProductionDatabaseMigrationBackupStagePath(
-            root.join(STAGE_LEAF_NAME),
-        ))
+        prepare_stage_path(
+            crate::storage_foundation::production_database_migration_backup_stage_path(root),
+        )
     }
 
     fn path(&self) -> &Path {
-        &self.path.0
+        self.path.as_path()
     }
 
     fn parent_is_unchanged(&self) -> bool {
@@ -304,6 +326,24 @@ impl ProductionDatabaseMigrationBackupContext {
             database_key_paths: crate::storage_foundation::database_key_persistence_paths(root),
         }
     }
+}
+
+pub(crate) fn prepare_production_database_migration_backup_stage(
+    app: &tauri::AppHandle,
+) -> Result<
+    (
+        PreparedProductionDatabaseMigrationBackupStage,
+        ProductionDatabaseMigrationBackupContext,
+    ),
+    (),
+> {
+    let path = resolve_production_database_migration_backup_stage_path(app).map_err(|_| ())?;
+    let database_key_paths = resolve_database_key_persistence_paths(app).map_err(|_| ())?;
+    let prepared = prepare_stage_path(path)?;
+    Ok((
+        prepared,
+        ProductionDatabaseMigrationBackupContext { database_key_paths },
+    ))
 }
 
 impl VerifiedEncryptedProductionDatabaseMigrationBackupStage {
@@ -336,6 +376,10 @@ impl VerifiedEncryptedProductionDatabaseMigrationBackupStage {
 }
 
 impl ProductionDatabaseMigrationBackupStageFailure {
+    pub(crate) fn source_close_retry_required(&self) -> bool {
+        matches!(self.source_close, SourceCloseState::RetryRequired(_))
+    }
+
     pub(crate) fn retry_source_close(
         self,
     ) -> ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome<Self> {
@@ -384,6 +428,29 @@ impl ProductionDatabaseMigrationBackupStageFailure {
                 let _ = std::mem::size_of_val(failure);
                 true
             }
+        }
+    }
+}
+
+impl UndisclosedMigrationRecoveryKeyCustodyShutdown {
+    pub(crate) fn retry_source_close(
+        self,
+    ) -> UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome {
+        let Self {
+            backup_stage_proof,
+            verified_envelope,
+            source_close,
+        } = self;
+        let (source_close, closed) = retry_source_close_state(source_close);
+        let shutdown = Self {
+            backup_stage_proof,
+            verified_envelope,
+            source_close,
+        };
+        if closed {
+            UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(shutdown)
+        } else {
+            UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(shutdown)
         }
     }
 }
@@ -513,8 +580,9 @@ impl ProductionDatabaseMigrationBackupStageVerifierCloseFailure {
 fn prepare_stage_path(
     path: ProductionDatabaseMigrationBackupStagePath,
 ) -> Result<PreparedProductionDatabaseMigrationBackupStage, ()> {
-    let parent_path = path.0.parent().ok_or(())?;
-    if path.0.file_name().and_then(|name| name.to_str()) != Some(STAGE_LEAF_NAME) || path.0.exists()
+    let parent_path = path.as_path().parent().ok_or(())?;
+    if path.as_path().file_name().and_then(|name| name.to_str()) != Some(STAGE_LEAF_NAME)
+        || path.as_path().exists()
     {
         return Err(());
     }
@@ -1049,6 +1117,7 @@ mod tests {
     use std::{
         fs,
         mem::needs_drop,
+        path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
 

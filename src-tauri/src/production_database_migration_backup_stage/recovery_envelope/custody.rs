@@ -171,6 +171,32 @@ impl PreparedUndisclosedMigrationRecoveryKeyCustody {
         }
     }
 
+    pub(crate) fn abort_before_exposure_for_shutdown(
+        self,
+    ) -> super::super::UndisclosedMigrationRecoveryKeyCustodyShutdown {
+        let Self { backup, encoded } = self;
+        let VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup {
+            encrypted_stage,
+            verified_envelope,
+            recovery_key_material,
+        } = backup;
+        drop(encoded);
+        drop(recovery_key_material);
+        let super::super::VerifiedEncryptedProductionDatabaseMigrationBackupStage {
+            authorization,
+            source,
+            backup_stage_proof,
+            context,
+        } = encrypted_stage;
+        destroy_migration_authorization(authorization);
+        drop(context);
+        super::super::UndisclosedMigrationRecoveryKeyCustodyShutdown {
+            backup_stage_proof,
+            verified_envelope,
+            source_close: close_source(source),
+        }
+    }
+
     #[cfg(test)]
     fn encoded_for_test(&self) -> &[u8; 196] {
         self.encoded.bytes_for_test()
@@ -355,6 +381,7 @@ mod tests {
     use super::super::super::{
         PreparedProductionDatabaseMigrationBackupStage, ProductionDatabaseMigrationBackupContext,
         ProductionDatabaseMigrationBackupStageOutcome,
+        UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome,
         stage_encrypted_production_database_migration_backup,
     };
     use super::super::{
@@ -573,6 +600,55 @@ mod tests {
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
         drop(source_root);
+    }
+
+    #[test]
+    fn pre_exposure_shutdown_is_terminal_secret_free_and_close_only_retryable() {
+        let (source_root, _stage_root, backup) = verified_backup();
+        let prepared = prepare_migration_recovery_key_custody(backup);
+        let shutdown = with_production_database_close_failure_injected(|| {
+            prepared.abort_before_exposure_for_shutdown()
+        });
+        assert_eq!(
+            format!("{shutdown:?}"),
+            "UndisclosedMigrationRecoveryKeyCustodyShutdown([REDACTED])"
+        );
+
+        let UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(shutdown) =
+            with_production_database_close_failure_injected(|| shutdown.retry_source_close())
+        else {
+            panic!("repeated injected close failure must preserve exact shutdown ownership");
+        };
+        let UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(shutdown) =
+            shutdown.retry_source_close()
+        else {
+            panic!("close-only retry must eventually resolve the original shutdown");
+        };
+        drop(shutdown);
+        drop(source_root);
+
+        let production = production_region(include_str!("custody.rs"));
+        let transition = declaration_region(
+            production,
+            "pub(crate) fn abort_before_exposure_for_shutdown",
+            "#[cfg(test)]\n    fn encoded_for_test",
+        );
+        assert!(transition.contains("drop(encoded)"));
+        assert!(transition.contains("drop(recovery_key_material)"));
+        assert!(transition.contains("destroy_migration_authorization(authorization)"));
+        assert!(transition.contains("close_source(source)"));
+        for forbidden in [
+            "disclose(",
+            "run_migration_recovery_key_custody_native_ceremony",
+            "retry(self) -> PreparedUndisclosedMigrationRecoveryKeyCustody",
+            "publish",
+            "execute(",
+        ] {
+            assert!(
+                !transition.contains(forbidden),
+                "forbidden shutdown work: {forbidden}"
+            );
+        }
     }
 
     #[test]

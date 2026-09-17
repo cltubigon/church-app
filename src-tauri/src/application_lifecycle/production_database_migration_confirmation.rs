@@ -2,6 +2,12 @@
 
 use std::fmt;
 
+pub(super) use crate::production_database_migration_exclusivity::{
+    ProductionDatabaseMigrationCrossProcessExclusivity,
+    ProductionDatabaseMigrationCrossProcessExclusivityOutcome,
+    acquire_production_database_migration_cross_process_exclusivity,
+};
+
 use crate::production_database_connection_handoff::{
     DatabaseEvidenceCorrespondenceValidationCloseFailure,
     FullIntegrityValidatedProductionDatabaseMigrationSource, FullIntegrityValidationCloseFailure,
@@ -22,7 +28,21 @@ use crate::production_database_connection_handoff::{
 };
 
 #[path = "../production_database_migration_backup_stage.rs"]
-mod production_database_migration_backup_stage;
+pub(super) mod production_database_migration_backup_stage;
+
+use production_database_migration_backup_stage::{
+    PreparedUndisclosedMigrationRecoveryKeyCustody, ProductionDatabaseMigrationBackupStageFailure,
+    ProductionDatabaseMigrationBackupStageOutcome,
+    ProductionDatabaseMigrationBackupStageVerifierCloseFailure,
+    ProductionDatabaseMigrationBackupStageWriterCloseFailure,
+    ProductionDatabaseMigrationRecoveryEnvelopeFailure,
+    ProductionDatabaseMigrationRecoveryEnvelopeOutcome,
+    ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome,
+    ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseFailure,
+    prepare_migration_recovery_key_custody, prepare_production_database_migration_backup_stage,
+    stage_encrypted_production_database_migration_backup,
+    verify_production_database_migration_recovery_envelope,
+};
 
 pub(super) struct ProductionDatabaseMigrationConfirmation {
     state: ProductionDatabaseMigrationConfirmationState,
@@ -118,7 +138,7 @@ pub(crate) struct ProductionDatabaseMigrationAuthorization {
     _private: (),
 }
 
-struct AuthorizedProductionDatabaseMigrationHandoff {
+pub(super) struct AuthorizedProductionDatabaseMigrationHandoff {
     authorization: ProductionDatabaseMigrationAuthorization,
     source: RevalidatedProductionDatabaseMigrationOpportunity,
 }
@@ -130,14 +150,14 @@ pub(crate) struct FullIntegrityValidatedProductionDatabaseMigrationHandoff {
 
 #[must_use = "the migration full-integrity outcome must be handled"]
 #[allow(clippy::large_enum_variant)]
-enum ProductionDatabaseMigrationFullIntegrityOutcome {
+pub(super) enum ProductionDatabaseMigrationFullIntegrityOutcome {
     Validated(FullIntegrityValidatedProductionDatabaseMigrationHandoff),
     Failed(FullIntegrityValidationError),
     CloseFailed(FullIntegrityValidationCloseFailure),
 }
 
 impl AuthorizedProductionDatabaseMigrationHandoff {
-    fn validate_full_integrity(self) -> ProductionDatabaseMigrationFullIntegrityOutcome {
+    pub(super) fn validate_full_integrity(self) -> ProductionDatabaseMigrationFullIntegrityOutcome {
         self.validate_full_integrity_using(
             prepare_production_database_migration_full_integrity,
             ProductionDatabaseMigrationFullIntegrityFailedSource::close,
@@ -181,8 +201,7 @@ impl AuthorizedProductionDatabaseMigrationHandoff {
         }
     }
 
-    #[cfg(test)]
-    fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
+    pub(super) fn close(self) -> ProductionDatabaseConnectionCloseOutcome {
         let Self {
             authorization,
             source,
@@ -190,6 +209,111 @@ impl AuthorizedProductionDatabaseMigrationHandoff {
         destroy_migration_authorization(authorization);
         source.close()
     }
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(super) enum ProductionDatabaseMigrationPreparationFailure {
+    FullIntegrityClose(FullIntegrityValidationCloseFailure),
+    SourceClose(ProductionDatabaseConnectionCloseFailure),
+    BackupStage(ProductionDatabaseMigrationBackupStageFailure),
+    BackupStageWriterClose(ProductionDatabaseMigrationBackupStageWriterCloseFailure),
+    BackupStageVerifierClose(ProductionDatabaseMigrationBackupStageVerifierCloseFailure),
+    RecoveryEnvelope(ProductionDatabaseMigrationRecoveryEnvelopeFailure),
+    RecoveryEnvelopeVerifierClose(ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseFailure),
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(super) enum ProductionDatabaseMigrationPreparationOutcome {
+    Prepared(PreparedUndisclosedMigrationRecoveryKeyCustody),
+    Failed,
+    CloseRetryRequired(ProductionDatabaseMigrationPreparationFailure),
+}
+
+pub(super) fn prepare_authorized_production_database_migration(
+    app: &tauri::AppHandle,
+    authorized: AuthorizedProductionDatabaseMigrationHandoff,
+) -> ProductionDatabaseMigrationPreparationOutcome {
+    let validated = match authorized.validate_full_integrity() {
+        ProductionDatabaseMigrationFullIntegrityOutcome::Validated(validated) => validated,
+        ProductionDatabaseMigrationFullIntegrityOutcome::Failed(_) => {
+            return ProductionDatabaseMigrationPreparationOutcome::Failed;
+        }
+        ProductionDatabaseMigrationFullIntegrityOutcome::CloseFailed(failure) => {
+            return ProductionDatabaseMigrationPreparationOutcome::CloseRetryRequired(
+                ProductionDatabaseMigrationPreparationFailure::FullIntegrityClose(failure),
+            );
+        }
+    };
+    let (prepared_stage, context) = match prepare_production_database_migration_backup_stage(app) {
+        Ok(parts) => parts,
+        Err(()) => {
+            return match validated.close() {
+                ProductionDatabaseConnectionCloseOutcome::Closed => {
+                    ProductionDatabaseMigrationPreparationOutcome::Failed
+                }
+                ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                    ProductionDatabaseMigrationPreparationOutcome::CloseRetryRequired(
+                        ProductionDatabaseMigrationPreparationFailure::SourceClose(failure),
+                    )
+                }
+            };
+        }
+    };
+    let encrypted_stage = match stage_encrypted_production_database_migration_backup(
+        validated,
+        prepared_stage,
+        context,
+    ) {
+        ProductionDatabaseMigrationBackupStageOutcome::Verified(stage) => stage,
+        ProductionDatabaseMigrationBackupStageOutcome::Failed(failure) => {
+            return if failure.source_close_retry_required() {
+                ProductionDatabaseMigrationPreparationOutcome::CloseRetryRequired(
+                    ProductionDatabaseMigrationPreparationFailure::BackupStage(failure),
+                )
+            } else {
+                drop(failure);
+                ProductionDatabaseMigrationPreparationOutcome::Failed
+            };
+        }
+        ProductionDatabaseMigrationBackupStageOutcome::WriterCloseFailed(failure) => {
+            return ProductionDatabaseMigrationPreparationOutcome::CloseRetryRequired(
+                ProductionDatabaseMigrationPreparationFailure::BackupStageWriterClose(failure),
+            );
+        }
+        ProductionDatabaseMigrationBackupStageOutcome::VerifierCloseFailed(failure) => {
+            return ProductionDatabaseMigrationPreparationOutcome::CloseRetryRequired(
+                ProductionDatabaseMigrationPreparationFailure::BackupStageVerifierClose(failure),
+            );
+        }
+    };
+    let enveloped = match verify_production_database_migration_recovery_envelope(encrypted_stage) {
+        ProductionDatabaseMigrationRecoveryEnvelopeOutcome::Verified(enveloped) => enveloped,
+        ProductionDatabaseMigrationRecoveryEnvelopeOutcome::Failed(failure) => {
+            return match failure.retry_source_close() {
+                ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome::Closed(
+                    failure,
+                ) => {
+                    drop(failure);
+                    ProductionDatabaseMigrationPreparationOutcome::Failed
+                }
+                ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome::Failed(
+                    failure,
+                ) => ProductionDatabaseMigrationPreparationOutcome::CloseRetryRequired(
+                    ProductionDatabaseMigrationPreparationFailure::RecoveryEnvelope(failure),
+                ),
+            };
+        }
+        ProductionDatabaseMigrationRecoveryEnvelopeOutcome::VerifierCloseFailed(failure) => {
+            return ProductionDatabaseMigrationPreparationOutcome::CloseRetryRequired(
+                ProductionDatabaseMigrationPreparationFailure::RecoveryEnvelopeVerifierClose(
+                    failure,
+                ),
+            );
+        }
+    };
+    ProductionDatabaseMigrationPreparationOutcome::Prepared(prepare_migration_recovery_key_custody(
+        enveloped,
+    ))
 }
 
 impl FullIntegrityValidatedProductionDatabaseMigrationHandoff {
@@ -249,7 +373,7 @@ enum ProductionDatabaseMigrationCloseRetryTransition {
 #[derive(Debug)]
 pub(super) struct ProductionDatabaseMigrationNotPending;
 #[derive(Debug)]
-struct ProductionDatabaseMigrationNotAuthorized;
+pub(super) struct ProductionDatabaseMigrationNotAuthorized;
 
 impl fmt::Debug for ProductionDatabaseMigrationPendingContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -327,6 +451,13 @@ impl ProductionDatabaseMigrationConfirmation {
         matches!(
             self.state,
             ProductionDatabaseMigrationConfirmationState::NotOffered
+        )
+    }
+
+    pub(super) fn is_authorized(&self) -> bool {
+        matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::Authorized(_)
         )
     }
 
@@ -611,7 +742,7 @@ impl ProductionDatabaseMigrationConfirmation {
     }
 
     #[allow(dead_code)]
-    fn consume_authorization(
+    pub(super) fn consume_authorization(
         &mut self,
     ) -> Result<
         AuthorizedProductionDatabaseMigrationHandoff,
