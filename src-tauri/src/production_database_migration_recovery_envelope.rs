@@ -24,6 +24,8 @@ use crate::{
 
 #[path = "production_database_migration_recovery_envelope/custody.rs"]
 mod custody;
+#[path = "production_database_migration_recovery_envelope/recovery_set_manifest.rs"]
+mod recovery_set_manifest;
 
 pub(crate) use custody::{
     EncodedMigrationRecoveryKeyCustodyV1, encode_migration_recovery_key_custody_v1,
