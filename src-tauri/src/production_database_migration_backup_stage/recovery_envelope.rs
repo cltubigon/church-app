@@ -42,9 +42,12 @@ mod custody;
 
 #[allow(unused_imports)]
 pub(crate) use custody::{
+    MigrationRecoveryKeyCustodySourceCloseRetryOutcome, NativeMigrationRecoveryKeyCustodyOutcome,
+    PossiblyExposedMigrationRecoveryKeyCustodyFailure,
     PreparedUndisclosedMigrationRecoveryKeyCustody,
     RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
-    prepare_migration_recovery_key_custody,
+    UndisclosedMigrationRecoveryKeyCustodyInterruption, prepare_migration_recovery_key_custody,
+    run_migration_recovery_key_custody_native_ceremony,
 };
 
 const HASH_BUFFER_LENGTH: usize = 64 * 1024;

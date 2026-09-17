@@ -4,6 +4,11 @@
 #[path = "custody/native_windows.rs"]
 mod native_windows;
 
+#[cfg(windows)]
+pub(crate) use native_windows::{
+    NativeMigrationRecoveryKeyCustodyOutcome, run_migration_recovery_key_custody_native_ceremony,
+};
+
 use std::fmt;
 
 use crate::production_database_migration_recovery_envelope::{
@@ -357,6 +362,31 @@ impl PossiblyExposedMigrationRecoveryKeyCustodyFailure {
     }
 }
 
+impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn abort_for_shutdown(
+        self,
+    ) -> super::super::UndisclosedMigrationRecoveryKeyCustodyShutdown {
+        let Self {
+            encrypted_stage,
+            verified_envelope,
+            custody: _custody,
+        } = self;
+        let super::super::VerifiedEncryptedProductionDatabaseMigrationBackupStage {
+            authorization,
+            source,
+            backup_stage_proof,
+            context,
+        } = encrypted_stage;
+        destroy_migration_authorization(authorization);
+        drop(context);
+        super::super::UndisclosedMigrationRecoveryKeyCustodyShutdown {
+            backup_stage_proof,
+            verified_envelope,
+            source_close: close_source(source),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -480,6 +510,33 @@ mod tests {
             encrypted_stage.close(),
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
+        drop(source_root);
+    }
+
+    #[test]
+    fn verified_owner_shutdown_consumes_authority_and_retries_only_source_close() {
+        let (source_root, _stage_root, backup) = verified_backup();
+        let prepared = prepare_migration_recovery_key_custody(backup);
+        let readback = *prepared.encoded_for_test();
+        let verified = prepared
+            .disclose()
+            .verify_first_copy(&readback)
+            .unwrap()
+            .verify_second_copy(&readback)
+            .unwrap();
+        let shutdown =
+            with_production_database_close_failure_injected(|| verified.abort_for_shutdown());
+        assert!(matches!(
+            shutdown.source_close,
+            SourceCloseState::RetryRequired(_)
+        ));
+        let UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(shutdown) =
+            shutdown.retry_source_close()
+        else {
+            panic!("verified shutdown must retry only the retained source close");
+        };
+        assert!(matches!(shutdown.source_close, SourceCloseState::Closed));
+        drop(shutdown);
         drop(source_root);
     }
 
@@ -1004,7 +1061,10 @@ mod tests {
         let retry = source
             .split_once("impl PossiblyExposedMigrationRecoveryKeyCustodyFailure")
             .unwrap()
-            .1;
+            .1
+            .split_once("impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup")
+            .unwrap()
+            .0;
         assert!(retry.contains("retry_source_close_state(source_close)"));
         for excluded in [
             "validate_migration_recovery_key_custody_v1",

@@ -63,6 +63,8 @@ mod recovery_envelope;
 
 #[allow(unused_imports)]
 pub(crate) use recovery_envelope::{
+    MigrationRecoveryKeyCustodySourceCloseRetryOutcome, NativeMigrationRecoveryKeyCustodyOutcome,
+    PossiblyExposedMigrationRecoveryKeyCustodyFailure,
     PreparedUndisclosedMigrationRecoveryKeyCustody,
     ProductionDatabaseMigrationRecoveryEnvelopeFailure,
     ProductionDatabaseMigrationRecoveryEnvelopeOutcome,
@@ -70,8 +72,10 @@ pub(crate) use recovery_envelope::{
     ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseFailure,
     ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome,
     RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    UndisclosedMigrationRecoveryKeyCustodyInterruption,
     VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup,
-    prepare_migration_recovery_key_custody, verify_production_database_migration_recovery_envelope,
+    prepare_migration_recovery_key_custody, run_migration_recovery_key_custody_native_ceremony,
+    verify_production_database_migration_recovery_envelope,
 };
 
 const STAGE_LEAF_NAME: &str = PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME;

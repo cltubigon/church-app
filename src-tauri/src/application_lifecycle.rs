@@ -5,6 +5,7 @@
 
 use std::{
     fmt,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
     thread,
@@ -29,14 +30,19 @@ use production_database_migration_confirmation::{
 
 #[cfg(windows)]
 use production_database_migration_confirmation::production_database_migration_backup_stage::{
+    MigrationRecoveryKeyCustodySourceCloseRetryOutcome, NativeMigrationRecoveryKeyCustodyOutcome,
+    PossiblyExposedMigrationRecoveryKeyCustodyFailure,
     PreparedUndisclosedMigrationRecoveryKeyCustody,
     ProductionDatabaseMigrationBackupStageSourceCloseRetryOutcome,
     ProductionDatabaseMigrationBackupStageVerifierCloseRetryOutcome,
     ProductionDatabaseMigrationBackupStageWriterCloseRetryOutcome,
     ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome,
     ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome,
+    RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    UndisclosedMigrationRecoveryKeyCustodyInterruption,
     UndisclosedMigrationRecoveryKeyCustodyShutdown,
     UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome,
+    run_migration_recovery_key_custody_native_ceremony,
 };
 
 #[cfg(windows)]
@@ -343,12 +349,111 @@ enum MigrationPreparationState {
     Inactive,
     Preparing,
     CustodyPrepared,
+    CustodyDispatchPending,
+    CustodyRunning,
+    CustodyInterruptedBeforeExposure,
+    CustodyUnavailableBeforeExposure,
+    CustodyVerifiedAwaitingPublication,
+    CustodyTerminalFailure,
+    CustodySourceCloseRetryRequired,
     CloseRetryRequired,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 enum MigrationWorkerCommand {
     Shutdown,
+    CustodyCompleted(NativeMigrationRecoveryKeyCustodyOutcome),
+}
+
+enum CustodyDispatchEscrow<T> {
+    Pending(T),
+    TakenByMainThread,
+    CancelledBeforeExecution,
+}
+
+enum CustodyDispatchArm<T> {
+    Armed(Arc<Mutex<CustodyDispatchEscrow<T>>>),
+    Shutdown(T),
+}
+
+fn cancel_armed_custody_dispatch<T>(dispatch: &Mutex<CustodyDispatchEscrow<T>>) -> Option<T> {
+    let mut escrow = dispatch
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match std::mem::replace(
+        &mut *escrow,
+        CustodyDispatchEscrow::CancelledBeforeExecution,
+    ) {
+        CustodyDispatchEscrow::Pending(prepared) => Some(prepared),
+        CustodyDispatchEscrow::TakenByMainThread => {
+            *escrow = CustodyDispatchEscrow::TakenByMainThread;
+            None
+        }
+        CustodyDispatchEscrow::CancelledBeforeExecution => {
+            *escrow = CustodyDispatchEscrow::CancelledBeforeExecution;
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreCustodyDispatchControl {
+    NoCommand,
+    Shutdown,
+    ImpossibleCustodyCompleted,
+    Disconnected,
+}
+
+enum PreparedCustodyDispatchDecision<T> {
+    Dispatch(T),
+    Shutdown(T),
+    FailStop(T),
+}
+
+fn decide_prepared_custody_dispatch<T>(
+    prepared: T,
+    control: PreCustodyDispatchControl,
+) -> PreparedCustodyDispatchDecision<T> {
+    match control {
+        PreCustodyDispatchControl::NoCommand => PreparedCustodyDispatchDecision::Dispatch(prepared),
+        PreCustodyDispatchControl::Shutdown => PreparedCustodyDispatchDecision::Shutdown(prepared),
+        PreCustodyDispatchControl::ImpossibleCustodyCompleted
+        | PreCustodyDispatchControl::Disconnected => {
+            PreparedCustodyDispatchDecision::FailStop(prepared)
+        }
+    }
+}
+
+fn observe_pre_custody_dispatch_control(
+    control: &std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+) -> PreCustodyDispatchControl {
+    match control.try_recv() {
+        Ok(MigrationWorkerCommand::Shutdown) => PreCustodyDispatchControl::Shutdown,
+        Ok(MigrationWorkerCommand::CustodyCompleted(_)) => {
+            PreCustodyDispatchControl::ImpossibleCustodyCompleted
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => PreCustodyDispatchControl::NoCommand,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => PreCustodyDispatchControl::Disconnected,
+    }
+}
+
+fn run_main_thread_owned_custody<Owner, Handle, Outcome, Resolve, Run, Unavailable>(
+    owner: Owner,
+    resolve_parent: Resolve,
+    run_native: Run,
+    unavailable: Unavailable,
+) -> Outcome
+where
+    Resolve: FnOnce() -> Option<Handle>,
+    Run: FnOnce(Owner, Handle) -> Outcome,
+    Unavailable: FnOnce(Owner) -> Outcome,
+{
+    let parent = catch_unwind(AssertUnwindSafe(resolve_parent));
+    match parent {
+        Ok(Some(parent)) => catch_unwind(AssertUnwindSafe(|| run_native(owner, parent)))
+            .unwrap_or_else(|_| std::process::abort()),
+        Ok(None) | Err(_) => unavailable(owner),
+    }
 }
 
 #[cfg(windows)]
@@ -359,6 +464,10 @@ enum MigrationWorkerParkedOwnership {
     ),
     PreparationClose(ProductionDatabaseMigrationPreparationFailure),
     Prepared(PreparedUndisclosedMigrationRecoveryKeyCustody),
+    Interrupted(UndisclosedMigrationRecoveryKeyCustodyInterruption),
+    Unavailable(PreparedUndisclosedMigrationRecoveryKeyCustody),
+    Verified(RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup),
+    TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
 }
 
@@ -516,8 +625,9 @@ struct LifecycleInner {
     close_worker: Option<tauri::async_runtime::JoinHandle<()>>,
     setup_worker: Option<thread::JoinHandle<()>>,
     migration_worker: Option<thread::JoinHandle<()>>,
-    migration_control: Option<std::sync::mpsc::SyncSender<MigrationWorkerCommand>>,
+    migration_control: Option<std::sync::mpsc::Sender<MigrationWorkerCommand>>,
     migration_preparation: MigrationPreparationState,
+    migration_shutdown_requested: bool,
     startup_work_resolved: bool,
     close_work_resolved: bool,
     setup_work_resolved: bool,
@@ -527,6 +637,7 @@ struct LifecycleInner {
 
 pub(crate) struct ApplicationLifecycle {
     inner: Mutex<LifecycleInner>,
+    custody_dispatch_boundary: Mutex<()>,
 }
 
 impl ApplicationLifecycle {
@@ -542,12 +653,14 @@ impl ApplicationLifecycle {
                 migration_worker: None,
                 migration_control: None,
                 migration_preparation: MigrationPreparationState::Inactive,
+                migration_shutdown_requested: false,
                 startup_work_resolved: false,
                 close_work_resolved: true,
                 setup_work_resolved: true,
                 migration_work_resolved: true,
                 setup_shutdown_app: None,
             }),
+            custody_dispatch_boundary: Mutex::new(()),
         })
     }
 
@@ -555,6 +668,39 @@ impl ApplicationLifecycle {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn record_migration_shutdown_intent(&self) {
+        let _boundary = self
+            .custody_dispatch_boundary
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.lock().migration_shutdown_requested = true;
+    }
+
+    fn take_armed_custody_dispatch_for_main<T>(
+        &self,
+        dispatch: &Mutex<CustodyDispatchEscrow<T>>,
+    ) -> Option<T> {
+        let _boundary = self
+            .custody_dispatch_boundary
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.lock().migration_shutdown_requested {
+            return None;
+        }
+
+        let mut escrow = dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match std::mem::replace(&mut *escrow, CustodyDispatchEscrow::TakenByMainThread) {
+            CustodyDispatchEscrow::Pending(prepared) => Some(prepared),
+            CustodyDispatchEscrow::CancelledBeforeExecution => {
+                *escrow = CustodyDispatchEscrow::CancelledBeforeExecution;
+                None
+            }
+            CustodyDispatchEscrow::TakenByMainThread => std::process::abort(),
+        }
     }
 
     pub(crate) fn status(&self) -> StartupStatus {
@@ -862,7 +1008,7 @@ impl ApplicationLifecycle {
         Spawn: FnOnce(MigrationThreadTask) -> std::io::Result<thread::JoinHandle<()>>,
     {
         let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
-        let (control_sender, control_receiver) = std::sync::mpsc::sync_channel(1);
+        let (control_sender, control_receiver) = std::sync::mpsc::channel();
         let lifecycle = Arc::clone(self);
         let mut inner = self.lock();
         if inner.migration_worker.is_some() || !inner.migration_work_resolved {
@@ -876,6 +1022,7 @@ impl ApplicationLifecycle {
         let escrow = Arc::new(Mutex::new(Some(work)));
         let worker_escrow = Arc::clone(&escrow);
         let worker_app = app.clone();
+        let worker_control_sender = control_sender.clone();
         let task: MigrationThreadTask = Box::new(move || {
             if start_receiver.recv().is_err() {
                 return;
@@ -887,7 +1034,11 @@ impl ApplicationLifecycle {
                 .expect("migration work escrow must contain exactly one owner");
             let outcome = work.revalidate();
             if lifecycle.complete_migration_revalidation(outcome, worker_app.as_ref()) {
-                lifecycle.run_migration_preparation_worker(worker_app, control_receiver);
+                lifecycle.run_migration_preparation_worker(
+                    worker_app,
+                    worker_control_sender,
+                    control_receiver,
+                );
             }
         });
         let worker = match spawn(task) {
@@ -970,6 +1121,7 @@ impl ApplicationLifecycle {
     fn run_migration_preparation_worker(
         self: &Arc<Self>,
         app: Option<AppHandle>,
+        control_sender: std::sync::mpsc::Sender<MigrationWorkerCommand>,
         control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
     ) {
         let Some(app) = app else {
@@ -1058,13 +1210,35 @@ impl ApplicationLifecycle {
 
         match prepare_authorized_production_database_migration(&app, authorized) {
             ProductionDatabaseMigrationPreparationOutcome::Prepared(prepared) => {
-                self.lock().migration_preparation = MigrationPreparationState::CustodyPrepared;
-                self.park_migration_worker(
-                    MigrationWorkerParkedOwnership::Prepared(prepared),
-                    control,
-                    exclusivity,
-                    &app,
-                );
+                let pending_control = observe_pre_custody_dispatch_control(&control);
+                match decide_prepared_custody_dispatch(prepared, pending_control) {
+                    PreparedCustodyDispatchDecision::Dispatch(prepared) => {
+                        self.lock().migration_preparation =
+                            MigrationPreparationState::CustodyPrepared;
+                        self.run_custody_dispatch(
+                            prepared,
+                            control_sender,
+                            control,
+                            exclusivity,
+                            &app,
+                        );
+                    }
+                    PreparedCustodyDispatchDecision::Shutdown(prepared) => {
+                        match retry_migration_worker_ownership(
+                            MigrationWorkerParkedOwnership::Prepared(prepared),
+                            self,
+                        ) {
+                            MigrationWorkerRetryOutcome::Resolved => {
+                                drop(exclusivity);
+                                self.finish_migration_preparation_worker(Some(&app));
+                            }
+                            MigrationWorkerRetryOutcome::Retained(owner) => {
+                                self.park_migration_worker(owner, control, exclusivity, &app)
+                            }
+                        }
+                    }
+                    PreparedCustodyDispatchDecision::FailStop(_prepared) => std::process::abort(),
+                }
             }
             ProductionDatabaseMigrationPreparationOutcome::Failed => {
                 drop(exclusivity);
@@ -1081,6 +1255,169 @@ impl ApplicationLifecycle {
         }
     }
 
+    fn arm_custody_dispatch<T>(&self, prepared: T) -> CustodyDispatchArm<T> {
+        let mut inner = self.lock();
+        if inner.migration_shutdown_requested {
+            CustodyDispatchArm::Shutdown(prepared)
+        } else {
+            let dispatch = Arc::new(Mutex::new(CustodyDispatchEscrow::Pending(prepared)));
+            inner.migration_preparation = MigrationPreparationState::CustodyDispatchPending;
+            CustodyDispatchArm::Armed(dispatch)
+        }
+    }
+
+    #[cfg(windows)]
+    fn run_custody_dispatch(
+        self: &Arc<Self>,
+        prepared: PreparedUndisclosedMigrationRecoveryKeyCustody,
+        control_sender: std::sync::mpsc::Sender<MigrationWorkerCommand>,
+        control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+        exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
+        app: &AppHandle,
+    ) {
+        let dispatch = match self.arm_custody_dispatch(prepared) {
+            CustodyDispatchArm::Armed(dispatch) => dispatch,
+            CustodyDispatchArm::Shutdown(prepared) => {
+                match retry_migration_worker_ownership(
+                    MigrationWorkerParkedOwnership::Prepared(prepared),
+                    self,
+                ) {
+                    MigrationWorkerRetryOutcome::Resolved => {
+                        drop(exclusivity);
+                        self.finish_migration_preparation_worker(Some(app));
+                    }
+                    MigrationWorkerRetryOutcome::Retained(owner) => {
+                        self.park_migration_worker(owner, control, exclusivity, app)
+                    }
+                }
+                return;
+            }
+        };
+        let main_dispatch = Arc::clone(&dispatch);
+        let main_sender = control_sender;
+        let main_app = app.clone();
+        let lifecycle = Arc::clone(self);
+
+        let scheduled = catch_unwind(AssertUnwindSafe(|| {
+            app.run_on_main_thread(move || {
+                let Some(prepared) = lifecycle.take_armed_custody_dispatch_for_main(&main_dispatch)
+                else {
+                    return;
+                };
+                lifecycle.lock().migration_preparation = MigrationPreparationState::CustodyRunning;
+
+                let outcome = run_main_thread_owned_custody(
+                    prepared,
+                    || {
+                        main_app
+                            .get_webview_window("main")
+                            .and_then(|window| window.hwnd().ok())
+                            .map(|hwnd| hwnd.0)
+                    },
+                    |prepared, parent| {
+                        run_migration_recovery_key_custody_native_ceremony(prepared, parent)
+                    },
+                    |prepared| {
+                        NativeMigrationRecoveryKeyCustodyOutcome::UnavailableBeforeExposure(
+                            prepared,
+                        )
+                    },
+                );
+                if let Err(error) =
+                    main_sender.send(MigrationWorkerCommand::CustodyCompleted(outcome))
+                {
+                    let _retained_ownership = error.0;
+                    std::process::abort();
+                }
+            })
+        }))
+        .map_err(|_| ())
+        .and_then(|result| result.map_err(|_| ()));
+
+        if scheduled.is_err() {
+            let recovered = cancel_armed_custody_dispatch(&dispatch);
+            if let Some(prepared) = recovered {
+                self.lock().migration_preparation =
+                    MigrationPreparationState::CustodyUnavailableBeforeExposure;
+                self.park_migration_worker(
+                    MigrationWorkerParkedOwnership::Unavailable(prepared),
+                    control,
+                    exclusivity,
+                    app,
+                );
+                return;
+            }
+        }
+
+        let mut shutdown_requested = false;
+        loop {
+            match control.recv() {
+                Ok(MigrationWorkerCommand::Shutdown) => {
+                    let cancelled = cancel_armed_custody_dispatch(&dispatch);
+                    if let Some(prepared) = cancelled {
+                        let owner = MigrationWorkerParkedOwnership::Prepared(prepared);
+                        match retry_migration_worker_ownership(owner, self) {
+                            MigrationWorkerRetryOutcome::Resolved => {
+                                drop(exclusivity);
+                                self.finish_migration_preparation_worker(Some(app));
+                            }
+                            MigrationWorkerRetryOutcome::Retained(owner) => {
+                                self.park_migration_worker(owner, control, exclusivity, app)
+                            }
+                        }
+                        return;
+                    }
+                    shutdown_requested = true;
+                }
+                Ok(MigrationWorkerCommand::CustodyCompleted(outcome)) => {
+                    let owner = match outcome {
+                        NativeMigrationRecoveryKeyCustodyOutcome::Verified(owner) => {
+                            self.lock().migration_preparation =
+                                MigrationPreparationState::CustodyVerifiedAwaitingPublication;
+                            MigrationWorkerParkedOwnership::Verified(owner)
+                        }
+                        NativeMigrationRecoveryKeyCustodyOutcome::InterruptedBeforeExposure(
+                            owner,
+                        ) => {
+                            self.lock().migration_preparation =
+                                MigrationPreparationState::CustodyInterruptedBeforeExposure;
+                            MigrationWorkerParkedOwnership::Interrupted(owner)
+                        }
+                        NativeMigrationRecoveryKeyCustodyOutcome::UnavailableBeforeExposure(
+                            owner,
+                        ) => {
+                            self.lock().migration_preparation =
+                                MigrationPreparationState::CustodyUnavailableBeforeExposure;
+                            MigrationWorkerParkedOwnership::Unavailable(owner)
+                        }
+                        NativeMigrationRecoveryKeyCustodyOutcome::FailedAfterExposure(owner) => {
+                            self.lock().migration_preparation =
+                                MigrationPreparationState::CustodyTerminalFailure;
+                            MigrationWorkerParkedOwnership::TerminalFailure(owner)
+                        }
+                    };
+                    if shutdown_requested
+                        || matches!(owner, MigrationWorkerParkedOwnership::TerminalFailure(_))
+                    {
+                        match retry_migration_worker_ownership(owner, self) {
+                            MigrationWorkerRetryOutcome::Resolved => {
+                                drop(exclusivity);
+                                self.finish_migration_preparation_worker(Some(app));
+                            }
+                            MigrationWorkerRetryOutcome::Retained(owner) => {
+                                self.park_migration_worker(owner, control, exclusivity, app)
+                            }
+                        }
+                    } else {
+                        self.park_migration_worker(owner, control, exclusivity, app);
+                    }
+                    return;
+                }
+                Err(_) => std::process::abort(),
+            }
+        }
+    }
+
     #[cfg(windows)]
     fn park_migration_worker(
         &self,
@@ -1093,10 +1430,26 @@ impl ApplicationLifecycle {
             MigrationWorkerParkedOwnership::Prepared(_) => {
                 MigrationPreparationState::CustodyPrepared
             }
+            MigrationWorkerParkedOwnership::Interrupted(_) => {
+                MigrationPreparationState::CustodyInterruptedBeforeExposure
+            }
+            MigrationWorkerParkedOwnership::Unavailable(_) => {
+                MigrationPreparationState::CustodyUnavailableBeforeExposure
+            }
+            MigrationWorkerParkedOwnership::Verified(_) => {
+                MigrationPreparationState::CustodyVerifiedAwaitingPublication
+            }
+            MigrationWorkerParkedOwnership::TerminalFailure(_) => {
+                MigrationPreparationState::CustodySourceCloseRetryRequired
+            }
             _ => MigrationPreparationState::CloseRetryRequired,
         };
         loop {
-            let _ = control.recv();
+            match control.recv() {
+                Ok(MigrationWorkerCommand::Shutdown) => {}
+                Ok(MigrationWorkerCommand::CustodyCompleted(_)) => std::process::abort(),
+                Err(_) => std::process::abort(),
+            }
             match retry_migration_worker_ownership(owner, self) {
                 MigrationWorkerRetryOutcome::Resolved => {
                     drop(exclusivity);
@@ -1244,6 +1597,7 @@ impl ApplicationLifecycle {
             let _ = worker.join();
         }
 
+        self.record_migration_shutdown_intent();
         let (migration_start_sender, migration_escrow, migration_control, action) = {
             let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
             let mut inner = self.lock();
@@ -1299,7 +1653,7 @@ impl ApplicationLifecycle {
         };
 
         if let Some(control) = migration_control {
-            let _ = control.try_send(MigrationWorkerCommand::Shutdown);
+            let _ = control.send(MigrationWorkerCommand::Shutdown);
         }
 
         if let Some(start_sender) = migration_start_sender {
@@ -1504,6 +1858,69 @@ fn retry_migration_worker_ownership(
                 ) => MigrationWorkerRetryOutcome::Retained(
                     MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
                 ),
+            }
+        }
+        MigrationWorkerParkedOwnership::Interrupted(interruption) => {
+            let shutdown = interruption.retry().abort_before_exposure_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::Unavailable(prepared) => {
+            let shutdown = prepared.abort_before_exposure_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::Verified(verified) => {
+            let shutdown = verified.abort_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::TerminalFailure(failure) => {
+            match failure.retry_source_close() {
+                MigrationRecoveryKeyCustodySourceCloseRetryOutcome::Closed(failure) => {
+                    drop(failure);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                MigrationRecoveryKeyCustodySourceCloseRetryOutcome::Failed(failure) => {
+                    lifecycle.lock().migration_preparation =
+                        MigrationPreparationState::CustodySourceCloseRetryRequired;
+                    MigrationWorkerRetryOutcome::Retained(
+                        MigrationWorkerParkedOwnership::TerminalFailure(failure),
+                    )
+                }
             }
         }
         MigrationWorkerParkedOwnership::PreparedShutdown(shutdown) => {
@@ -4151,7 +4568,7 @@ mod tests {
             genuine_production_database_migration_opportunity_for_test();
         establish_migration_pending(&lifecycle, source_root.path(), opportunity);
         authorize_migration(&lifecycle);
-        let (control, _receiver) = std::sync::mpsc::sync_channel(1);
+        let (control, _receiver) = std::sync::mpsc::channel();
         {
             let mut inner = lifecycle.lock();
             inner.startup_work_resolved = true;
@@ -4238,7 +4655,7 @@ mod tests {
             genuine_production_database_migration_opportunity_for_test();
         establish_migration_pending(&lifecycle, source_root.path(), opportunity);
         authorize_migration(&lifecycle);
-        let (control, _receiver) = std::sync::mpsc::sync_channel(1);
+        let (control, _receiver) = std::sync::mpsc::channel();
         {
             let mut inner = lifecycle.lock();
             inner.startup_work_resolved = true;
@@ -4447,7 +4864,7 @@ mod tests {
             .split_once("fn run_migration_preparation_worker")
             .unwrap()
             .1
-            .split_once("fn park_migration_worker")
+            .split_once("fn run_custody_dispatch")
             .unwrap()
             .0;
         let exclusivity = worker
@@ -4533,11 +4950,7 @@ mod tests {
         assert!(production.contains("drop(exclusivity)"));
 
         for forbidden in [
-            "run_migration_recovery_key_custody_native_ceremony",
-            "get_webview_window(\"main\")",
-            "run_on_main_thread",
             "DialogBoxIndirectParamW",
-            ".hwnd()",
             "#[tauri::command]",
             "publish",
             "CREATE TABLE",
@@ -4548,6 +4961,537 @@ mod tests {
                 "forbidden orchestration surface: {forbidden}"
             );
         }
+
+        let dispatch = production
+            .split_once("fn run_custody_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        assert!(dispatch.contains("app.run_on_main_thread"));
+        assert!(dispatch.contains("get_webview_window(\"main\")"));
+        assert!(dispatch.contains("window.hwnd()"));
+        assert!(dispatch.contains("run_migration_recovery_key_custody_native_ceremony"));
+        assert!(!dispatch.contains("DialogBoxIndirectParamW"));
+    }
+
+    #[test]
+    fn migration_custody_dispatch_escrow_transfers_exactly_once() {
+        let mut escrow = CustodyDispatchEscrow::Pending(TestOwner(7));
+        let owner = match std::mem::replace(&mut escrow, CustodyDispatchEscrow::TakenByMainThread) {
+            CustodyDispatchEscrow::Pending(owner) => owner,
+            _ => panic!("pending owner must transfer exactly once"),
+        };
+        assert_eq!(owner, TestOwner(7));
+        assert!(matches!(escrow, CustodyDispatchEscrow::TakenByMainThread));
+    }
+
+    #[test]
+    fn migration_custody_shutdown_before_execution_atomically_cancels_dispatch() {
+        let mut escrow = CustodyDispatchEscrow::Pending(TestOwner(9));
+        let owner =
+            match std::mem::replace(&mut escrow, CustodyDispatchEscrow::CancelledBeforeExecution) {
+                CustodyDispatchEscrow::Pending(owner) => owner,
+                _ => panic!("shutdown must recover the pending owner"),
+            };
+        assert_eq!(owner, TestOwner(9));
+        assert!(matches!(
+            escrow,
+            CustodyDispatchEscrow::CancelledBeforeExecution
+        ));
+    }
+
+    #[test]
+    fn migration_custody_scheduling_and_completion_are_distinct_states() {
+        let dispatch = CustodyDispatchEscrow::Pending(TestOwner(11));
+        let (_completion_sender, completion_receiver) = mpsc::channel::<TestOwner>();
+        assert!(matches!(dispatch, CustodyDispatchEscrow::Pending(_)));
+        assert!(matches!(
+            completion_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn migration_custody_missing_parent_preserves_owner_without_native_run() {
+        let ran = AtomicBool::new(false);
+        let outcome = run_main_thread_owned_custody(
+            TestOwner(21),
+            || None::<usize>,
+            |_, _| {
+                ran.store(true, Ordering::SeqCst);
+                TestOwner(0)
+            },
+            |owner| owner,
+        );
+        assert_eq!(outcome, TestOwner(21));
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn migration_custody_hwnd_failure_preserves_owner_without_native_run() {
+        let hwnd_acquired = false;
+        let ran = AtomicBool::new(false);
+        let outcome = run_main_thread_owned_custody(
+            TestOwner(22),
+            || hwnd_acquired.then_some(44usize),
+            |_, _| {
+                ran.store(true, Ordering::SeqCst);
+                TestOwner(0)
+            },
+            |owner| owner,
+        );
+        assert_eq!(outcome, TestOwner(22));
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn migration_custody_valid_hwnd_reaches_only_native_runner_seam() {
+        let observed = std::sync::atomic::AtomicUsize::new(0);
+        let outcome = run_main_thread_owned_custody(
+            TestOwner(23),
+            || Some(0x1234usize),
+            |owner, hwnd| {
+                observed.store(hwnd, Ordering::SeqCst);
+                owner
+            },
+            |_| panic!("valid HWND must not take the unavailable path"),
+        );
+        assert_eq!(outcome, TestOwner(23));
+        assert_eq!(observed.load(Ordering::SeqCst), 0x1234);
+    }
+
+    #[test]
+    fn migration_custody_dispatch_and_shutdown_race_cannot_duplicate_owner() {
+        let lifecycle = ApplicationLifecycle::new();
+        let CustodyDispatchArm::Armed(dispatch) = lifecycle.arm_custody_dispatch(TestOwner(13))
+        else {
+            panic!("dispatch must arm before the race")
+        };
+        let gate = Arc::new(std::sync::Barrier::new(3));
+
+        let main_lifecycle = Arc::clone(&lifecycle);
+        let main_dispatch = Arc::clone(&dispatch);
+        let main_gate = Arc::clone(&gate);
+        let main = thread::spawn(move || {
+            main_gate.wait();
+            main_lifecycle.take_armed_custody_dispatch_for_main(&main_dispatch)
+        });
+
+        let shutdown_lifecycle = Arc::clone(&lifecycle);
+        let shutdown_dispatch = Arc::clone(&dispatch);
+        let shutdown_gate = Arc::clone(&gate);
+        let shutdown = thread::spawn(move || {
+            shutdown_gate.wait();
+            shutdown_lifecycle.record_migration_shutdown_intent();
+            cancel_armed_custody_dispatch(&shutdown_dispatch)
+        });
+
+        gate.wait();
+        let main_owner = main.join().unwrap();
+        let shutdown_owner = shutdown.join().unwrap();
+        assert_ne!(main_owner.is_some(), shutdown_owner.is_some());
+        assert_eq!(main_owner.or(shutdown_owner), Some(TestOwner(13)));
+    }
+
+    #[test]
+    fn migration_shutdown_between_initial_precheck_and_dispatch_arm_prevents_scheduling() {
+        let lifecycle = ApplicationLifecycle::new();
+        let (_sender, receiver) = mpsc::channel();
+        let PreparedCustodyDispatchDecision::Dispatch(prepared) = decide_prepared_custody_dispatch(
+            TestOwner(14),
+            observe_pre_custody_dispatch_control(&receiver),
+        ) else {
+            panic!("the initial precheck must observe no command")
+        };
+
+        lifecycle.lock().migration_preparation = MigrationPreparationState::CustodyPrepared;
+        lifecycle.record_migration_shutdown_intent();
+
+        let scheduled = AtomicBool::new(false);
+        let window_lookup = AtomicBool::new(false);
+        let hwnd_lookup = AtomicBool::new(false);
+        let native_run = AtomicBool::new(false);
+        let CustodyDispatchArm::Shutdown(owner) = lifecycle.arm_custody_dispatch(prepared) else {
+            scheduled.store(true, Ordering::SeqCst);
+            panic!("shutdown must own the pre-arm boundary")
+        };
+
+        assert_eq!(owner, TestOwner(14));
+        assert!(!scheduled.load(Ordering::SeqCst));
+        assert!(!window_lookup.load(Ordering::SeqCst));
+        assert!(!hwnd_lookup.load(Ordering::SeqCst));
+        assert!(!native_run.load(Ordering::SeqCst));
+        assert_eq!(
+            lifecycle.lock().migration_preparation,
+            MigrationPreparationState::CustodyPrepared
+        );
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let shutdown_before_arm = SOURCE
+            .split_once("CustodyDispatchArm::Shutdown(prepared) =>")
+            .unwrap()
+            .1
+            .split_once("let main_dispatch")
+            .unwrap()
+            .0;
+        assert!(shutdown_before_arm.contains("MigrationWorkerParkedOwnership::Prepared(prepared)"));
+        for forbidden in [
+            "run_on_main_thread",
+            "get_webview_window",
+            ".hwnd()",
+            "run_migration_recovery_key_custody_native_ceremony",
+        ] {
+            assert!(!shutdown_before_arm.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn migration_dispatch_arm_then_shutdown_before_main_take_uses_escrow_cancellation() {
+        let lifecycle = ApplicationLifecycle::new();
+        let CustodyDispatchArm::Armed(dispatch) = lifecycle.arm_custody_dispatch(TestOwner(15))
+        else {
+            panic!("dispatch must arm before shutdown")
+        };
+        lifecycle.record_migration_shutdown_intent();
+
+        let window_lookup = AtomicBool::new(false);
+        let hwnd_lookup = AtomicBool::new(false);
+        let native_run = AtomicBool::new(false);
+        let main_owner = lifecycle.take_armed_custody_dispatch_for_main(&dispatch);
+        if main_owner.is_some() {
+            window_lookup.store(true, Ordering::SeqCst);
+            hwnd_lookup.store(true, Ordering::SeqCst);
+            native_run.store(true, Ordering::SeqCst);
+        }
+        let owner = cancel_armed_custody_dispatch(&dispatch)
+            .expect("shutdown must reclaim the pending prepared owner");
+        assert_eq!(owner, TestOwner(15));
+        assert!(main_owner.is_none());
+        assert!(!window_lookup.load(Ordering::SeqCst));
+        assert!(!hwnd_lookup.load(Ordering::SeqCst));
+        assert!(!native_run.load(Ordering::SeqCst));
+        assert_eq!(
+            lifecycle.lock().migration_preparation,
+            MigrationPreparationState::CustodyDispatchPending
+        );
+    }
+
+    #[test]
+    fn migration_main_take_then_shutdown_preserves_existing_running_semantics() {
+        let lifecycle = ApplicationLifecycle::new();
+        let CustodyDispatchArm::Armed(dispatch) = lifecycle.arm_custody_dispatch(TestOwner(16))
+        else {
+            panic!("dispatch must arm before the main take")
+        };
+        let owner = lifecycle
+            .take_armed_custody_dispatch_for_main(&dispatch)
+            .expect("the main closure must take the exact pending owner");
+        lifecycle.record_migration_shutdown_intent();
+
+        assert_eq!(owner, TestOwner(16));
+        assert!(cancel_armed_custody_dispatch(&dispatch).is_none());
+        assert!(matches!(
+            &*dispatch.lock().unwrap(),
+            CustodyDispatchEscrow::TakenByMainThread
+        ));
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let dispatch_worker = SOURCE
+            .split_once("fn run_custody_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        let shutdown = dispatch_worker
+            .split_once("Ok(MigrationWorkerCommand::Shutdown)")
+            .unwrap()
+            .1
+            .split_once("Ok(MigrationWorkerCommand::CustodyCompleted(outcome))")
+            .unwrap()
+            .0;
+        assert!(shutdown.contains("shutdown_requested = true"));
+        assert!(dispatch_worker.contains("Ok(MigrationWorkerCommand::CustodyCompleted(outcome))"));
+    }
+
+    #[test]
+    fn migration_dispatch_arm_releases_lifecycle_and_escrow_mutexes_before_external_work() {
+        let lifecycle = ApplicationLifecycle::new();
+        let CustodyDispatchArm::Armed(dispatch) = lifecycle.arm_custody_dispatch(TestOwner(17))
+        else {
+            panic!("dispatch must arm")
+        };
+        assert!(lifecycle.inner.try_lock().is_ok());
+
+        let owner = lifecycle
+            .take_armed_custody_dispatch_for_main(&dispatch)
+            .unwrap();
+        assert_eq!(owner, TestOwner(17));
+        assert!(lifecycle.custody_dispatch_boundary.try_lock().is_ok());
+        assert!(lifecycle.inner.try_lock().is_ok());
+        assert!(dispatch.try_lock().is_ok());
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let arm = SOURCE
+            .split_once("fn arm_custody_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn run_custody_dispatch")
+            .unwrap()
+            .0;
+        assert!(arm.contains("if inner.migration_shutdown_requested"));
+        assert!(arm.contains("CustodyDispatchEscrow::Pending(prepared)"));
+        assert!(!arm.contains("run_on_main_thread"));
+        assert!(!arm.contains("run_migration_recovery_key_custody_native_ceremony"));
+
+        let shutdown_boundary = SOURCE
+            .split_once("fn record_migration_shutdown_intent")
+            .unwrap()
+            .1
+            .split_once("fn take_armed_custody_dispatch_for_main")
+            .unwrap()
+            .0;
+        assert!(shutdown_boundary.contains("custody_dispatch_boundary"));
+        let intent = shutdown_boundary
+            .find("migration_shutdown_requested = true")
+            .unwrap();
+        assert!(intent > shutdown_boundary.find("custody_dispatch_boundary").unwrap());
+
+        let main_take = SOURCE
+            .split_once("fn take_armed_custody_dispatch_for_main")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn status")
+            .unwrap()
+            .0;
+        assert!(main_take.contains("custody_dispatch_boundary"));
+        assert!(main_take.contains("migration_shutdown_requested"));
+        assert!(main_take.contains("CustodyDispatchEscrow::TakenByMainThread"));
+        for forbidden in [
+            "run_on_main_thread",
+            "get_webview_window",
+            ".hwnd()",
+            "run_migration_recovery_key_custody_native_ceremony",
+        ] {
+            assert!(!main_take.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_shutdown_queued_during_preparation_prevents_custody_dispatch() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.startup_work_resolved = true;
+            inner.close_work_resolved = true;
+            inner.setup_work_resolved = true;
+            inner.migration_work_resolved = false;
+            inner.migration_preparation = MigrationPreparationState::Preparing;
+        }
+        let exclusivity = match acquire_production_database_migration_cross_process_exclusivity() {
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::Acquired(owner) => owner,
+            _ => panic!("test must acquire migration exclusivity"),
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender.send(MigrationWorkerCommand::Shutdown).unwrap();
+
+        let decision = decide_prepared_custody_dispatch(
+            TestOwner(31),
+            observe_pre_custody_dispatch_control(&receiver),
+        );
+        let PreparedCustodyDispatchDecision::Shutdown(owner) = decision else {
+            panic!("queued shutdown must retain the exact prepared owner for shutdown")
+        };
+        assert_eq!(owner, TestOwner(31));
+        assert_eq!(
+            lifecycle.lock().migration_preparation,
+            MigrationPreparationState::Preparing
+        );
+        assert!(!lifecycle.lock().migration_work_resolved);
+        assert!(!lifecycle.may_exit());
+        assert!(matches!(
+            acquire_production_database_migration_cross_process_exclusivity(),
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::AlreadyHeld
+        ));
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let prepared_branch = SOURCE
+            .split_once("ProductionDatabaseMigrationPreparationOutcome::Prepared(prepared) =>")
+            .unwrap()
+            .1
+            .split_once("ProductionDatabaseMigrationPreparationOutcome::Failed")
+            .unwrap()
+            .0;
+        let shutdown_branch = prepared_branch
+            .split_once("PreparedCustodyDispatchDecision::Shutdown(prepared)")
+            .unwrap()
+            .1
+            .split_once("PreparedCustodyDispatchDecision::FailStop")
+            .unwrap()
+            .0;
+        assert!(shutdown_branch.contains(
+            "retry_migration_worker_ownership(\n                            MigrationWorkerParkedOwnership::Prepared(prepared)"
+        ));
+        for forbidden in [
+            "run_custody_dispatch",
+            "run_on_main_thread",
+            "get_webview_window",
+            ".hwnd()",
+            "run_migration_recovery_key_custody_native_ceremony",
+        ] {
+            assert!(
+                !shutdown_branch.contains(forbidden),
+                "pre-dispatch shutdown must not reach {forbidden}"
+            );
+        }
+
+        drop(exclusivity);
+        lifecycle.finish_migration_preparation_worker(None);
+        assert!(lifecycle.lock().migration_work_resolved);
+        assert!(lifecycle.may_exit());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_shutdown_queued_during_preparation_source_close_failure_stays_close_only() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let retry = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_preparation_failure")
+            .unwrap()
+            .0;
+        let prepared_shutdown = retry
+            .split_once("MigrationWorkerParkedOwnership::Prepared(prepared)")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::Interrupted")
+            .unwrap()
+            .0;
+        assert!(prepared_shutdown.contains("abort_before_exposure_for_shutdown"));
+        assert!(prepared_shutdown.contains("shutdown.retry_source_close()"));
+        assert!(
+            prepared_shutdown
+                .contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)")
+        );
+        for forbidden in ["disclose(", "run_custody_dispatch", "run_on_main_thread"] {
+            assert!(!prepared_shutdown.contains(forbidden));
+        }
+
+        let close_only_retry = retry
+            .split_once("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown) =>")
+            .unwrap()
+            .1;
+        assert!(close_only_retry.contains("shutdown.retry_source_close()"));
+        assert!(
+            close_only_retry.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)")
+        );
+        for forbidden in [
+            "abort_before_exposure_for_shutdown",
+            "disclose(",
+            "run_custody_dispatch",
+            "run_on_main_thread",
+        ] {
+            assert!(!close_only_retry.contains(forbidden));
+        }
+
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.startup_work_resolved = true;
+            inner.close_work_resolved = true;
+            inner.setup_work_resolved = true;
+            inner.migration_work_resolved = false;
+            inner.migration_preparation = MigrationPreparationState::CloseRetryRequired;
+        }
+        let exclusivity = match acquire_production_database_migration_cross_process_exclusivity() {
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::Acquired(owner) => owner,
+            _ => panic!("test must acquire migration exclusivity"),
+        };
+        assert!(!lifecycle.lock().migration_work_resolved);
+        assert!(!lifecycle.may_exit());
+        assert!(matches!(
+            acquire_production_database_migration_cross_process_exclusivity(),
+            ProductionDatabaseMigrationCrossProcessExclusivityOutcome::AlreadyHeld
+        ));
+        drop(exclusivity);
+        lifecycle.finish_migration_preparation_worker(None);
+        assert!(lifecycle.lock().migration_work_resolved);
+        assert!(lifecycle.may_exit());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_no_queued_shutdown_preserves_current_custody_dispatch_path() {
+        let (_sender, receiver) = mpsc::channel();
+        let decision = decide_prepared_custody_dispatch(
+            TestOwner(32),
+            observe_pre_custody_dispatch_control(&receiver),
+        );
+        let PreparedCustodyDispatchDecision::Dispatch(owner) = decision else {
+            panic!("an empty control receiver must preserve normal custody dispatch")
+        };
+        assert_eq!(owner, TestOwner(32));
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let prepared_branch = SOURCE
+            .split_once("ProductionDatabaseMigrationPreparationOutcome::Prepared(prepared) =>")
+            .unwrap()
+            .1
+            .split_once("ProductionDatabaseMigrationPreparationOutcome::Failed")
+            .unwrap()
+            .0;
+        let dispatch_branch = prepared_branch
+            .split_once("PreparedCustodyDispatchDecision::Dispatch(prepared)")
+            .unwrap()
+            .1
+            .split_once("PreparedCustodyDispatchDecision::Shutdown")
+            .unwrap()
+            .0;
+        assert!(dispatch_branch.contains("MigrationPreparationState::CustodyPrepared"));
+        assert!(dispatch_branch.contains("self.run_custody_dispatch("));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_impossible_custody_completed_before_dispatch_is_fail_stop() {
+        let decision = decide_prepared_custody_dispatch(
+            TestOwner(33),
+            PreCustodyDispatchControl::ImpossibleCustodyCompleted,
+        );
+        let PreparedCustodyDispatchDecision::FailStop(owner) = decision else {
+            panic!("pre-dispatch custody completion must not be treated as ordinary work")
+        };
+        assert_eq!(owner, TestOwner(33));
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let observer = SOURCE
+            .split_once("fn observe_pre_custody_dispatch_control")
+            .unwrap()
+            .1
+            .split_once("fn run_main_thread_owned_custody")
+            .unwrap()
+            .0;
+        assert!(observer.contains("MigrationWorkerCommand::CustodyCompleted(_)"));
+        assert!(observer.contains("PreCustodyDispatchControl::ImpossibleCustodyCompleted"));
+        let prepared_branch = SOURCE
+            .split_once("ProductionDatabaseMigrationPreparationOutcome::Prepared(prepared) =>")
+            .unwrap()
+            .1
+            .split_once("ProductionDatabaseMigrationPreparationOutcome::Failed")
+            .unwrap()
+            .0;
+        let fail_stop = prepared_branch
+            .split_once("PreparedCustodyDispatchDecision::FailStop")
+            .unwrap()
+            .1;
+        assert!(fail_stop.contains("std::process::abort()"));
     }
 
     #[cfg(windows)]
