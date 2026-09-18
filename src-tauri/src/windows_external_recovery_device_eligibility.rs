@@ -60,7 +60,7 @@ const _: () = {
     assert!(MAXIMUM_DESCRIPTOR_LENGTH <= u32::MAX as usize);
 };
 
-struct RetainedExternalDisconnectableRecoveryDeviceObservation {
+pub(super) struct RetainedExternalDisconnectableRecoveryDeviceObservation {
     topology: RetainedVolumeSinglePhysicalDeviceObservation,
 }
 
@@ -115,7 +115,7 @@ impl fmt::Debug for PhysicalDeviceSeparationError {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum RecoveryDeviceEligibilityError {
+pub(super) enum RecoveryDeviceEligibilityError {
     ObservationUnavailable,
     MalformedOrUnsupportedDeviceFacts,
     NotEligible,
@@ -447,7 +447,7 @@ fn require_revalidated_eligibility(
     })
 }
 
-fn observe_retained_external_disconnectable_recovery_device(
+pub(super) fn observe_retained_external_disconnectable_recovery_device(
     topology: RetainedVolumeSinglePhysicalDeviceObservation,
 ) -> Result<RetainedExternalDisconnectableRecoveryDeviceObservation, RecoveryDeviceEligibilityError>
 {
@@ -457,7 +457,7 @@ fn observe_retained_external_disconnectable_recovery_device(
 }
 
 impl RetainedExternalDisconnectableRecoveryDeviceObservation {
-    fn revalidate(&self) -> Result<(), RecoveryDeviceEligibilityError> {
+    pub(super) fn revalidate(&self) -> Result<(), RecoveryDeviceEligibilityError> {
         require_revalidated_eligibility(self.topology.revalidate(), || {
             observe_eligible_facts(&self.topology.retained_volume)
         })

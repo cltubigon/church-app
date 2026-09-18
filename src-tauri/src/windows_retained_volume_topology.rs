@@ -25,6 +25,8 @@ use windows_sys::Win32::{
 
 #[path = "windows_external_recovery_device_eligibility.rs"]
 mod windows_external_recovery_device_eligibility;
+#[path = "windows_retained_eligible_ntfs_recovery_volume_root.rs"]
+mod windows_retained_eligible_ntfs_recovery_volume_root;
 
 const FINAL_PATH_FLAGS: GETFINALPATHNAMEBYHANDLE_FLAGS = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;
 const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
