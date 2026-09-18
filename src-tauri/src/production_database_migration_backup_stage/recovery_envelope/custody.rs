@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::production_database_migration_recovery_envelope::{
     EncodedMigrationRecoveryKeyCustodyV1, ParsedUntrustedMigrationRecoveryEnvelopeV1,
-    RecoverySetManifestV1, encode_migration_recovery_key_custody_v1,
+    RecoverySetManifestV1, RecoverySetRequiredBytes, encode_migration_recovery_key_custody_v1,
     validate_migration_recovery_key_custody_v1,
 };
 
@@ -413,6 +413,14 @@ impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
         .map_err(|_| RecoverySetManifestPreparationError::ManifestConstructionRejected)
     }
 
+    pub(crate) fn prepare_recovery_set_required_bytes(
+        &self,
+    ) -> Result<RecoverySetRequiredBytes, RecoverySetManifestPreparationError> {
+        self.prepare_recovery_set_manifest_v1()?
+            .required_set_bytes()
+            .map_err(|_| RecoverySetManifestPreparationError::ManifestConstructionRejected)
+    }
+
     pub(crate) fn abort_for_shutdown(
         self,
     ) -> super::super::UndisclosedMigrationRecoveryKeyCustodyShutdown {
@@ -621,6 +629,40 @@ mod tests {
             format!("{:?}", verified.custody),
             "VerifiedMigrationRecoveryKeyCustody"
         );
+        let shutdown = verified.abort_for_shutdown();
+        assert!(matches!(shutdown.source_close, SourceCloseState::Closed));
+        drop(source_root);
+    }
+
+    #[test]
+    fn required_set_size_is_derived_from_the_trusted_manifest_source_observation() {
+        let (source_root, _stage_root, verified) = custody_verified_backup();
+        let database_length = verified
+            .encrypted_stage
+            .backup_stage_proof
+            .leaf
+            .metadata()
+            .unwrap()
+            .len();
+        let manifest_length = u64::try_from(
+            verified
+                .prepare_recovery_set_manifest_v1()
+                .unwrap()
+                .encode()
+                .len(),
+        )
+        .unwrap();
+        let envelope_length =
+            u64::try_from(verified.verified_envelope.encoded.as_bytes().len()).unwrap();
+        let exact_requirement = database_length
+            .checked_add(envelope_length)
+            .and_then(|total| total.checked_add(manifest_length))
+            .unwrap();
+
+        let required = verified.prepare_recovery_set_required_bytes().unwrap();
+        assert!(required.is_satisfied_by(exact_requirement));
+        assert!(!required.is_satisfied_by(exact_requirement - 1));
+
         let shutdown = verified.abort_for_shutdown();
         assert!(matches!(shutdown.source_close, SourceCloseState::Closed));
         drop(source_root);

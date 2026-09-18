@@ -2,9 +2,28 @@
 
 use std::fmt;
 
-use super::MigrationBackupSetIdentifier;
+use super::{MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH, MigrationBackupSetIdentifier};
 
 pub(crate) const RECOVERY_SET_MANIFEST_V1_LENGTH: usize = 98;
+
+pub(crate) struct RecoverySetRequiredBytes(u64);
+
+impl RecoverySetRequiredBytes {
+    pub(crate) fn is_satisfied_by(&self, available_bytes_for_current_user: u64) -> bool {
+        available_bytes_for_current_user >= self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_bytes(bytes: u64) -> Self {
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for RecoverySetRequiredBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RecoverySetRequiredBytes([REDACTED])")
+    }
+}
 
 const MAGIC: [u8; 8] = *b"CHLDRSM\0";
 const FORMAT_VERSION: u16 = 1;
@@ -164,6 +183,40 @@ impl RecoverySetManifestV1 {
         encoded[RECOVERY_ENVELOPE_DIGEST_OFFSET..].copy_from_slice(&self.recovery_envelope_sha256);
         encoded
     }
+
+    pub(crate) fn required_set_bytes(
+        &self,
+    ) -> Result<RecoverySetRequiredBytes, RecoverySetRequiredBytesError> {
+        required_set_bytes(self.database_byte_length)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RecoverySetRequiredBytesError {
+    ArithmeticOverflow,
+}
+
+impl fmt::Debug for RecoverySetRequiredBytesError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ArithmeticOverflow")
+    }
+}
+
+fn required_set_bytes(
+    database_byte_length: u64,
+) -> Result<RecoverySetRequiredBytes, RecoverySetRequiredBytesError> {
+    database_byte_length
+        .checked_add(
+            u64::try_from(MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH)
+                .map_err(|_| RecoverySetRequiredBytesError::ArithmeticOverflow)?,
+        )
+        .and_then(|total| {
+            u64::try_from(RECOVERY_SET_MANIFEST_V1_LENGTH)
+                .ok()
+                .and_then(|manifest_length| total.checked_add(manifest_length))
+        })
+        .map(RecoverySetRequiredBytes)
+        .ok_or(RecoverySetRequiredBytesError::ArithmeticOverflow)
 }
 
 impl fmt::Debug for RecoverySetManifestV1 {
@@ -457,6 +510,30 @@ mod tests {
     }
 
     #[test]
+    fn complete_set_requirement_uses_checked_canonical_lengths() {
+        let required = required_set_bytes(512).unwrap();
+        assert!(required.is_satisfied_by(512 + 182 + 98));
+        assert!(!required.is_satisfied_by(512 + 182 + 98 - 1));
+        assert_eq!(
+            MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH,
+            super::MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH
+        );
+        assert_eq!(RECOVERY_SET_MANIFEST_V1_LENGTH, 98);
+        assert_eq!(
+            format!("{required:?}"),
+            "RecoverySetRequiredBytes([REDACTED])"
+        );
+    }
+
+    #[test]
+    fn complete_set_requirement_overflow_fails_closed() {
+        assert_eq!(
+            required_set_bytes(u64::MAX).unwrap_err(),
+            RecoverySetRequiredBytesError::ArithmeticOverflow
+        );
+    }
+
+    #[test]
     fn debug_and_errors_expose_only_fixed_type_or_variant_names() {
         let parsed = ParsedUntrustedRecoverySetManifestV1::parse(&GOLDEN).unwrap();
         let parsed_debug = format!("{parsed:?}");
@@ -493,6 +570,10 @@ mod tests {
                 RecoverySetManifestV1ValidationError::InvalidDatabaseByteLength
             ),
             "InvalidDatabaseByteLength"
+        );
+        assert_eq!(
+            format!("{:?}", RecoverySetRequiredBytesError::ArithmeticOverflow),
+            "ArithmeticOverflow"
         );
     }
 

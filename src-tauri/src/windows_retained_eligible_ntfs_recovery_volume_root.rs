@@ -24,9 +24,14 @@ use windows_sys::Win32::{
         FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
         FILE_STANDARD_INFO, FILE_TYPE_DISK, FileAttributeTagInfo, FileIdInfo, FileStandardInfo,
-        GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
+        GetDiskFreeSpaceExW, GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
         GetVolumeInformationByHandleW, OPEN_EXISTING, VOLUME_NAME_GUID,
     },
+};
+
+use crate::{
+    application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    production_database_migration_recovery_envelope::RecoverySetRequiredBytes,
 };
 
 use super::{
@@ -93,6 +98,10 @@ pub(super) struct TwoRecoveryVolumeRootsSeparatedFromProductionStorage {
     separation: TwoRecoveryDevicesSeparatedFromProductionStorage,
 }
 
+pub(super) struct TwoCapacityValidatedRecoveryVolumeRoots {
+    roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
+}
+
 impl fmt::Debug for RecoveryVolumeRootSeparatedFromProductionStorage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RecoveryVolumeRootSeparatedFromProductionStorage([REDACTED])")
@@ -102,6 +111,12 @@ impl fmt::Debug for RecoveryVolumeRootSeparatedFromProductionStorage {
 impl fmt::Debug for TwoRecoveryVolumeRootsSeparatedFromProductionStorage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("TwoRecoveryVolumeRootsSeparatedFromProductionStorage([REDACTED])")
+    }
+}
+
+impl fmt::Debug for TwoCapacityValidatedRecoveryVolumeRoots {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TwoCapacityValidatedRecoveryVolumeRoots([REDACTED])")
     }
 }
 
@@ -120,6 +135,14 @@ pub(super) enum TwoRecoveryVolumeRootsSeparationError {
     ProductionObservationUnavailable,
     SamePhysicalDevice,
     TopologyChangedOrInconsistent,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum RecoveryVolumeCapacityValidationError {
+    SourceSizeUnavailable,
+    CapacityObservationUnavailable,
+    InsufficientCapacity,
+    DestinationChangedOrInconsistent,
 }
 
 impl fmt::Debug for RecoveryVolumeRootProductionSeparationError {
@@ -141,6 +164,17 @@ impl fmt::Debug for TwoRecoveryVolumeRootsSeparationError {
             Self::ProductionObservationUnavailable => "ProductionObservationUnavailable",
             Self::SamePhysicalDevice => "SamePhysicalDevice",
             Self::TopologyChangedOrInconsistent => "TopologyChangedOrInconsistent",
+        })
+    }
+}
+
+impl fmt::Debug for RecoveryVolumeCapacityValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::SourceSizeUnavailable => "SourceSizeUnavailable",
+            Self::CapacityObservationUnavailable => "CapacityObservationUnavailable",
+            Self::InsufficientCapacity => "InsufficientCapacity",
+            Self::DestinationChangedOrInconsistent => "DestinationChangedOrInconsistent",
         })
     }
 }
@@ -633,10 +667,82 @@ impl TwoRecoveryVolumeRootsSeparatedFromProductionStorage {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CapacityTarget {
+    First,
+    Second,
+}
+
+fn observe_available_bytes_for_current_user(
+    normalized_root: &[u16; VOLUME_GUID_ROOT_UNITS],
+) -> Result<u64, RecoveryVolumeCapacityValidationError> {
+    let mut nul_terminated_root = [0_u16; VOLUME_GUID_ROOT_UNITS + 1];
+    nul_terminated_root[..VOLUME_GUID_ROOT_UNITS].copy_from_slice(normalized_root);
+    let mut available_bytes_for_current_user = 0_u64;
+    // SAFETY: the exact retained handle-derived volume-GUID root is copied into
+    // a fixed live NUL-terminated buffer. Only the caller-available result is
+    // requested; total-capacity and total-free outputs are intentionally null.
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            nul_terminated_root.as_ptr(),
+            &raw mut available_bytes_for_current_user,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(RecoveryVolumeCapacityValidationError::CapacityObservationUnavailable);
+    }
+    Ok(available_bytes_for_current_user)
+}
+
+fn validate_capacity_observations(
+    required: &RecoverySetRequiredBytes,
+    mut revalidate: impl FnMut() -> Result<(), RecoveryVolumeCapacityValidationError>,
+    mut observe: impl FnMut(CapacityTarget) -> Result<u64, RecoveryVolumeCapacityValidationError>,
+) -> Result<(), RecoveryVolumeCapacityValidationError> {
+    revalidate()?;
+    let first_available = observe(CapacityTarget::First)?;
+    if !required.is_satisfied_by(first_available) {
+        return Err(RecoveryVolumeCapacityValidationError::InsufficientCapacity);
+    }
+    let second_available = observe(CapacityTarget::Second)?;
+    if !required.is_satisfied_by(second_available) {
+        return Err(RecoveryVolumeCapacityValidationError::InsufficientCapacity);
+    }
+    revalidate()
+}
+
+pub(super) fn validate_two_recovery_volume_root_capacities(
+    source: &RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
+) -> Result<TwoCapacityValidatedRecoveryVolumeRoots, RecoveryVolumeCapacityValidationError> {
+    let required = source
+        .prepare_recovery_set_required_bytes()
+        .map_err(|_| RecoveryVolumeCapacityValidationError::SourceSizeUnavailable)?;
+    validate_capacity_observations(
+        &required,
+        || {
+            roots.revalidate().map_err(|_| {
+                RecoveryVolumeCapacityValidationError::DestinationChangedOrInconsistent
+            })
+        },
+        |target| {
+            let normalized_root = match target {
+                CapacityTarget::First => &roots.first_initial_root.normalized_root,
+                CapacityTarget::Second => &roots.second_initial_root.normalized_root,
+            };
+            observe_available_bytes_for_current_user(normalized_root)
+        },
+    )?;
+    Ok(TwoCapacityValidatedRecoveryVolumeRoots { roots })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{
+        cell::{Cell, RefCell},
         fs,
         mem::needs_drop,
         sync::atomic::{AtomicU64, Ordering},
@@ -669,6 +775,215 @@ mod tests {
             reparse_tag: 0,
             normalized_root: valid_root(),
         }
+    }
+
+    fn required_for_test(bytes: u64) -> RecoverySetRequiredBytes {
+        RecoverySetRequiredBytes::from_test_bytes(bytes)
+    }
+
+    #[test]
+    fn capacity_comparison_accepts_exact_equality_and_rejects_one_byte_below() {
+        let required = required_for_test(1_000);
+        assert!(required.is_satisfied_by(1_000));
+        assert!(!required.is_satisfied_by(999));
+    }
+
+    #[test]
+    fn each_root_must_independently_have_sufficient_capacity() {
+        for (available, expected_observations) in [([999, 2_000], 1), ([2_000, 999], 2)] {
+            let observations = Cell::new(0_usize);
+            let result = validate_capacity_observations(
+                &required_for_test(1_000),
+                || Ok(()),
+                |target| {
+                    observations.set(observations.get() + 1);
+                    Ok(match target {
+                        CapacityTarget::First => available[0],
+                        CapacityTarget::Second => available[1],
+                    })
+                },
+            );
+            assert_eq!(
+                result,
+                Err(RecoveryVolumeCapacityValidationError::InsufficientCapacity)
+            );
+            assert_eq!(observations.get(), expected_observations);
+        }
+    }
+
+    #[test]
+    fn unavailable_capacity_observation_fails_closed() {
+        let result = validate_capacity_observations(
+            &required_for_test(1_000),
+            || Ok(()),
+            |_| Err(RecoveryVolumeCapacityValidationError::CapacityObservationUnavailable),
+        );
+        assert_eq!(
+            result,
+            Err(RecoveryVolumeCapacityValidationError::CapacityObservationUnavailable)
+        );
+    }
+
+    #[test]
+    fn pre_capacity_revalidation_failure_prevents_observation() {
+        let observations = Cell::new(0_usize);
+        let result = validate_capacity_observations(
+            &required_for_test(1_000),
+            || Err(RecoveryVolumeCapacityValidationError::DestinationChangedOrInconsistent),
+            |_| {
+                observations.set(observations.get() + 1);
+                Ok(2_000)
+            },
+        );
+        assert_eq!(
+            result,
+            Err(RecoveryVolumeCapacityValidationError::DestinationChangedOrInconsistent)
+        );
+        assert_eq!(observations.get(), 0);
+    }
+
+    #[test]
+    fn post_capacity_revalidation_failure_rejects_two_sufficient_observations() {
+        let revalidations = Cell::new(0_usize);
+        let observations = Cell::new(0_usize);
+        let result = validate_capacity_observations(
+            &required_for_test(1_000),
+            || {
+                let call = revalidations.get();
+                revalidations.set(call + 1);
+                if call == 0 {
+                    Ok(())
+                } else {
+                    Err(RecoveryVolumeCapacityValidationError::DestinationChangedOrInconsistent)
+                }
+            },
+            |_| {
+                observations.set(observations.get() + 1);
+                Ok(1_000)
+            },
+        );
+        assert_eq!(
+            result,
+            Err(RecoveryVolumeCapacityValidationError::DestinationChangedOrInconsistent)
+        );
+        assert_eq!(revalidations.get(), 2);
+        assert_eq!(observations.get(), 2);
+    }
+
+    #[test]
+    fn both_sufficient_roots_succeed_between_complete_revalidations() {
+        let events = RefCell::new(Vec::new());
+        validate_capacity_observations(
+            &required_for_test(1_000),
+            || {
+                events.borrow_mut().push("revalidate");
+                Ok(())
+            },
+            |target| {
+                events.borrow_mut().push(match target {
+                    CapacityTarget::First => "first-capacity",
+                    CapacityTarget::Second => "second-capacity",
+                });
+                Ok(1_000)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            events.into_inner(),
+            [
+                "revalidate",
+                "first-capacity",
+                "second-capacity",
+                "revalidate"
+            ]
+        );
+    }
+
+    #[test]
+    fn capacity_owner_and_errors_are_opaque_and_redacted() {
+        assert!(needs_drop::<TwoCapacityValidatedRecoveryVolumeRoots>());
+        for (error, expected) in [
+            (
+                RecoveryVolumeCapacityValidationError::SourceSizeUnavailable,
+                "SourceSizeUnavailable",
+            ),
+            (
+                RecoveryVolumeCapacityValidationError::CapacityObservationUnavailable,
+                "CapacityObservationUnavailable",
+            ),
+            (
+                RecoveryVolumeCapacityValidationError::InsufficientCapacity,
+                "InsufficientCapacity",
+            ),
+            (
+                RecoveryVolumeCapacityValidationError::DestinationChangedOrInconsistent,
+                "DestinationChangedOrInconsistent",
+            ),
+        ] {
+            assert_eq!(format!("{error:?}"), expected);
+        }
+
+        let source = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let owner = production
+            .split_once("struct TwoCapacityValidatedRecoveryVolumeRoots {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(owner.contains("roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage"));
+        for forbidden in [
+            "pub ",
+            "available",
+            "required",
+            "path",
+            "handle",
+            "guid",
+            "device",
+        ] {
+            assert!(!owner.to_ascii_lowercase().contains(forbidden));
+        }
+        let debug = production
+            .split_once("impl fmt::Debug for TwoCapacityValidatedRecoveryVolumeRoots")
+            .unwrap()
+            .1
+            .split_once("#[derive(Clone, Copy, Eq, PartialEq)]")
+            .unwrap()
+            .0;
+        assert!(debug.contains("([REDACTED])"));
+    }
+
+    #[test]
+    fn capacity_transition_has_no_getters_or_mutation_publication_surface() {
+        let source = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        for forbidden in [
+            "fn available_bytes(",
+            "fn required_bytes(",
+            "fn path(",
+            "fn handle(",
+            "fn volume_guid(",
+            "fn device_number(",
+            "CreateDirectoryW",
+            "WriteFile",
+            "church-app-recovery-set",
+            "tauri::command",
+            "Serialize",
+            "Deserialize",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "unexpected surface: {forbidden}"
+            );
+        }
+        let transition = production
+            .split_once("fn validate_two_recovery_volume_root_capacities(")
+            .unwrap()
+            .1;
+        assert!(transition.contains("prepare_recovery_set_required_bytes()"));
+        assert!(transition.contains("first_initial_root.normalized_root"));
+        assert!(transition.contains("second_initial_root.normalized_root"));
     }
 
     #[test]
@@ -984,7 +1299,6 @@ mod tests {
             "tauri",
             "CreateDirectoryW",
             "WriteFile",
-            "GetDiskFreeSpace",
             "church-app-recovery-set",
         ] {
             assert!(!production.contains(forbidden));
