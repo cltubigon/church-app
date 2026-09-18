@@ -81,7 +81,7 @@ impl fmt::Debug for RecoveryDeviceSeparatedFromProductionStorage {
     }
 }
 
-struct TwoRecoveryDevicesSeparatedFromProductionStorage {
+pub(super) struct TwoRecoveryDevicesSeparatedFromProductionStorage {
     _production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
     _first_recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
     _second_recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
@@ -511,13 +511,14 @@ fn require_revalidated_second_recovery_device(
     production_revalidation: Result<(), PhysicalDeviceSeparationError>,
     first_recovery_revalidation: Result<(), PhysicalDeviceSeparationError>,
     second_recovery_revalidation: Result<(), PhysicalDeviceSeparationError>,
-    same_physical_devices: impl FnOnce() -> (bool, bool),
+    same_physical_devices: impl FnOnce() -> (bool, bool, bool),
 ) -> Result<(), PhysicalDeviceSeparationError> {
     production_revalidation?;
     first_recovery_revalidation?;
     second_recovery_revalidation?;
-    let (production_matches_second, first_matches_second) = same_physical_devices();
-    if production_matches_second || first_matches_second {
+    let (production_matches_first, production_matches_second, first_matches_second) =
+        same_physical_devices();
+    if production_matches_first || production_matches_second || first_matches_second {
         return Err(PhysicalDeviceSeparationError::SamePhysicalDevice);
     }
     Ok(())
@@ -564,7 +565,7 @@ impl RecoveryDeviceSeparatedFromProductionStorage {
         )
     }
 
-    fn separate_second_recovery_device(
+    pub(super) fn separate_second_recovery_device(
         self,
         second_recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
     ) -> Result<TwoRecoveryDevicesSeparatedFromProductionStorage, PhysicalDeviceSeparationError>
@@ -582,6 +583,8 @@ impl RecoveryDeviceSeparatedFromProductionStorage {
             || {
                 (
                     self.production_topology
+                        .same_accepted_physical_device(&self.recovery_device.topology),
+                    self.production_topology
                         .same_accepted_physical_device(&second_recovery_device.topology),
                     self.recovery_device
                         .topology
@@ -594,6 +597,33 @@ impl RecoveryDeviceSeparatedFromProductionStorage {
             _first_recovery_device: self.recovery_device,
             _second_recovery_device: second_recovery_device,
         })
+    }
+}
+
+impl TwoRecoveryDevicesSeparatedFromProductionStorage {
+    pub(super) fn revalidate(&self) -> Result<(), PhysicalDeviceSeparationError> {
+        require_revalidated_second_recovery_device(
+            self._production_topology
+                .revalidate()
+                .map_err(map_production_topology_revalidation_error),
+            self._first_recovery_device
+                .revalidate()
+                .map_err(map_recovery_revalidation_error),
+            self._second_recovery_device
+                .revalidate()
+                .map_err(map_recovery_revalidation_error),
+            || {
+                (
+                    self._production_topology
+                        .same_accepted_physical_device(&self._first_recovery_device.topology),
+                    self._production_topology
+                        .same_accepted_physical_device(&self._second_recovery_device.topology),
+                    self._first_recovery_device
+                        .topology
+                        .same_accepted_physical_device(&self._second_recovery_device.topology),
+                )
+            },
+        )
     }
 }
 
@@ -823,11 +853,27 @@ mod tests {
     #[test]
     fn second_recovery_separation_rejects_same_and_accepts_different_disks() {
         assert_eq!(
-            require_revalidated_second_recovery_device(Ok(()), Ok(()), Ok(()), || (false, true)),
+            require_revalidated_second_recovery_device(Ok(()), Ok(()), Ok(()), || {
+                (false, true, false)
+            }),
             Err(PhysicalDeviceSeparationError::SamePhysicalDevice)
         );
         assert_eq!(
-            require_revalidated_second_recovery_device(Ok(()), Ok(()), Ok(()), || (false, false)),
+            require_revalidated_second_recovery_device(Ok(()), Ok(()), Ok(()), || {
+                (false, false, true)
+            }),
+            Err(PhysicalDeviceSeparationError::SamePhysicalDevice)
+        );
+        assert_eq!(
+            require_revalidated_second_recovery_device(Ok(()), Ok(()), Ok(()), || {
+                (true, false, false)
+            }),
+            Err(PhysicalDeviceSeparationError::SamePhysicalDevice)
+        );
+        assert_eq!(
+            require_revalidated_second_recovery_device(Ok(()), Ok(()), Ok(()), || {
+                (false, false, false)
+            }),
             Ok(())
         );
     }
@@ -1067,5 +1113,8 @@ mod tests {
         assert!(compact.contains("production_topology.revalidate()"));
         assert!(compact.contains("recovery_device.revalidate()"));
         assert!(compact.contains("second_recovery_device.revalidate()"));
+        assert!(compact.contains("self._production_topology.revalidate()"));
+        assert!(compact.contains("self._first_recovery_device.revalidate()"));
+        assert!(compact.contains("self._second_recovery_device.revalidate()"));
     }
 }
