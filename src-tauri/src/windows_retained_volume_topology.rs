@@ -439,6 +439,10 @@ impl RetainedVolumeSinglePhysicalDeviceObservation {
         }
         Ok(())
     }
+
+    fn same_accepted_physical_device(&self, other: &Self) -> bool {
+        self.accepted_disk_number == other.accepted_disk_number
+    }
 }
 
 #[cfg(test)]
@@ -696,6 +700,20 @@ mod tests {
     }
 
     #[test]
+    fn two_retained_temporary_directory_handles_observe_the_same_device() {
+        let fixture = RuntimeFixture::create();
+        let first_directory = fixture.open_directory();
+        let second_directory = fixture.open_directory();
+        let first = observe_retained_volume_single_physical_device(&first_directory)
+            .expect("first retained temporary-directory handle should produce a topology proof");
+        let second = observe_retained_volume_single_physical_device(&second_directory)
+            .expect("second retained temporary-directory handle should produce a topology proof");
+        first.revalidate().expect("first proof should revalidate");
+        second.revalidate().expect("second proof should revalidate");
+        assert!(first.same_accepted_physical_device(&second));
+    }
+
+    #[test]
     fn source_surface_is_private_non_authorizing_and_uses_no_physical_drive_open() {
         let source = include_str!("windows_retained_volume_topology.rs");
         let production = source.split_once("#[cfg(test)]").unwrap().0;
@@ -712,6 +730,7 @@ mod tests {
             .1;
         assert_eq!(proof_impl.matches("pub(crate) fn ").count(), 1);
         assert!(proof_impl.contains("pub(crate) fn revalidate(&self)"));
+        assert!(proof_impl.contains("fn same_accepted_physical_device(&self, other: &Self)"));
         assert!(!proof_impl.contains("-> &OwnedHandle"));
         assert!(!proof_impl.contains("-> OwnedHandle"));
         assert!(!proof_impl.contains("RawHandle"));
@@ -732,5 +751,23 @@ mod tests {
         ] {
             assert!(!production.to_ascii_lowercase().contains(forbidden));
         }
+    }
+
+    #[test]
+    fn production_database_projection_reuses_the_topology_primitive_without_exposing_a_handle() {
+        let production_file = include_str!("production_database_file.rs");
+        let projection = production_file
+            .split_once("pub(crate) fn observe_retained_single_physical_device(")
+            .unwrap()
+            .1
+            .split_once("\n    }")
+            .unwrap()
+            .0;
+        assert!(projection.contains("observe_retained_volume_single_physical_device("));
+        assert!(projection.contains("&self._retained_file"));
+        assert!(!projection.contains("IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS"));
+        assert!(!projection.contains("IOCTL_STORAGE_GET_DEVICE_NUMBER"));
+        assert!(!production_file.contains("fn retained_file("));
+        assert!(!production_file.contains("fn raw_handle("));
     }
 }

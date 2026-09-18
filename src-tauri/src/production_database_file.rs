@@ -54,6 +54,20 @@ impl InspectedProductionDatabaseFile {
             },
         )
     }
+
+    /// Projects the already-retained database file into the private current-process
+    /// physical-device topology proof without releasing its handle or path.
+    #[allow(dead_code)]
+    pub(crate) fn observe_retained_single_physical_device(
+        &self,
+    ) -> Result<
+        crate::windows_retained_volume_topology::RetainedVolumeSinglePhysicalDeviceObservation,
+        crate::windows_retained_volume_topology::RetainedVolumeTopologyError,
+    > {
+        crate::windows_retained_volume_topology::observe_retained_volume_single_physical_device(
+            &self._retained_file,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

@@ -70,6 +70,50 @@ impl fmt::Debug for RetainedExternalDisconnectableRecoveryDeviceObservation {
     }
 }
 
+struct RecoveryDeviceSeparatedFromProductionStorage {
+    production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
+    recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
+}
+
+impl fmt::Debug for RecoveryDeviceSeparatedFromProductionStorage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RecoveryDeviceSeparatedFromProductionStorage([REDACTED])")
+    }
+}
+
+struct TwoRecoveryDevicesSeparatedFromProductionStorage {
+    _production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
+    _first_recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
+    _second_recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
+}
+
+impl fmt::Debug for TwoRecoveryDevicesSeparatedFromProductionStorage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TwoRecoveryDevicesSeparatedFromProductionStorage([REDACTED])")
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PhysicalDeviceSeparationError {
+    ProductionStorageObservationUnavailable,
+    RecoveryDeviceObservationUnavailable,
+    SamePhysicalDevice,
+    TopologyChangedOrInconsistent,
+}
+
+impl fmt::Debug for PhysicalDeviceSeparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ProductionStorageObservationUnavailable => {
+                "ProductionStorageObservationUnavailable"
+            }
+            Self::RecoveryDeviceObservationUnavailable => "RecoveryDeviceObservationUnavailable",
+            Self::SamePhysicalDevice => "SamePhysicalDevice",
+            Self::TopologyChangedOrInconsistent => "TopologyChangedOrInconsistent",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum RecoveryDeviceEligibilityError {
     ObservationUnavailable,
@@ -420,6 +464,118 @@ impl RetainedExternalDisconnectableRecoveryDeviceObservation {
     }
 }
 
+fn map_production_topology_revalidation_error(
+    error: RetainedVolumeTopologyError,
+) -> PhysicalDeviceSeparationError {
+    match error {
+        RetainedVolumeTopologyError::VolumeObservationUnavailable => {
+            PhysicalDeviceSeparationError::ProductionStorageObservationUnavailable
+        }
+        RetainedVolumeTopologyError::MalformedOrUnsupportedTopology
+        | RetainedVolumeTopologyError::MultiplePhysicalDisks
+        | RetainedVolumeTopologyError::TopologyChangedOrInconsistent => {
+            PhysicalDeviceSeparationError::TopologyChangedOrInconsistent
+        }
+    }
+}
+
+fn map_recovery_revalidation_error(
+    error: RecoveryDeviceEligibilityError,
+) -> PhysicalDeviceSeparationError {
+    match error {
+        RecoveryDeviceEligibilityError::ObservationUnavailable
+        | RecoveryDeviceEligibilityError::MalformedOrUnsupportedDeviceFacts => {
+            PhysicalDeviceSeparationError::RecoveryDeviceObservationUnavailable
+        }
+        RecoveryDeviceEligibilityError::NotEligible
+        | RecoveryDeviceEligibilityError::EligibilityChangedOrInconsistent => {
+            PhysicalDeviceSeparationError::TopologyChangedOrInconsistent
+        }
+    }
+}
+
+fn require_revalidated_distinct_pair(
+    first_revalidation: Result<(), PhysicalDeviceSeparationError>,
+    second_revalidation: Result<(), PhysicalDeviceSeparationError>,
+    same_physical_device: impl FnOnce() -> bool,
+) -> Result<(), PhysicalDeviceSeparationError> {
+    first_revalidation?;
+    second_revalidation?;
+    if same_physical_device() {
+        return Err(PhysicalDeviceSeparationError::SamePhysicalDevice);
+    }
+    Ok(())
+}
+
+fn require_revalidated_second_recovery_device(
+    production_revalidation: Result<(), PhysicalDeviceSeparationError>,
+    first_recovery_revalidation: Result<(), PhysicalDeviceSeparationError>,
+    second_recovery_revalidation: Result<(), PhysicalDeviceSeparationError>,
+    same_physical_devices: impl FnOnce() -> (bool, bool),
+) -> Result<(), PhysicalDeviceSeparationError> {
+    production_revalidation?;
+    first_recovery_revalidation?;
+    second_recovery_revalidation?;
+    let (production_matches_second, first_matches_second) = same_physical_devices();
+    if production_matches_second || first_matches_second {
+        return Err(PhysicalDeviceSeparationError::SamePhysicalDevice);
+    }
+    Ok(())
+}
+
+fn separate_recovery_device_from_production_storage(
+    production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
+    recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
+) -> Result<RecoveryDeviceSeparatedFromProductionStorage, PhysicalDeviceSeparationError> {
+    require_revalidated_distinct_pair(
+        production_topology
+            .revalidate()
+            .map_err(map_production_topology_revalidation_error),
+        recovery_device
+            .revalidate()
+            .map_err(map_recovery_revalidation_error),
+        || production_topology.same_accepted_physical_device(&recovery_device.topology),
+    )?;
+    Ok(RecoveryDeviceSeparatedFromProductionStorage {
+        production_topology,
+        recovery_device,
+    })
+}
+
+impl RecoveryDeviceSeparatedFromProductionStorage {
+    fn separate_second_recovery_device(
+        self,
+        second_recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
+    ) -> Result<TwoRecoveryDevicesSeparatedFromProductionStorage, PhysicalDeviceSeparationError>
+    {
+        require_revalidated_second_recovery_device(
+            self.production_topology
+                .revalidate()
+                .map_err(map_production_topology_revalidation_error),
+            self.recovery_device
+                .revalidate()
+                .map_err(map_recovery_revalidation_error),
+            second_recovery_device
+                .revalidate()
+                .map_err(map_recovery_revalidation_error),
+            || {
+                (
+                    self.production_topology
+                        .same_accepted_physical_device(&second_recovery_device.topology),
+                    self.recovery_device
+                        .topology
+                        .same_accepted_physical_device(&second_recovery_device.topology),
+                )
+            },
+        )?;
+        Ok(TwoRecoveryDevicesSeparatedFromProductionStorage {
+            _production_topology: self.production_topology,
+            _first_recovery_device: self.recovery_device,
+            _second_recovery_device: second_recovery_device,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +788,114 @@ mod tests {
     }
 
     #[test]
+    fn production_and_recovery_separation_rejects_same_and_accepts_different_disks() {
+        assert_eq!(
+            require_revalidated_distinct_pair(Ok(()), Ok(()), || true),
+            Err(PhysicalDeviceSeparationError::SamePhysicalDevice)
+        );
+        assert_eq!(
+            require_revalidated_distinct_pair(Ok(()), Ok(()), || false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn second_recovery_separation_rejects_same_and_accepts_different_disks() {
+        assert_eq!(
+            require_revalidated_second_recovery_device(Ok(()), Ok(()), Ok(()), || (false, true)),
+            Err(PhysicalDeviceSeparationError::SamePhysicalDevice)
+        );
+        assert_eq!(
+            require_revalidated_second_recovery_device(Ok(()), Ok(()), Ok(()), || (false, false)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn every_separation_input_revalidation_failure_fails_closed() {
+        let production_failure =
+            PhysicalDeviceSeparationError::ProductionStorageObservationUnavailable;
+        let recovery_failure = PhysicalDeviceSeparationError::RecoveryDeviceObservationUnavailable;
+        assert_eq!(
+            require_revalidated_distinct_pair(Err(production_failure), Ok(()), || {
+                panic!("identity must not be compared after production revalidation failure")
+            }),
+            Err(production_failure)
+        );
+        assert_eq!(
+            require_revalidated_second_recovery_device(
+                Err(production_failure),
+                Ok(()),
+                Ok(()),
+                || panic!("identity must not be compared after production revalidation failure")
+            ),
+            Err(production_failure)
+        );
+        assert_eq!(
+            require_revalidated_second_recovery_device(
+                Ok(()),
+                Err(recovery_failure),
+                Ok(()),
+                || panic!(
+                    "identity must not be compared after first recovery revalidation failure"
+                )
+            ),
+            Err(recovery_failure)
+        );
+        assert_eq!(
+            require_revalidated_second_recovery_device(
+                Ok(()),
+                Ok(()),
+                Err(recovery_failure),
+                || panic!(
+                    "identity must not be compared after second recovery revalidation failure"
+                )
+            ),
+            Err(recovery_failure)
+        );
+    }
+
+    #[test]
+    fn separation_proofs_and_errors_are_redacted() {
+        for (error, expected) in [
+            (
+                PhysicalDeviceSeparationError::ProductionStorageObservationUnavailable,
+                "ProductionStorageObservationUnavailable",
+            ),
+            (
+                PhysicalDeviceSeparationError::RecoveryDeviceObservationUnavailable,
+                "RecoveryDeviceObservationUnavailable",
+            ),
+            (
+                PhysicalDeviceSeparationError::SamePhysicalDevice,
+                "SamePhysicalDevice",
+            ),
+            (
+                PhysicalDeviceSeparationError::TopologyChangedOrInconsistent,
+                "TopologyChangedOrInconsistent",
+            ),
+        ] {
+            assert_eq!(format!("{error:?}"), expected);
+        }
+        let source = include_str!("windows_external_recovery_device_eligibility.rs");
+        for proof in [
+            "RecoveryDeviceSeparatedFromProductionStorage",
+            "TwoRecoveryDevicesSeparatedFromProductionStorage",
+        ] {
+            let debug = source
+                .split_once(&format!("impl fmt::Debug for {proof}"))
+                .unwrap()
+                .1
+                .split_once("\n}")
+                .unwrap()
+                .0;
+            assert!(debug.contains("([REDACTED])"));
+            assert!(!debug.contains("accepted_disk_number"));
+            assert!(!debug.contains("topology:"));
+        }
+    }
+
+    #[test]
     fn errors_and_success_owner_debug_are_fixed_and_redacted() {
         for (error, expected) in [
             (
@@ -657,7 +921,7 @@ mod tests {
             )
             .unwrap()
             .1
-            .split_once("#[derive(Clone, Copy, Eq, PartialEq)]")
+            .split_once("struct RecoveryDeviceSeparatedFromProductionStorage")
             .unwrap()
             .0;
         assert!(debug.contains("([REDACTED])"));
@@ -743,6 +1007,10 @@ mod tests {
     fn source_surface_is_private_non_authorizing_and_excludes_deferred_authority() {
         let source = include_str!("windows_external_recovery_device_eligibility.rs");
         let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let compact: String = production
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
         let library = include_str!("lib.rs");
         let topology = include_str!("windows_retained_volume_topology.rs");
         assert!(!library.contains("mod windows_external_recovery_device_eligibility;"));
@@ -754,6 +1022,11 @@ mod tests {
         assert!(!production.contains("retained_volume()"));
         assert!(!production.contains("pub(crate)"));
         assert!(!production.contains("pub fn "));
+        assert!(!production.contains("accepted_disk_number"));
+        assert!(!production.contains("pub(crate) fn same_physical_device"));
+        assert!(!production.contains("pub(crate) fn different_physical_device"));
+        assert!(!production.contains("FnOnce(&RetainedVolumeSinglePhysicalDeviceObservation"));
+        assert!(!production.contains("Serialize"));
         assert!(!production.contains("FnOnce(&OwnedHandle"));
         assert!(!production.contains("FnMut(&OwnedHandle"));
         assert!(!production.contains("Fn(&OwnedHandle"));
@@ -770,5 +1043,8 @@ mod tests {
         ] {
             assert!(!production.contains(forbidden));
         }
+        assert!(compact.contains("production_topology.revalidate()"));
+        assert!(compact.contains("recovery_device.revalidate()"));
+        assert!(compact.contains("second_recovery_device.revalidate()"));
     }
 }
