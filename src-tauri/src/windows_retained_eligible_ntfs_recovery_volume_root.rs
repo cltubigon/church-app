@@ -29,10 +29,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::{
-    application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
-    production_database_migration_recovery_envelope::RecoverySetRequiredBytes,
-};
+use crate::production_database_migration_recovery_envelope::RecoverySetRequiredBytes;
 
 use super::{
     RetainedVolumeSinglePhysicalDeviceObservation, RetainedVolumeTopologyError,
@@ -713,13 +710,12 @@ fn validate_capacity_observations(
     revalidate()
 }
 
-pub(super) fn validate_two_recovery_volume_root_capacities(
-    source: &RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+pub(super) fn validate_two_recovery_volume_root_capacities<SourceSizeError>(
+    required: Result<RecoverySetRequiredBytes, SourceSizeError>,
     roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
 ) -> Result<TwoCapacityValidatedRecoveryVolumeRoots, RecoveryVolumeCapacityValidationError> {
-    let required = source
-        .prepare_recovery_set_required_bytes()
-        .map_err(|_| RecoveryVolumeCapacityValidationError::SourceSizeUnavailable)?;
+    let required =
+        required.map_err(|_| RecoveryVolumeCapacityValidationError::SourceSizeUnavailable)?;
     validate_capacity_observations(
         &required,
         || {
@@ -958,6 +954,18 @@ mod tests {
     fn capacity_transition_has_no_getters_or_mutation_publication_surface() {
         let source = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
         let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let lifecycle = include_str!("application_lifecycle.rs");
+        let crate_root = include_str!("lib.rs");
+        assert!(!production.contains("application_lifecycle"));
+        assert!(production.contains(
+            "use crate::production_database_migration_recovery_envelope::RecoverySetRequiredBytes;"
+        ));
+        assert!(!lifecycle.contains(
+            "pub(crate) use production_database_migration_confirmation::production_database_migration_backup_stage::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup;"
+        ));
+        assert!(
+            !crate_root.contains("RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup")
+        );
         for forbidden in [
             "fn available_bytes(",
             "fn required_bytes(",
@@ -971,6 +979,8 @@ mod tests {
             "tauri::command",
             "Serialize",
             "Deserialize",
+            "fn source_owner(",
+            "fn custody_owner(",
         ] {
             assert!(
                 !production.contains(forbidden),
@@ -978,10 +988,11 @@ mod tests {
             );
         }
         let transition = production
-            .split_once("fn validate_two_recovery_volume_root_capacities(")
+            .split_once("fn validate_two_recovery_volume_root_capacities")
             .unwrap()
             .1;
-        assert!(transition.contains("prepare_recovery_set_required_bytes()"));
+        assert!(transition.contains("Result<RecoverySetRequiredBytes, SourceSizeError>"));
+        assert!(transition.contains("SourceSizeUnavailable"));
         assert!(transition.contains("first_initial_root.normalized_root"));
         assert!(transition.contains("second_initial_root.normalized_root"));
     }

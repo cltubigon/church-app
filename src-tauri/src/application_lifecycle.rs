@@ -38,14 +38,12 @@ use production_database_migration_confirmation::production_database_migration_ba
     ProductionDatabaseMigrationBackupStageWriterCloseRetryOutcome,
     ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome,
     ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome,
+    RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     UndisclosedMigrationRecoveryKeyCustodyInterruption,
     UndisclosedMigrationRecoveryKeyCustodyShutdown,
     UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome,
     run_migration_recovery_key_custody_native_ceremony,
 };
-
-#[cfg(windows)]
-pub(crate) use production_database_migration_confirmation::production_database_migration_backup_stage::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup;
 
 #[cfg(windows)]
 use crate::{
