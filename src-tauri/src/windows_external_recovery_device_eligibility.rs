@@ -23,9 +23,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::windows_retained_volume_topology::{
-    RetainedVolumeSinglePhysicalDeviceObservation, RetainedVolumeTopologyError,
-};
+use super::{RetainedVolumeSinglePhysicalDeviceObservation, RetainedVolumeTopologyError};
 
 const MAXIMUM_DESCRIPTOR_LENGTH: usize = 65_536;
 const DESCRIPTOR_HEADER_LENGTH: usize = size_of::<STORAGE_DESCRIPTOR_HEADER>();
@@ -62,7 +60,7 @@ const _: () = {
     assert!(MAXIMUM_DESCRIPTOR_LENGTH <= u32::MAX as usize);
 };
 
-pub(crate) struct RetainedExternalDisconnectableRecoveryDeviceObservation {
+struct RetainedExternalDisconnectableRecoveryDeviceObservation {
     topology: RetainedVolumeSinglePhysicalDeviceObservation,
 }
 
@@ -73,7 +71,7 @@ impl fmt::Debug for RetainedExternalDisconnectableRecoveryDeviceObservation {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum RecoveryDeviceEligibilityError {
+enum RecoveryDeviceEligibilityError {
     ObservationUnavailable,
     MalformedOrUnsupportedDeviceFacts,
     NotEligible,
@@ -405,19 +403,19 @@ fn require_revalidated_eligibility(
     })
 }
 
-pub(crate) fn observe_retained_external_disconnectable_recovery_device(
+fn observe_retained_external_disconnectable_recovery_device(
     topology: RetainedVolumeSinglePhysicalDeviceObservation,
 ) -> Result<RetainedExternalDisconnectableRecoveryDeviceObservation, RecoveryDeviceEligibilityError>
 {
     topology.revalidate().map_err(map_topology_initial_error)?;
-    observe_eligible_facts(topology.retained_volume())?;
+    observe_eligible_facts(&topology.retained_volume)?;
     Ok(RetainedExternalDisconnectableRecoveryDeviceObservation { topology })
 }
 
 impl RetainedExternalDisconnectableRecoveryDeviceObservation {
-    pub(crate) fn revalidate(&self) -> Result<(), RecoveryDeviceEligibilityError> {
+    fn revalidate(&self) -> Result<(), RecoveryDeviceEligibilityError> {
         require_revalidated_eligibility(self.topology.revalidate(), || {
-            observe_eligible_facts(self.topology.retained_volume())
+            observe_eligible_facts(&self.topology.retained_volume)
         })
     }
 }
@@ -713,13 +711,16 @@ mod tests {
     fn exact_temporary_directory_volume_cannot_bypass_eligibility_policy() {
         let fixture = RuntimeFixture::create();
         let directory = fixture.open_directory();
-        let topology = match crate::windows_retained_volume_topology::observe_retained_volume_single_physical_device(&directory) {
-            Ok(topology) => topology,
-            Err(error) => {
-                eprintln!("external recovery eligibility runtime topology observation: {error:?}");
-                return;
-            }
-        };
+        let topology =
+            match super::super::observe_retained_volume_single_physical_device(&directory) {
+                Ok(topology) => topology,
+                Err(error) => {
+                    eprintln!(
+                        "external recovery eligibility runtime topology observation: {error:?}"
+                    );
+                    return;
+                }
+            };
         match observe_retained_external_disconnectable_recovery_device(topology) {
             Ok(proof) => {
                 proof
@@ -742,7 +743,20 @@ mod tests {
     fn source_surface_is_private_non_authorizing_and_excludes_deferred_authority() {
         let source = include_str!("windows_external_recovery_device_eligibility.rs");
         let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let library = include_str!("lib.rs");
+        let topology = include_str!("windows_retained_volume_topology.rs");
+        assert!(!library.contains("mod windows_external_recovery_device_eligibility;"));
+        assert!(topology.contains("#[path = \"windows_external_recovery_device_eligibility.rs\"]"));
+        assert!(topology.contains("mod windows_external_recovery_device_eligibility;"));
+        assert!(production.contains("use super::{"));
+        assert!(production.contains("observe_eligible_facts(&topology.retained_volume)?;"));
+        assert!(production.contains("observe_eligible_facts(&self.topology.retained_volume)"));
+        assert!(!production.contains("retained_volume()"));
+        assert!(!production.contains("pub(crate)"));
         assert!(!production.contains("pub fn "));
+        assert!(!production.contains("FnOnce(&OwnedHandle"));
+        assert!(!production.contains("FnMut(&OwnedHandle"));
+        assert!(!production.contains("Fn(&OwnedHandle"));
         assert!(!production.contains("serde"));
         assert!(!production.contains("tauri"));
         assert!(!production.contains("IOCTL_STORAGE_SET_HOTPLUG_INFO"));

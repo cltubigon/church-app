@@ -23,6 +23,9 @@ use windows_sys::Win32::{
     },
 };
 
+#[path = "windows_external_recovery_device_eligibility.rs"]
+mod windows_external_recovery_device_eligibility;
+
 const FINAL_PATH_FLAGS: GETFINALPATHNAMEBYHANDLE_FLAGS = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;
 const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
 const VOLUME_GUID_ROOT_UNITS: usize = 49;
@@ -418,10 +421,6 @@ pub(crate) fn observe_retained_volume_single_physical_device(
 }
 
 impl RetainedVolumeSinglePhysicalDeviceObservation {
-    pub(crate) fn retained_volume(&self) -> &OwnedHandle {
-        &self.retained_volume
-    }
-
     pub(crate) fn revalidate(&self) -> Result<(), RetainedVolumeTopologyError> {
         let current_root = strict_volume_root(&self.retained_source)?;
         if !same_volume_root(&self.accepted_volume_root, &current_root) {
@@ -701,13 +700,30 @@ mod tests {
         let source = include_str!("windows_retained_volume_topology.rs");
         let production = source.split_once("#[cfg(test)]").unwrap().0;
         assert!(production.contains("trusted_retained_source: &File"));
+        assert!(
+            production.contains("#[path = \"windows_external_recovery_device_eligibility.rs\"]")
+        );
+        assert!(production.contains("mod windows_external_recovery_device_eligibility;"));
         assert!(!production.contains("pub fn "));
+        assert!(!production.contains("fn retained_volume("));
+        let proof_impl = production
+            .split_once("impl RetainedVolumeSinglePhysicalDeviceObservation {")
+            .unwrap()
+            .1;
+        assert_eq!(proof_impl.matches("pub(crate) fn ").count(), 1);
+        assert!(proof_impl.contains("pub(crate) fn revalidate(&self)"));
+        assert!(!proof_impl.contains("-> &OwnedHandle"));
+        assert!(!proof_impl.contains("-> OwnedHandle"));
+        assert!(!proof_impl.contains("RawHandle"));
+        assert!(!proof_impl.contains("HANDLE"));
+        assert!(!proof_impl.contains("FnOnce"));
+        assert!(!proof_impl.contains("FnMut"));
+        assert!(!proof_impl.contains("Fn("));
         assert!(!production.contains("serde"));
         assert!(!production.contains("tauri"));
         assert!(!production.contains("PhysicalDrive"));
         assert!(!production.contains("std::path::Path"));
         for forbidden in [
-            "external",
             "removable",
             "disconnect",
             "publication",

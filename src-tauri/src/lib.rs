@@ -55,9 +55,6 @@ mod sqlcipher_database_key_application;
 pub mod storage_foundation;
 #[allow(dead_code)]
 #[cfg(windows)]
-mod windows_external_recovery_device_eligibility;
-#[allow(dead_code)]
-#[cfg(windows)]
 mod windows_retained_volume_topology;
 
 #[cfg(all(test, target_os = "windows"))]
