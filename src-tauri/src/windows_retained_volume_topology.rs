@@ -418,6 +418,10 @@ pub(crate) fn observe_retained_volume_single_physical_device(
 }
 
 impl RetainedVolumeSinglePhysicalDeviceObservation {
+    pub(crate) fn retained_volume(&self) -> &OwnedHandle {
+        &self.retained_volume
+    }
+
     pub(crate) fn revalidate(&self) -> Result<(), RetainedVolumeTopologyError> {
         let current_root = strict_volume_root(&self.retained_source)?;
         if !same_volume_root(&self.accepted_volume_root, &current_root) {
