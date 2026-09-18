@@ -30,10 +30,13 @@ use windows_sys::Win32::{
 };
 
 use super::{
+    RetainedVolumeSinglePhysicalDeviceObservation, RetainedVolumeTopologyError,
     observe_retained_volume_single_physical_device,
     windows_external_recovery_device_eligibility::{
+        PhysicalDeviceSeparationError, RecoveryDeviceSeparatedFromProductionStorage,
         RetainedExternalDisconnectableRecoveryDeviceObservation,
         observe_retained_external_disconnectable_recovery_device,
+        separate_recovery_device_from_production_storage,
     },
 };
 
@@ -73,6 +76,37 @@ pub(super) struct RetainedEligibleNtfsRecoveryVolumeRoot {
     selected_root: File,
     initial_root: RootFacts,
     eligible_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
+}
+
+pub(super) struct RecoveryVolumeRootSeparatedFromProductionStorage {
+    selected_root: File,
+    initial_root: RootFacts,
+    separation: RecoveryDeviceSeparatedFromProductionStorage,
+}
+
+impl fmt::Debug for RecoveryVolumeRootSeparatedFromProductionStorage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RecoveryVolumeRootSeparatedFromProductionStorage([REDACTED])")
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum RecoveryVolumeRootProductionSeparationError {
+    ProductionObservationUnavailable,
+    RecoveryRootUnavailableOrChanged,
+    SamePhysicalDevice,
+    TopologyChangedOrInconsistent,
+}
+
+impl fmt::Debug for RecoveryVolumeRootProductionSeparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ProductionObservationUnavailable => "ProductionObservationUnavailable",
+            Self::RecoveryRootUnavailableOrChanged => "RecoveryRootUnavailableOrChanged",
+            Self::SamePhysicalDevice => "SamePhysicalDevice",
+            Self::TopologyChangedOrInconsistent => "TopologyChangedOrInconsistent",
+        })
+    }
 }
 
 impl fmt::Debug for RetainedEligibleNtfsRecoveryVolumeRoot {
@@ -362,6 +396,49 @@ fn require_eligibility<T, E>(
     result.map_err(|_| RetainedEligibleNtfsRecoveryVolumeRootError::EligibilityUnavailableOrChanged)
 }
 
+fn map_production_revalidation_error(
+    error: RetainedVolumeTopologyError,
+) -> RecoveryVolumeRootProductionSeparationError {
+    match error {
+        RetainedVolumeTopologyError::VolumeObservationUnavailable => {
+            RecoveryVolumeRootProductionSeparationError::ProductionObservationUnavailable
+        }
+        RetainedVolumeTopologyError::MalformedOrUnsupportedTopology
+        | RetainedVolumeTopologyError::MultiplePhysicalDisks
+        | RetainedVolumeTopologyError::TopologyChangedOrInconsistent => {
+            RecoveryVolumeRootProductionSeparationError::TopologyChangedOrInconsistent
+        }
+    }
+}
+
+fn map_separation_error(
+    error: PhysicalDeviceSeparationError,
+) -> RecoveryVolumeRootProductionSeparationError {
+    match error {
+        PhysicalDeviceSeparationError::ProductionStorageObservationUnavailable => {
+            RecoveryVolumeRootProductionSeparationError::ProductionObservationUnavailable
+        }
+        PhysicalDeviceSeparationError::RecoveryDeviceObservationUnavailable => {
+            RecoveryVolumeRootProductionSeparationError::RecoveryRootUnavailableOrChanged
+        }
+        PhysicalDeviceSeparationError::SamePhysicalDevice => {
+            RecoveryVolumeRootProductionSeparationError::SamePhysicalDevice
+        }
+        PhysicalDeviceSeparationError::TopologyChangedOrInconsistent => {
+            RecoveryVolumeRootProductionSeparationError::TopologyChangedOrInconsistent
+        }
+    }
+}
+
+fn revalidate_root_identity_and_filesystem(
+    selected_root: &File,
+    initial_root: &RootFacts,
+) -> Result<(), RetainedEligibleNtfsRecoveryVolumeRootError> {
+    let current = query_root_facts(selected_root)?;
+    require_same_root(initial_root, &current)?;
+    observe_ntfs(selected_root)
+}
+
 pub(super) fn retain_eligible_ntfs_recovery_volume_root(
     selection: NativeSelectedRecoveryVolumeRoot,
 ) -> Result<RetainedEligibleNtfsRecoveryVolumeRoot, RetainedEligibleNtfsRecoveryVolumeRootError> {
@@ -386,10 +463,48 @@ pub(super) fn retain_eligible_ntfs_recovery_volume_root(
 
 impl RetainedEligibleNtfsRecoveryVolumeRoot {
     pub(super) fn revalidate(&self) -> Result<(), RetainedEligibleNtfsRecoveryVolumeRootError> {
-        let current = query_root_facts(&self.selected_root)?;
-        require_same_root(&self.initial_root, &current)?;
-        observe_ntfs(&self.selected_root)?;
+        revalidate_root_identity_and_filesystem(&self.selected_root, &self.initial_root)?;
         require_eligibility(self.eligible_device.revalidate())
+    }
+}
+
+pub(super) fn separate_recovery_volume_root_from_production_storage(
+    production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
+    recovery_root: RetainedEligibleNtfsRecoveryVolumeRoot,
+) -> Result<
+    RecoveryVolumeRootSeparatedFromProductionStorage,
+    RecoveryVolumeRootProductionSeparationError,
+> {
+    production_topology
+        .revalidate()
+        .map_err(map_production_revalidation_error)?;
+    recovery_root.revalidate().map_err(|_| {
+        RecoveryVolumeRootProductionSeparationError::RecoveryRootUnavailableOrChanged
+    })?;
+    let RetainedEligibleNtfsRecoveryVolumeRoot {
+        selected_root,
+        initial_root,
+        eligible_device,
+    } = recovery_root;
+    let separation =
+        separate_recovery_device_from_production_storage(production_topology, eligible_device)
+            .map_err(map_separation_error)?;
+    Ok(RecoveryVolumeRootSeparatedFromProductionStorage {
+        selected_root,
+        initial_root,
+        separation,
+    })
+}
+
+impl RecoveryVolumeRootSeparatedFromProductionStorage {
+    pub(super) fn revalidate(&self) -> Result<(), RecoveryVolumeRootProductionSeparationError> {
+        self.separation
+            .revalidate_production_topology()
+            .map_err(map_separation_error)?;
+        revalidate_root_identity_and_filesystem(&self.selected_root, &self.initial_root).map_err(
+            |_| RecoveryVolumeRootProductionSeparationError::RecoveryRootUnavailableOrChanged,
+        )?;
+        self.separation.revalidate().map_err(map_separation_error)
     }
 }
 
@@ -398,6 +513,7 @@ mod tests {
     use super::*;
     use std::{
         fs,
+        mem::needs_drop,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -522,6 +638,146 @@ mod tests {
             require_eligibility::<(), ()>(Err(())),
             Err(RetainedEligibleNtfsRecoveryVolumeRootError::EligibilityUnavailableOrChanged)
         );
+    }
+
+    #[test]
+    fn root_separation_error_mapping_is_coarse_and_preserves_same_device_rejection() {
+        for (input, expected) in [
+            (
+                PhysicalDeviceSeparationError::ProductionStorageObservationUnavailable,
+                RecoveryVolumeRootProductionSeparationError::ProductionObservationUnavailable,
+            ),
+            (
+                PhysicalDeviceSeparationError::RecoveryDeviceObservationUnavailable,
+                RecoveryVolumeRootProductionSeparationError::RecoveryRootUnavailableOrChanged,
+            ),
+            (
+                PhysicalDeviceSeparationError::SamePhysicalDevice,
+                RecoveryVolumeRootProductionSeparationError::SamePhysicalDevice,
+            ),
+            (
+                PhysicalDeviceSeparationError::TopologyChangedOrInconsistent,
+                RecoveryVolumeRootProductionSeparationError::TopologyChangedOrInconsistent,
+            ),
+        ] {
+            assert_eq!(map_separation_error(input), expected);
+        }
+    }
+
+    #[test]
+    fn production_separated_root_owner_retains_root_and_existing_separation_ownership() {
+        assert!(needs_drop::<RecoveryVolumeRootSeparatedFromProductionStorage>());
+        let source = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let owner = production
+            .split_once("struct RecoveryVolumeRootSeparatedFromProductionStorage {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(owner.contains("selected_root: File"));
+        assert!(owner.contains("initial_root: RootFacts"));
+        assert!(owner.contains("separation: RecoveryDeviceSeparatedFromProductionStorage"));
+        for forbidden in ["pub ", "pub(crate)", "Serialize", "Deserialize"] {
+            assert!(!owner.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn composition_and_revalidation_preserve_locked_order_and_reuse_separation() {
+        let source = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let composition = production
+            .split_once("fn separate_recovery_volume_root_from_production_storage(")
+            .unwrap()
+            .1
+            .split_once("impl RecoveryVolumeRootSeparatedFromProductionStorage")
+            .unwrap()
+            .0;
+        let production_revalidation = composition
+            .find("production_topology\n        .revalidate()")
+            .unwrap();
+        let root_revalidation = composition
+            .find("recovery_root.revalidate().map_err(")
+            .unwrap();
+        let comparison = composition
+            .find("separate_recovery_device_from_production_storage(")
+            .unwrap();
+        assert!(production_revalidation < root_revalidation);
+        assert!(root_revalidation < comparison);
+        assert!(!composition.contains("same_accepted_physical_device"));
+
+        let revalidation = production
+            .split_once("impl RecoveryVolumeRootSeparatedFromProductionStorage")
+            .unwrap()
+            .1;
+        let production_revalidation = revalidation
+            .find("self.separation\n            .revalidate_production_topology()")
+            .unwrap();
+        let root_revalidation = revalidation
+            .find("revalidate_root_identity_and_filesystem(")
+            .unwrap();
+        let separation_revalidation = revalidation.find("self.separation.revalidate()").unwrap();
+        assert!(production_revalidation < root_revalidation);
+        assert!(root_revalidation < separation_revalidation);
+    }
+
+    #[test]
+    fn separated_root_surface_is_redacted_and_exposes_no_identity_or_mutation_api() {
+        for (error, expected) in [
+            (
+                RecoveryVolumeRootProductionSeparationError::ProductionObservationUnavailable,
+                "ProductionObservationUnavailable",
+            ),
+            (
+                RecoveryVolumeRootProductionSeparationError::RecoveryRootUnavailableOrChanged,
+                "RecoveryRootUnavailableOrChanged",
+            ),
+            (
+                RecoveryVolumeRootProductionSeparationError::SamePhysicalDevice,
+                "SamePhysicalDevice",
+            ),
+            (
+                RecoveryVolumeRootProductionSeparationError::TopologyChangedOrInconsistent,
+                "TopologyChangedOrInconsistent",
+            ),
+        ] {
+            assert_eq!(format!("{error:?}"), expected);
+        }
+
+        let source = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let debug = production
+            .split_once("impl fmt::Debug for RecoveryVolumeRootSeparatedFromProductionStorage")
+            .unwrap()
+            .1
+            .split_once("#[derive(Clone, Copy, Eq, PartialEq)]")
+            .unwrap()
+            .0;
+        assert!(debug.contains("([REDACTED])"));
+        for forbidden in ["selected_root", "initial_root", "separation:"] {
+            assert!(!debug.contains(forbidden));
+        }
+        for forbidden in [
+            "fn eligible_device(",
+            "fn topology(",
+            "fn retained_root(",
+            "fn handle(",
+            "fn path(",
+            "fn disk_number(",
+            "Serialize",
+            "Deserialize",
+            "tauri",
+            "CreateDirectoryW",
+            "WriteFile",
+            "church-app-recovery-set",
+        ] {
+            assert!(!production.contains(forbidden));
+        }
+        assert!(!production.contains("same_accepted_physical_device"));
+        assert!(!production.contains("IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS"));
+        assert!(!production.contains("IOCTL_STORAGE_GET_DEVICE_NUMBER"));
     }
 
     #[test]

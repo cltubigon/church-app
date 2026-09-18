@@ -70,7 +70,7 @@ impl fmt::Debug for RetainedExternalDisconnectableRecoveryDeviceObservation {
     }
 }
 
-struct RecoveryDeviceSeparatedFromProductionStorage {
+pub(super) struct RecoveryDeviceSeparatedFromProductionStorage {
     production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
     recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
 }
@@ -94,7 +94,7 @@ impl fmt::Debug for TwoRecoveryDevicesSeparatedFromProductionStorage {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum PhysicalDeviceSeparationError {
+pub(super) enum PhysicalDeviceSeparationError {
     ProductionStorageObservationUnavailable,
     RecoveryDeviceObservationUnavailable,
     SamePhysicalDevice,
@@ -523,7 +523,7 @@ fn require_revalidated_second_recovery_device(
     Ok(())
 }
 
-fn separate_recovery_device_from_production_storage(
+pub(super) fn separate_recovery_device_from_production_storage(
     production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
     recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
 ) -> Result<RecoveryDeviceSeparatedFromProductionStorage, PhysicalDeviceSeparationError> {
@@ -543,6 +543,27 @@ fn separate_recovery_device_from_production_storage(
 }
 
 impl RecoveryDeviceSeparatedFromProductionStorage {
+    pub(super) fn revalidate_production_topology(
+        &self,
+    ) -> Result<(), PhysicalDeviceSeparationError> {
+        self.production_topology
+            .revalidate()
+            .map_err(map_production_topology_revalidation_error)
+    }
+
+    pub(super) fn revalidate(&self) -> Result<(), PhysicalDeviceSeparationError> {
+        require_revalidated_distinct_pair(
+            self.revalidate_production_topology(),
+            self.recovery_device
+                .revalidate()
+                .map_err(map_recovery_revalidation_error),
+            || {
+                self.production_topology
+                    .same_accepted_physical_device(&self.recovery_device.topology)
+            },
+        )
+    }
+
     fn separate_second_recovery_device(
         self,
         second_recovery_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
