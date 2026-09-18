@@ -43,6 +43,9 @@ use super::{
     },
 };
 
+#[path = "windows_retained_eligible_ntfs_recovery_volume_root/retained_recovery_set_directories.rs"]
+mod retained_recovery_set_directories;
+
 const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
 const VOLUME_GUID_ROOT_UNITS: usize = 49;
 const FILESYSTEM_NAME_CAPACITY: usize = 32;
