@@ -1,9 +1,11 @@
 //! Private retained authority for one exact eligible NTFS recovery-volume root.
 //!
-//! This boundary is observation-only. It accepts only the opaque result of a
-//! future Rust-native selector, retains the opened root, and composes the
-//! existing topology and external/disconnectable eligibility proofs. It does
-//! not create a recovery-set child or grant publication authority.
+//! Exact-root acquisition remains observation-only. It accepts only the opaque
+//! result of a future Rust-native selector, retains the opened root, and
+//! composes the existing topology and external/disconnectable eligibility
+//! proofs. This private subtree also contains a separately typed consuming
+//! boundary that creates and retains the two fixed recovery-set children.
+//! Neither boundary grants artifact-publication authority.
 
 use std::{
     ffi::c_void,
