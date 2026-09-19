@@ -16,6 +16,9 @@ use tauri::{AppHandle, Manager};
 
 mod production_database_migration_confirmation;
 
+#[cfg(windows)]
+pub(crate) use production_database_migration_confirmation::production_database_migration_backup_stage::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup;
+
 use production_database_migration_confirmation::{
     AuthorizedProductionDatabaseMigrationHandoff, ProductionDatabaseMigrationConfirmation,
     ProductionDatabaseMigrationCrossProcessExclusivity,
@@ -38,7 +41,6 @@ use production_database_migration_confirmation::production_database_migration_ba
     ProductionDatabaseMigrationBackupStageWriterCloseRetryOutcome,
     ProductionDatabaseMigrationRecoveryEnvelopeSourceCloseRetryOutcome,
     ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome,
-    RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     UndisclosedMigrationRecoveryKeyCustodyInterruption,
     UndisclosedMigrationRecoveryKeyCustodyShutdown,
     UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome,

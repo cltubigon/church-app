@@ -326,18 +326,20 @@ fn destroy_construction_key_for_test(
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum StageObservationError {
+pub(crate) enum StageObservationError {
     ObservationUnavailable,
     IdentityUnavailableOrChanged,
 }
 
-struct MigrationBackupStageManifestObservation {
-    database_byte_length: u64,
-    database_sha256: [u8; 32],
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct MigrationBackupStageManifestObservation {
+    pub(crate) database_byte_length: u64,
+    pub(crate) database_sha256: [u8; 32],
 }
 
-fn stage_manifest_observation(
+fn stage_manifest_observation_with_sink(
     proof: &VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
+    mut sink: impl FnMut(&[u8]) -> Result<(), ()>,
 ) -> Result<MigrationBackupStageManifestObservation, StageObservationError> {
     #[cfg(test)]
     if injected_test_failure(TestFailurePoint::ManifestStageIdentity) {
@@ -362,6 +364,7 @@ fn stage_manifest_observation(
         if read == 0 {
             break;
         }
+        sink(&buffer[..read]).map_err(|()| StageObservationError::ObservationUnavailable)?;
         hasher.update(&buffer[..read]);
         offset = offset
             .checked_add(
@@ -384,6 +387,19 @@ fn stage_manifest_observation(
         database_byte_length,
         database_sha256: hasher.finalize().into(),
     })
+}
+
+fn stage_manifest_observation(
+    proof: &VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
+) -> Result<MigrationBackupStageManifestObservation, StageObservationError> {
+    stage_manifest_observation_with_sink(proof, |_| Ok(()))
+}
+
+pub(crate) fn stream_stage_for_recovery_database_publication(
+    proof: &VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
+    sink: impl FnMut(&[u8]) -> Result<(), ()>,
+) -> Result<MigrationBackupStageManifestObservation, StageObservationError> {
+    stage_manifest_observation_with_sink(proof, sink)
 }
 
 fn stage_digest(

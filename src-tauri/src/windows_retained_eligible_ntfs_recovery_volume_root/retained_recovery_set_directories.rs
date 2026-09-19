@@ -1,5 +1,8 @@
 //! Private create-new ownership boundary for the two fixed recovery-set directories.
 
+#[path = "first_recovery_database_artifact.rs"]
+mod first_recovery_database_artifact;
+
 use std::{
     ffi::c_void,
     fmt,
@@ -456,6 +459,17 @@ impl RetainedRecoverySetDirectory {
             &current,
         )?;
         require_same_child(&self.initial_child, &current)
+    }
+}
+
+impl TwoRetainedRecoverySetDirectories {
+    fn revalidate(&self) -> Result<(), RecoverySetDirectoryCreationError> {
+        self.destination_authority
+            .roots
+            .revalidate()
+            .map_err(|_| RecoverySetDirectoryCreationError::DestinationChangedOrInconsistent)?;
+        self.first.revalidate()?;
+        self.second.revalidate()
     }
 }
 

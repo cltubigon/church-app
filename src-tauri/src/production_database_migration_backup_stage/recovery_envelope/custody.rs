@@ -383,16 +383,30 @@ impl PossiblyExposedMigrationRecoveryKeyCustodyFailure {
 }
 
 impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
-    pub(crate) fn prepare_recovery_set_manifest_v1(
+    pub(crate) fn observe_recovery_database_source(
         &self,
-    ) -> Result<RecoverySetManifestV1, RecoverySetManifestPreparationError> {
-        let envelope_bytes = self.verified_envelope.encoded.as_bytes();
-        let backup_set_identifier =
-            ParsedUntrustedMigrationRecoveryEnvelopeV1::parse(envelope_bytes)
-                .map_err(|_| RecoverySetManifestPreparationError::SourceObservationUnavailable)?
-                .backup_set_identifier();
-        let stage_observation = super::stage_manifest_observation(
+    ) -> Result<super::MigrationBackupStageManifestObservation, RecoverySetManifestPreparationError>
+    {
+        super::stage_manifest_observation(&self.encrypted_stage.backup_stage_proof).map_err(
+            |error| match error {
+                StageObservationError::ObservationUnavailable => {
+                    RecoverySetManifestPreparationError::SourceObservationUnavailable
+                }
+                StageObservationError::IdentityUnavailableOrChanged => {
+                    RecoverySetManifestPreparationError::StageIdentityUnavailableOrChanged
+                }
+            },
+        )
+    }
+
+    pub(crate) fn stream_recovery_database_source(
+        &self,
+        sink: impl FnMut(&[u8]) -> Result<(), ()>,
+    ) -> Result<super::MigrationBackupStageManifestObservation, RecoverySetManifestPreparationError>
+    {
+        super::stream_stage_for_recovery_database_publication(
             &self.encrypted_stage.backup_stage_proof,
+            sink,
         )
         .map_err(|error| match error {
             StageObservationError::ObservationUnavailable => {
@@ -401,7 +415,18 @@ impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
             StageObservationError::IdentityUnavailableOrChanged => {
                 RecoverySetManifestPreparationError::StageIdentityUnavailableOrChanged
             }
-        })?;
+        })
+    }
+
+    pub(crate) fn prepare_recovery_set_manifest_v1(
+        &self,
+    ) -> Result<RecoverySetManifestV1, RecoverySetManifestPreparationError> {
+        let envelope_bytes = self.verified_envelope.encoded.as_bytes();
+        let backup_set_identifier =
+            ParsedUntrustedMigrationRecoveryEnvelopeV1::parse(envelope_bytes)
+                .map_err(|_| RecoverySetManifestPreparationError::SourceObservationUnavailable)?
+                .backup_set_identifier();
+        let stage_observation = self.observe_recovery_database_source()?;
         let recovery_envelope_sha256 = Sha256::digest(envelope_bytes).into();
 
         RecoverySetManifestV1::from_trusted_internal_facts(
@@ -737,7 +762,7 @@ mod tests {
         for required in [
             "&self",
             "ParsedUntrustedMigrationRecoveryEnvelopeV1::parse",
-            "stage_manifest_observation",
+            "observe_recovery_database_source",
             "Sha256::digest(envelope_bytes)",
             "RecoverySetManifestV1::from_trusted_internal_facts",
         ] {
