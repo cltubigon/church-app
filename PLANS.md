@@ -8,7 +8,7 @@ The current publication slice implements first-set `parish-data.db`, `migration-
 
 ## 2. Authority and objective
 
-The current objective is the smallest manifest-last publication boundary over `FirstRecoveryDatabaseAndEnvelopeArtifactsPublished`. It publishes only the first set's fixed 98-byte `recovery-set-v1.manifest` from `prepare_recovery_set_manifest_v1`, with create-new final-name semantics, exact writes, file-buffer flush and explicit close, independent fresh reopen, strict parse/structural/canonical byte verification, and hardened destination continuity. It revalidates the retained source, both destinations, first database, and first envelope before and after publication, preserves all prior authority plus the manifest, leaves partial artifacts in place, and grants no complete-set, lifecycle, restore, or migration authority.
+The current objective is independent first complete-recovery-set verification over the existing `FirstRecoverySetArtifactsPublished` owner. Without mutation, it must independently prove the exact final directory layout contains exactly the three canonical artifact names and no others; all three freshly reopened final artifacts correspond as one recovery set; the manifest, database, and envelope correspond; the artifacts correspond to the retained trusted source; and the applicable envelope/database verification and destination continuity remain valid. The manifest remains non-authoritative alone, and this next verification boundary is approved but not implemented.
 
 ## 3. Locked operational decisions relevant to the initiative
 
@@ -28,15 +28,15 @@ Keep database-key ownership, metadata contracts, metadata decoding, corresponden
 
 ## 6. Active stage
 
-This stage consumes only the accepted first-database-and-envelope publication owner. It prepares the canonical trusted-source manifest, revalidates the retained source stage, both fixed recovery-set directories, and both published payloads before mutation; creates only first-set `recovery-set-v1.manifest` with no-replace semantics; writes exactly 98 bytes, flushes, and explicitly closes it; then independently reopens and verifies exact length, EOF, strict parsing, structural validity, canonical re-encoding, trusted-byte equality, identity, path, parent, root, and device continuity. The source, all first-set artifacts, and both destination authorities remain retained for later complete-set verification and set-2 work.
+This stage consumes only the accepted first-set all-artifacts-published owner and independently verifies the first recovery set without mutation. It must prove the exact final three-entry layout; exactly `parish-data.db`, `migration-recovery-envelope-v1.bin`, and `recovery-set-v1.manifest` and no other entries; fresh three-artifact correspondence as one recovery set; manifest/database/envelope correspondence; retained trusted-source correspondence; applicable envelope/database verification; and destination continuity. The retained source, first-set artifacts, and destination authorities remain available for later set-2 work; this stage is not implemented and grants no lifecycle, restore, or migration authority.
 
 ## 7. Allowed scope
 
-One private first-set manifest-artifact publication module beneath the accepted database-and-envelope publisher, narrow retained-payload revalidation seams, opaque success/partial-failure owners, focused deterministic/source and temporary-directory runtime tests, and current-state documentation. No dependency, Cargo feature, SQL, schema, migration, frontend, IPC, picker, set-2, cleanup, restore, or lifecycle change is included.
+One private independent first complete-recovery-set verification boundary beneath the accepted first-set all-artifacts-published owner, with narrow verification seams, opaque success/failure ownership, focused deterministic/source and temporary-directory runtime tests, and current-state documentation. No dependency, Cargo feature, SQL, schema, migration, frontend, IPC, picker, set-2, cleanup, restore, lifecycle, or publication change is included.
 
 ## 8. Prohibited scope
 
-This stage authorizes only first-set `recovery-set-v1.manifest` create-new publication from the accepted database-and-envelope success owner and trusted retained source facts, plus its bounded fresh verification. It authorizes no dependency change, native picker, arbitrary caller path or child name, capacity reservation, set-2 publication, complete-set verification, Layer D lifecycle integration, authentication, physical-schema implementation, migration execution, writable database access, restore, replacement, retention/deletion, Tauri command, frontend change, PnP traversal, arbitrary drive/volume/device enumeration, device-policy mutation, or destructive operation.
+This stage authorizes only independent, non-mutating verification of the already published first recovery set against its retained trusted source and destination authority. It authorizes no publication or mutation, dependency change, native picker, arbitrary caller path or child name, capacity reservation, set-2 publication, Layer D lifecycle integration, authentication, physical-schema implementation, migration execution, writable database access, restore, replacement, retention/deletion, Tauri command, frontend change, PnP traversal, arbitrary drive/volume/device enumeration, device-policy mutation, or destructive operation.
 
 ## 9. Dependency approvals
 
