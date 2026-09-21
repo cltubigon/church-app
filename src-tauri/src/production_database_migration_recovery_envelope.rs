@@ -31,7 +31,10 @@ pub(crate) use custody::{
     EncodedMigrationRecoveryKeyCustodyV1, encode_migration_recovery_key_custody_v1,
     validate_migration_recovery_key_custody_v1,
 };
-pub(crate) use recovery_set_manifest::{RecoverySetManifestV1, RecoverySetRequiredBytes};
+pub(crate) use recovery_set_manifest::{
+    ParsedUntrustedRecoverySetManifestV1, RECOVERY_SET_MANIFEST_V1_LENGTH, RecoverySetManifestV1,
+    RecoverySetRequiredBytes,
+};
 
 pub(crate) const MIGRATION_RECOVERY_PAYLOAD_V1_LENGTH: usize = 96;
 pub(crate) const MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH: usize = 182;

@@ -1,5 +1,8 @@
 //! First-set-only publication of the fixed recovery-envelope artifact.
 
+#[path = "first_recovery_manifest_artifact.rs"]
+mod first_recovery_manifest_artifact;
+
 use std::{
     ffi::c_void,
     fmt,
@@ -49,9 +52,75 @@ struct RetainedFirstRecoveryEnvelopeArtifact {
     initial: Option<PublishedEnvelopeFacts>,
 }
 
+impl RetainedFirstRecoveryEnvelopeArtifact {
+    fn revalidate(
+        &mut self,
+        parent_identity: &RootIdentity,
+        parent_path: &[u16],
+        expected: &[u8; MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH],
+    ) -> Result<(), FirstRecoveryEnvelopeArtifactPublicationError> {
+        let file = self
+            .file
+            .as_mut()
+            .ok_or(FirstRecoveryEnvelopeArtifactPublicationError::ArtifactVerificationFailed)?;
+        let before = query_envelope_facts(file)?;
+        validate_fresh_envelope_facts(parent_identity, parent_path, &before)?;
+        if self.initial.as_ref() != Some(&before) {
+            return Err(FirstRecoveryEnvelopeArtifactPublicationError::ArtifactVerificationFailed);
+        }
+        verify_fresh_envelope_contents(file, expected)?;
+        let after = query_envelope_facts(file)?;
+        if before != after {
+            return Err(FirstRecoveryEnvelopeArtifactPublicationError::ArtifactVerificationFailed);
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct FirstRecoveryDatabaseAndEnvelopeArtifactsPublished {
     prior: FirstRecoveryDatabaseArtifactPublished,
     first_envelope: RetainedFirstRecoveryEnvelopeArtifact,
+}
+
+impl FirstRecoveryDatabaseAndEnvelopeArtifactsPublished {
+    fn revalidate_for_manifest_publication(
+        &mut self,
+        expected_database_length: u64,
+        expected_database_digest: [u8; 32],
+        expected_envelope: &[u8; MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH],
+    ) -> Result<(), FirstRecoveryEnvelopeArtifactPublicationError> {
+        self.prior
+            .revalidate_for_envelope_publication(
+                expected_database_length,
+                expected_database_digest,
+            )
+            .map_err(|error| match error {
+                FirstRecoveryDatabaseArtifactRevalidationError::DestinationChangedOrInconsistent => {
+                    FirstRecoveryEnvelopeArtifactPublicationError::DestinationChangedOrInconsistent
+                }
+                FirstRecoveryDatabaseArtifactRevalidationError::PriorArtifactChangedOrInvalid => {
+                    FirstRecoveryEnvelopeArtifactPublicationError::PriorArtifactChangedOrInvalid
+                }
+            })?;
+        self.first_envelope.revalidate(
+            &self.prior.destinations.first.initial_child.identity,
+            &self.prior.destinations.first.initial_child.normalized_path,
+            expected_envelope,
+        )?;
+        self.prior
+            .revalidate_for_envelope_publication(
+                expected_database_length,
+                expected_database_digest,
+            )
+            .map_err(|error| match error {
+                FirstRecoveryDatabaseArtifactRevalidationError::DestinationChangedOrInconsistent => {
+                    FirstRecoveryEnvelopeArtifactPublicationError::DestinationChangedOrInconsistent
+                }
+                FirstRecoveryDatabaseArtifactRevalidationError::PriorArtifactChangedOrInvalid => {
+                    FirstRecoveryEnvelopeArtifactPublicationError::PriorArtifactChangedOrInvalid
+                }
+            })
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
