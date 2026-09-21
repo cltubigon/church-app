@@ -1,10 +1,13 @@
 //! First-set-only publication of the fixed recovery database artifact.
 
+#[path = "first_recovery_database_artifact/first_recovery_envelope_artifact.rs"]
+mod first_recovery_envelope_artifact;
+
 use std::{
     ffi::c_void,
     fmt,
     fs::File,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle},
 };
 
@@ -50,10 +53,69 @@ struct RetainedFirstRecoveryDatabaseArtifact {
     initial: Option<PublishedDatabaseFacts>,
 }
 
+impl RetainedFirstRecoveryDatabaseArtifact {
+    fn revalidate(
+        &mut self,
+        parent_identity: &RootIdentity,
+        parent_path: &[u16],
+        expected_length: u64,
+        expected_digest: [u8; 32],
+    ) -> Result<(), FirstRecoveryDatabaseArtifactPublicationError> {
+        let file = self
+            .file
+            .as_mut()
+            .ok_or(FirstRecoveryDatabaseArtifactPublicationError::ArtifactVerificationFailed)?;
+        let before = query_database_facts(file)?;
+        validate_database_facts(parent_identity, parent_path, &before)?;
+        if self.initial.as_ref() != Some(&before) || before.byte_length != expected_length {
+            return Err(FirstRecoveryDatabaseArtifactPublicationError::ArtifactVerificationFailed);
+        }
+        file.seek(SeekFrom::Start(0)).map_err(|_| {
+            FirstRecoveryDatabaseArtifactPublicationError::ArtifactVerificationFailed
+        })?;
+        verify_fresh_contents(file, expected_length, expected_digest)?;
+        let after = query_database_facts(file)?;
+        if before != after {
+            return Err(FirstRecoveryDatabaseArtifactPublicationError::ArtifactVerificationFailed);
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct FirstRecoveryDatabaseArtifactPublished {
     source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     destinations: TwoRetainedRecoverySetDirectories,
     first_database: RetainedFirstRecoveryDatabaseArtifact,
+}
+
+enum FirstRecoveryDatabaseArtifactRevalidationError {
+    DestinationChangedOrInconsistent,
+    PriorArtifactChangedOrInvalid,
+}
+
+impl FirstRecoveryDatabaseArtifactPublished {
+    fn revalidate_for_envelope_publication(
+        &mut self,
+        expected_length: u64,
+        expected_digest: [u8; 32],
+    ) -> Result<(), FirstRecoveryDatabaseArtifactRevalidationError> {
+        self.destinations.revalidate().map_err(|_| {
+            FirstRecoveryDatabaseArtifactRevalidationError::DestinationChangedOrInconsistent
+        })?;
+        self.first_database
+            .revalidate(
+                &self.destinations.first.initial_child.identity,
+                &self.destinations.first.initial_child.normalized_path,
+                expected_length,
+                expected_digest,
+            )
+            .map_err(|_| {
+                FirstRecoveryDatabaseArtifactRevalidationError::PriorArtifactChangedOrInvalid
+            })?;
+        self.destinations.revalidate().map_err(|_| {
+            FirstRecoveryDatabaseArtifactRevalidationError::DestinationChangedOrInconsistent
+        })
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

@@ -383,6 +383,18 @@ impl PossiblyExposedMigrationRecoveryKeyCustodyFailure {
 }
 
 impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn with_verified_recovery_envelope_bytes<T>(
+        &self,
+        operation: impl FnOnce(
+            &[u8; crate::production_database_migration_recovery_envelope::MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH],
+        ) -> T,
+    ) -> Result<T, RecoverySetManifestPreparationError> {
+        let envelope_bytes = self.verified_envelope.encoded.as_bytes();
+        ParsedUntrustedMigrationRecoveryEnvelopeV1::parse(envelope_bytes)
+            .map_err(|_| RecoverySetManifestPreparationError::SourceObservationUnavailable)?;
+        Ok(operation(envelope_bytes))
+    }
+
     pub(crate) fn observe_recovery_database_source(
         &self,
     ) -> Result<super::MigrationBackupStageManifestObservation, RecoverySetManifestPreparationError>
@@ -654,6 +666,44 @@ mod tests {
             format!("{:?}", verified.custody),
             "VerifiedMigrationRecoveryKeyCustody"
         );
+        let shutdown = verified.abort_for_shutdown();
+        assert!(matches!(shutdown.source_close, SourceCloseState::Closed));
+        drop(source_root);
+    }
+
+    #[test]
+    fn custody_verified_owner_borrows_the_exact_verified_envelope_without_regeneration() {
+        let (source_root, _stage_root, verified) = custody_verified_backup();
+        let retained = *verified.verified_envelope.encoded.as_bytes();
+        let borrowed = verified
+            .with_verified_recovery_envelope_bytes(|bytes| *bytes)
+            .unwrap();
+        assert_eq!(borrowed, retained);
+
+        let production = production_region(include_str!("custody.rs"));
+        let boundary = declaration_region(
+            production,
+            "pub(crate) fn with_verified_recovery_envelope_bytes",
+            "pub(crate) fn observe_recovery_database_source",
+        );
+        for required in [
+            "&self",
+            "impl FnOnce",
+            "self.verified_envelope.encoded.as_bytes()",
+            "ParsedUntrustedMigrationRecoveryEnvelopeV1::parse",
+        ] {
+            assert!(boundary.contains(required));
+        }
+        for forbidden in [
+            "seal_migration_recovery_envelope_v1",
+            "generate_migration_recovery_key_material",
+            "generate_migration_backup_set_identifier",
+            "open_migration_recovery_envelope_v1",
+            "pub fn",
+        ] {
+            assert!(!boundary.contains(forbidden));
+        }
+
         let shutdown = verified.abort_for_shutdown();
         assert!(matches!(shutdown.source_close, SourceCloseState::Closed));
         drop(source_root);
