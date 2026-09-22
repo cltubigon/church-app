@@ -1,5 +1,15 @@
 //! Independent verification of the complete first digital recovery set.
 
+#[path = "first_complete_set/second_recovery_database_artifact.rs"]
+mod second_recovery_database_artifact;
+
+#[allow(unused_imports)]
+pub(crate) use second_recovery_database_artifact::{
+    FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
+    SecondRecoveryDatabaseArtifactPublicationError,
+    SecondRecoveryDatabaseArtifactPublicationFailure, publish_second_recovery_database_artifact,
+};
+
 use std::{fmt, io::Read};
 
 use sha2::{Digest, Sha256};
