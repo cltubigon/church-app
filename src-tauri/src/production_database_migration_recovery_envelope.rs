@@ -28,7 +28,8 @@ mod custody;
 mod recovery_set_manifest;
 
 pub(crate) use custody::{
-    EncodedMigrationRecoveryKeyCustodyV1, encode_migration_recovery_key_custody_v1,
+    EncodedMigrationRecoveryKeyCustodyV1, MigrationRecoveryKeyCustodyValidationError,
+    ReenteredMigrationRecoveryKeyCustodyV1, encode_migration_recovery_key_custody_v1,
     validate_migration_recovery_key_custody_v1,
 };
 pub(crate) use recovery_set_manifest::{

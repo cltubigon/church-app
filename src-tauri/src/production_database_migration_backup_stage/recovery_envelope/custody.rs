@@ -18,6 +18,13 @@ use crate::production_database_migration_recovery_envelope::{
     RecoverySetManifestV1, RecoverySetRequiredBytes, encode_migration_recovery_key_custody_v1,
     validate_migration_recovery_key_custody_v1,
 };
+use crate::{
+    database_key_protected_payload::DecodedDatabaseKeyCandidate,
+    database_metadata_contract::DatabaseMetadataContractV1,
+    installation_evidence_protection::{
+        GenerationBoundDatabaseKey, bind_database_key_candidate_to_trusted_installation_evidence,
+    },
+};
 
 use super::super::{
     SourceCloseState, VerifiedEncryptedProductionDatabaseMigrationBackupStageProof, close_source,
@@ -383,6 +390,19 @@ impl PossiblyExposedMigrationRecoveryKeyCustodyFailure {
 }
 
 impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn bind_recovered_database_key_candidate(
+        &self,
+        candidate: DecodedDatabaseKeyCandidate,
+    ) -> Result<(GenerationBoundDatabaseKey, DatabaseMetadataContractV1), ()> {
+        self.encrypted_stage
+            .source
+            .with_migration_backup_source(|_, metadata, assessment| {
+                bind_database_key_candidate_to_trusted_installation_evidence(candidate, assessment)
+                    .map(|key| (key, *metadata))
+                    .map_err(|_| ())
+            })
+    }
+
     pub(crate) fn with_verified_recovery_envelope_bytes<T>(
         &self,
         operation: impl FnOnce(

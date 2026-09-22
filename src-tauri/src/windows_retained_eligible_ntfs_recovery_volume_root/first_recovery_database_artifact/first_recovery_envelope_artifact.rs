@@ -7,7 +7,7 @@ use std::{
     ffi::c_void,
     fmt,
     fs::File,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle},
 };
 
@@ -68,6 +68,9 @@ impl RetainedFirstRecoveryEnvelopeArtifact {
         if self.initial.as_ref() != Some(&before) {
             return Err(FirstRecoveryEnvelopeArtifactPublicationError::ArtifactVerificationFailed);
         }
+        file.seek(SeekFrom::Start(0)).map_err(|_| {
+            FirstRecoveryEnvelopeArtifactPublicationError::ArtifactVerificationFailed
+        })?;
         verify_fresh_envelope_contents(file, expected)?;
         let after = query_envelope_facts(file)?;
         if before != after {

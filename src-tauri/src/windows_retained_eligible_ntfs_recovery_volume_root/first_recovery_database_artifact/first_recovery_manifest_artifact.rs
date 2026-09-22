@@ -1,5 +1,16 @@
 //! First-set-only publication of the fixed manifest commit marker.
 
+#[path = "first_recovery_manifest_artifact/reentered_recovery_key_verification.rs"]
+mod reentered_recovery_key_verification;
+
+#[allow(unused_imports)]
+pub(crate) use reentered_recovery_key_verification::{
+    FirstRecoverySetRecoveredKeyVerificationError, FirstRecoverySetRecoveredKeyVerificationFailure,
+    FirstRecoverySetRecoveredKeyVerificationOutcome,
+    FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
+    FirstRecoverySetRecoveredKeyVerified, verify_first_recovery_set_with_reentered_recovery_key,
+};
+
 use std::{
     ffi::c_void,
     fmt,

@@ -25,6 +25,65 @@ pub(crate) struct EncodedMigrationRecoveryKeyCustodyV1 {
     bytes: [u8; MIGRATION_RECOVERY_KEY_CUSTODY_V1_LENGTH],
 }
 
+pub(crate) struct ReenteredMigrationRecoveryKeyCustodyV1 {
+    bytes: [u8; CRLF_RECORD_LENGTH],
+    length: usize,
+}
+
+impl fmt::Debug for ReenteredMigrationRecoveryKeyCustodyV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReenteredMigrationRecoveryKeyCustodyV1([REDACTED])")
+    }
+}
+
+impl Drop for ReenteredMigrationRecoveryKeyCustodyV1 {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+        self.length.zeroize();
+    }
+}
+
+impl ReenteredMigrationRecoveryKeyCustodyV1 {
+    pub(crate) fn from_bounded_entry(
+        input: &[u8],
+    ) -> Result<Self, MigrationRecoveryKeyCustodyValidationError> {
+        if input.len() != MIGRATION_RECOVERY_KEY_CUSTODY_V1_LENGTH
+            && input.len() != CRLF_RECORD_LENGTH
+        {
+            return Err(MigrationRecoveryKeyCustodyValidationError::MalformedCustodyText);
+        }
+        let mut bytes = [0_u8; CRLF_RECORD_LENGTH];
+        bytes[..input.len()].copy_from_slice(input);
+        Ok(Self {
+            bytes,
+            length: input.len(),
+        })
+    }
+
+    pub(crate) fn validate_association_and_into_recovery_key_material(
+        self,
+        expected_generation_identifier: MigrationRecoveryKeyGenerationIdentifier,
+        expected_backup_set_identifier: MigrationBackupSetIdentifier,
+    ) -> Result<GeneratedMigrationRecoveryKeyMaterial, MigrationRecoveryKeyCustodyValidationError>
+    {
+        let mut validated =
+            ParsedUntrustedMigrationRecoveryKeyCustodyV1::parse(&self.bytes[..self.length])?
+                .validate_checksum()?;
+        if validated.generation_identifier != expected_generation_identifier {
+            return Err(MigrationRecoveryKeyCustodyValidationError::RecoveryKeyGenerationMismatch);
+        }
+        if validated.backup_set_identifier != expected_backup_set_identifier {
+            return Err(MigrationRecoveryKeyCustodyValidationError::BackupSetMismatch);
+        }
+        let recovery_key =
+            super::MigrationRecoveryKey::from_bytes(std::mem::take(&mut validated.recovery_key));
+        Ok(GeneratedMigrationRecoveryKeyMaterial {
+            recovery_key,
+            generation_identifier: expected_generation_identifier,
+        })
+    }
+}
+
 impl fmt::Debug for EncodedMigrationRecoveryKeyCustodyV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("EncodedMigrationRecoveryKeyCustodyV1([REDACTED])")
@@ -1201,5 +1260,75 @@ mod tests {
         let cargo_lock = include_str!("../../Cargo.lock");
         assert!(!cargo_toml.to_ascii_lowercase().contains("custody"));
         assert!(!cargo_lock.to_ascii_lowercase().contains("custody"));
+    }
+
+    #[test]
+    fn reentered_owner_validates_checksum_and_association_before_material_release() {
+        let (generation_identifier, backup_set_identifier, _) = fields();
+        let entered = ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(GOLDEN).unwrap();
+        let material = entered
+            .validate_association_and_into_recovery_key_material(
+                generation_identifier,
+                backup_set_identifier,
+            )
+            .unwrap();
+        assert_eq!(material.generation_identifier(), generation_identifier);
+        assert!(material.recovery_key.expose_bytes(|key| key == &KEY));
+
+        let wrong_generation =
+            MigrationRecoveryKeyGenerationIdentifier::from_bytes([0x55; 16]).unwrap();
+        assert_eq!(
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(GOLDEN)
+                .unwrap()
+                .validate_association_and_into_recovery_key_material(
+                    wrong_generation,
+                    backup_set_identifier,
+                )
+                .unwrap_err(),
+            MigrationRecoveryKeyCustodyValidationError::RecoveryKeyGenerationMismatch
+        );
+        let wrong_set = MigrationBackupSetIdentifier::from_bytes([0x66; 16]).unwrap();
+        assert_eq!(
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(GOLDEN)
+                .unwrap()
+                .validate_association_and_into_recovery_key_material(
+                    generation_identifier,
+                    wrong_set,
+                )
+                .unwrap_err(),
+            MigrationRecoveryKeyCustodyValidationError::BackupSetMismatch
+        );
+    }
+
+    #[test]
+    fn reentered_owner_is_bounded_redacted_and_rejects_malformed_or_bad_checksum() {
+        assert!(needs_drop::<ReenteredMigrationRecoveryKeyCustodyV1>());
+        assert_eq!(size_of::<ReenteredMigrationRecoveryKeyCustodyV1>(), 208);
+        let entered = ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(GOLDEN).unwrap();
+        assert_eq!(
+            format!("{entered:?}"),
+            "ReenteredMigrationRecoveryKeyCustodyV1([REDACTED])"
+        );
+        assert_eq!(
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(b"short").unwrap_err(),
+            MigrationRecoveryKeyCustodyValidationError::MalformedCustodyText
+        );
+        let mut bad_checksum = *GOLDEN;
+        bad_checksum[195] = if bad_checksum[195] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        let (generation_identifier, backup_set_identifier, _) = fields();
+        assert_eq!(
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&bad_checksum)
+                .unwrap()
+                .validate_association_and_into_recovery_key_material(
+                    generation_identifier,
+                    backup_set_identifier,
+                )
+                .unwrap_err(),
+            MigrationRecoveryKeyCustodyValidationError::CustodyChecksumMismatch
+        );
     }
 }
