@@ -27,6 +27,8 @@ mod custody;
 #[path = "production_database_migration_recovery_envelope/recovery_set_manifest.rs"]
 mod recovery_set_manifest;
 
+#[cfg(test)]
+pub(crate) use custody::correctly_associated_wrong_key_record_for_test;
 pub(crate) use custody::{
     EncodedMigrationRecoveryKeyCustodyV1, MigrationRecoveryKeyCustodyValidationError,
     ReenteredMigrationRecoveryKeyCustodyV1, encode_migration_recovery_key_custody_v1,
@@ -1297,7 +1299,7 @@ mod tests {
     #[test]
     fn production_source_stays_pure_and_uses_detached_aead_without_candidate_shortcuts() {
         let production = include_str!("production_database_migration_recovery_envelope.rs")
-            .split("#[cfg(test)]")
+            .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap();
         for forbidden in [

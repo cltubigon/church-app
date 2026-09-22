@@ -216,12 +216,43 @@ fn freshly_read_envelope(
     {
         return Err(FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed);
     }
-    super::super::verify_fresh_envelope_contents(&mut reopened, expected)
+    let mut fresh = [0_u8; MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH];
+    use std::io::Read;
+    reopened
+        .read_exact(&mut fresh)
         .map_err(|_| FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed)?;
+    #[cfg(test)]
+    FRESH_ENVELOPE_DIFFERENCE_INJECTED.with(|injected| {
+        if injected.replace(false) {
+            fresh[MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH - 1] ^= 1;
+        }
+    });
+    let mut trailing = [0_u8; 1];
+    if reopened
+        .read(&mut trailing)
+        .map_err(|_| FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed)?
+        != 0
+        || fresh != *expected
+    {
+        return Err(FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed);
+    }
     if super::super::query_envelope_facts(&reopened).as_ref() != Ok(&before) {
         return Err(FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed);
     }
-    Ok(*expected)
+    Ok(fresh)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FRESH_ENVELOPE_DIFFERENCE_INJECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn with_fresh_envelope_difference_injected<T>(operation: impl FnOnce() -> T) -> T {
+    FRESH_ENVELOPE_DIFFERENCE_INJECTED.with(|injected| {
+        assert!(!injected.replace(true));
+    });
+    operation()
 }
 
 fn freshly_verify_database_correspondence(
@@ -332,11 +363,10 @@ pub(crate) fn verify_first_recovery_set_with_reentered_recovery_key(
                 );
             }
         };
-    let recovery_key_material = match entered_record
-        .validate_association_and_into_recovery_key_material(
-            retained_envelope.recovery_key_generation_identifier(),
-            retained_envelope.backup_set_identifier(),
-        ) {
+    let validated_record = match entered_record.validate_checksum_and_association(
+        retained_envelope.recovery_key_generation_identifier(),
+        retained_envelope.backup_set_identifier(),
+    ) {
         Ok(material) => material,
         Err(
             MigrationRecoveryKeyCustodyValidationError::RecoveryKeyGenerationMismatch
@@ -358,6 +388,7 @@ pub(crate) fn verify_first_recovery_set_with_reentered_recovery_key(
         Ok(bytes) => bytes,
         Err(error) => return failed(published, error),
     };
+    let recovery_key_material = validated_record.into_recovery_key_material();
     let parsed = match ParsedUntrustedMigrationRecoveryEnvelopeV1::parse(&fresh_envelope) {
         Ok(parsed) => parsed,
         Err(_) => {
@@ -563,7 +594,130 @@ impl FirstRecoverySetRecoveredKeyVerificationFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::needs_drop;
+    use std::{
+        fs,
+        mem::needs_drop,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use crate::{
+        application_lifecycle::{
+            PreparedProductionDatabaseMigrationBackupStage,
+            ProductionDatabaseMigrationBackupContext,
+            ProductionDatabaseMigrationBackupStageOutcome,
+            ProductionDatabaseMigrationRecoveryEnvelopeOutcome,
+            genuine_full_integrity_validated_migration_handoff_for_test,
+            prepare_migration_recovery_key_custody,
+            stage_encrypted_production_database_migration_backup,
+            verify_production_database_migration_recovery_envelope,
+        },
+        database_key::DatabaseKey,
+        installation_evidence_contract::DatabaseKeyGenerationIdentifier,
+        installation_evidence_protection::protect_database_key,
+        production_database_migration_recovery_envelope::{
+            ReenteredMigrationRecoveryKeyCustodyV1, correctly_associated_wrong_key_record_for_test,
+        },
+        storage_foundation::database_key_persistence_paths,
+    };
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn create(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "church-app-reentered-verification-{label}-{}-{}",
+                std::process::id(),
+                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct PublishedFixture {
+        published: Option<FirstRecoverySetArtifactsPublished>,
+        record: [u8; 196],
+        _destination_root: TestRoot,
+        _stage_root: TestRoot,
+        _source_root: crate::production_database_connection_handoff::MigrationDiscoveryTestRoot,
+    }
+
+    fn published_fixture() -> PublishedFixture {
+        let (source_root, handoff) = genuine_full_integrity_validated_migration_handoff_for_test();
+        let paths = database_key_persistence_paths(source_root.path());
+        fs::create_dir_all(paths.database_key_directory.as_path()).unwrap();
+        let key = DatabaseKey::from_bytes([0x74; 32]);
+        let generation = DatabaseKeyGenerationIdentifier::from_bytes([0x43; 16]).unwrap();
+        let wrapper = protect_database_key(&key, generation).unwrap();
+        fs::write(paths.active_database_key.as_path(), wrapper.as_bytes()).unwrap();
+
+        let stage_root = TestRoot::create("stage");
+        let prepared = PreparedProductionDatabaseMigrationBackupStage::from_synthetic_temp_root(
+            stage_root.path(),
+        )
+        .unwrap();
+        let ProductionDatabaseMigrationBackupStageOutcome::Verified(stage) =
+            stage_encrypted_production_database_migration_backup(
+                handoff,
+                prepared,
+                ProductionDatabaseMigrationBackupContext::from_synthetic_root(source_root.path()),
+            )
+        else {
+            panic!("stage fixture must verify");
+        };
+        let ProductionDatabaseMigrationRecoveryEnvelopeOutcome::Verified(enveloped) =
+            verify_production_database_migration_recovery_envelope(stage)
+        else {
+            panic!("envelope fixture must verify");
+        };
+        let prepared_custody = prepare_migration_recovery_key_custody(enveloped);
+        let record = *prepared_custody.encoded_for_test();
+        let source = prepared_custody
+            .disclose()
+            .verify_first_copy(&record)
+            .unwrap()
+            .verify_second_copy(&record)
+            .unwrap();
+
+        let destination_root = TestRoot::create("destination");
+        let first = destination_root.path().join("first");
+        let second = destination_root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let destinations =
+            super::super::super::super::super::retained_recovery_set_directories_for_test(
+                &first, &second,
+            );
+        let database = super::super::super::super::publish_first_recovery_database_artifact(
+            source,
+            destinations,
+        )
+        .unwrap();
+        let envelope =
+            super::super::super::publish_first_recovery_envelope_artifact(database).unwrap();
+        let published = super::super::publish_first_recovery_manifest_artifact(envelope).unwrap();
+
+        PublishedFixture {
+            published: Some(published),
+            record,
+            _destination_root: destination_root,
+            _stage_root: stage_root,
+            _source_root: source_root,
+        }
+    }
 
     #[test]
     fn outward_owners_are_keyless_and_success_is_not_complete_set_proof() {
@@ -629,5 +783,90 @@ mod tests {
         ] {
             assert!(source.contains(required), "missing primitive: {required}");
         }
+    }
+
+    #[test]
+    fn valid_reentered_record_runs_the_complete_production_transition() {
+        let mut fixture = published_fixture();
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let outcome = verify_first_recovery_set_with_reentered_recovery_key(
+            fixture.published.take().unwrap(),
+            entered,
+        );
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) = outcome else {
+            panic!("valid published first set and bearer record must verify");
+        };
+        assert_eq!(
+            format!("{verified:?}"),
+            "FirstRecoverySetRecoveredKeyVerified([REDACTED])"
+        );
+        drop(verified);
+    }
+
+    #[test]
+    fn correctly_associated_wrong_key_fails_envelope_authentication_and_retry_needs_fresh_record() {
+        let mut fixture = published_fixture();
+        let wrong = correctly_associated_wrong_key_record_for_test(&fixture.record);
+        let outcome = verify_first_recovery_set_with_reentered_recovery_key(
+            fixture.published.take().unwrap(),
+            wrong,
+        );
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Failed(failure) = outcome else {
+            panic!("wrong recovery key must fail without verifier-close ownership");
+        };
+        assert_eq!(
+            failure.category(),
+            FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed
+        );
+        let fresh =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        assert!(matches!(
+            failure.retry_with_fresh_record(fresh),
+            FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(_)
+        ));
+    }
+
+    #[test]
+    fn changed_fresh_destination_envelope_cannot_fall_back_to_retained_expected_bytes() {
+        let mut fixture = published_fixture();
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let outcome = with_fresh_envelope_difference_injected(|| {
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        });
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Failed(failure) = outcome else {
+            panic!("changed fresh destination bytes must fail");
+        };
+        assert_eq!(
+            failure.category(),
+            FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed
+        );
+    }
+
+    #[test]
+    fn material_release_is_structurally_after_fresh_correspondence() {
+        let source = include_str!("reentered_recovery_key_verification.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let transition = production
+            .split_once("pub(crate) fn verify_first_recovery_set_with_reentered_recovery_key")
+            .unwrap()
+            .1;
+        let association = transition
+            .find("validate_checksum_and_association")
+            .unwrap();
+        let fresh = transition.find("freshly_read_envelope").unwrap();
+        let release = transition.find("into_recovery_key_material").unwrap();
+        let parse = transition
+            .find("ParsedUntrustedMigrationRecoveryEnvelopeV1::parse(&fresh_envelope)")
+            .unwrap();
+        let authenticate = transition
+            .find("open_migration_recovery_envelope_v1")
+            .unwrap();
+        assert!(association < fresh && fresh < release && release < parse && parse < authenticate);
+        assert!(!production.contains("Ok(*expected)"));
     }
 }

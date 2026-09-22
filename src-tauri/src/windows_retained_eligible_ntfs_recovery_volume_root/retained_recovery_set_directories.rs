@@ -50,10 +50,21 @@ pub(super) struct RetainedRecoverySetDirectory {
     initial_child: RecoverySetDirectoryFacts,
     parent_root: File,
     initial_parent: RootFacts,
+    #[cfg(test)]
+    synthetic_for_test: bool,
+}
+
+#[cfg(test)]
+enum RecoverySetDestinationAuthority {
+    Production(Box<TwoCapacityValidatedRecoveryVolumeRoots>),
+    SyntheticForTest,
 }
 
 pub(super) struct TwoRetainedRecoverySetDirectories {
+    #[cfg(not(test))]
     destination_authority: TwoCapacityValidatedRecoveryVolumeRoots,
+    #[cfg(test)]
+    destination_authority: RecoverySetDestinationAuthority,
     first: RetainedRecoverySetDirectory,
     second: RetainedRecoverySetDirectory,
 }
@@ -450,6 +461,10 @@ fn require_same_child(
 
 impl RetainedRecoverySetDirectory {
     fn revalidate(&self) -> Result<(), RecoverySetDirectoryCreationError> {
+        #[cfg(test)]
+        if self.synthetic_for_test {
+            return require_same_child(&self.initial_child, &query_child_facts(&self.child)?);
+        }
         revalidate_root_identity_and_filesystem(&self.parent_root, &self.initial_parent)
             .map_err(|_| RecoverySetDirectoryCreationError::DestinationChangedOrInconsistent)?;
         let current = query_child_facts(&self.child)?;
@@ -464,10 +479,19 @@ impl RetainedRecoverySetDirectory {
 
 impl TwoRetainedRecoverySetDirectories {
     fn revalidate(&self) -> Result<(), RecoverySetDirectoryCreationError> {
+        #[cfg(not(test))]
         self.destination_authority
             .roots
             .revalidate()
             .map_err(|_| RecoverySetDirectoryCreationError::DestinationChangedOrInconsistent)?;
+        #[cfg(test)]
+        match &self.destination_authority {
+            RecoverySetDestinationAuthority::Production(authority) => authority
+                .roots
+                .revalidate()
+                .map_err(|_| RecoverySetDirectoryCreationError::DestinationChangedOrInconsistent)?,
+            RecoverySetDestinationAuthority::SyntheticForTest => {}
+        }
         self.first.revalidate()?;
         self.second.revalidate()
     }
@@ -501,6 +525,8 @@ fn retain_new_child(
         initial_child,
         parent_root,
         initial_parent: initial_parent.clone(),
+        #[cfg(test)]
+        synthetic_for_test: false,
     })
 }
 
@@ -618,7 +644,12 @@ pub(super) fn create_and_retain_recovery_set_directories(
         RetainedRecoverySetDirectory::revalidate,
     ) {
         Ok(created) => Ok(TwoRetainedRecoverySetDirectories {
+            #[cfg(not(test))]
             destination_authority: created.destination,
+            #[cfg(test)]
+            destination_authority: RecoverySetDestinationAuthority::Production(Box::new(
+                created.destination,
+            )),
             first: created.first,
             second: created.second,
         }),
@@ -629,6 +660,43 @@ pub(super) fn create_and_retain_recovery_set_directories(
             phase: failure.phase,
             error: failure.error,
         })),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn retained_recovery_set_directories_for_test(
+    first: &std::path::Path,
+    second: &std::path::Path,
+) -> TwoRetainedRecoverySetDirectories {
+    fn retained(path: &std::path::Path) -> RetainedRecoverySetDirectory {
+        use std::os::windows::ffi::OsStrExt;
+
+        let encoded: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let child = open_fixed_child(&encoded).unwrap();
+        let initial_child = query_child_facts(&child).unwrap();
+        let parent_root = child.try_clone().unwrap();
+        let initial_parent = RootFacts {
+            identity: initial_child.identity,
+            disk_entry: true,
+            directory: true,
+            delete_pending: false,
+            attributes: FILE_ATTRIBUTE_DIRECTORY,
+            reparse_tag: 0,
+            normalized_root: [0_u16; super::VOLUME_GUID_ROOT_UNITS],
+        };
+        RetainedRecoverySetDirectory {
+            child,
+            initial_child,
+            parent_root,
+            initial_parent,
+            synthetic_for_test: true,
+        }
+    }
+
+    TwoRetainedRecoverySetDirectories {
+        destination_authority: RecoverySetDestinationAuthority::SyntheticForTest,
+        first: retained(first),
+        second: retained(second),
     }
 }
 
@@ -675,7 +743,10 @@ mod tests {
             r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\church-app-recovery-set"
         );
         let source = include_str!("retained_recovery_set_directories.rs");
-        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let production = source
+            .split_once("#[cfg(test)]\npub(crate) fn retained_recovery_set_directories_for_test")
+            .unwrap()
+            .0;
         assert_eq!(
             production
                 .matches("const RECOVERY_SET_DIRECTORY_NAME")
@@ -1064,7 +1135,10 @@ mod tests {
             assert_eq!(format!("{error:?}"), expected);
         }
         let source = include_str!("retained_recovery_set_directories.rs");
-        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let production = source
+            .split_once("#[cfg(test)]\npub(crate) fn retained_recovery_set_directories_for_test")
+            .unwrap()
+            .0;
         for owner in [
             "RetainedRecoverySetDirectory([REDACTED])",
             "TwoRetainedRecoverySetDirectories([REDACTED])",
@@ -1086,7 +1160,10 @@ mod tests {
     #[test]
     fn private_source_has_no_getters_frontend_artifacts_writes_or_cleanup() {
         let source = include_str!("retained_recovery_set_directories.rs");
-        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let production = source
+            .split_once("#[cfg(test)]\npub(crate) fn retained_recovery_set_directories_for_test")
+            .unwrap()
+            .0;
         for required in [
             "CreateDirectoryW",
             "FindFirstFileW",

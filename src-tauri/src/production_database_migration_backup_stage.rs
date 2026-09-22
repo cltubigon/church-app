@@ -299,7 +299,7 @@ impl fmt::Debug for ProductionDatabaseMigrationBackupStageOutcome {
 
 impl PreparedProductionDatabaseMigrationBackupStage {
     #[cfg(test)]
-    fn from_synthetic_temp_root(root: &Path) -> Result<Self, ()> {
+    pub(crate) fn from_synthetic_temp_root(root: &Path) -> Result<Self, ()> {
         let temporary = std::env::temp_dir();
         if !root.is_absolute() || !root.starts_with(&temporary) || root == temporary {
             return Err(());
@@ -325,7 +325,7 @@ impl PreparedProductionDatabaseMigrationBackupStage {
 
 impl ProductionDatabaseMigrationBackupContext {
     #[cfg(test)]
-    fn from_synthetic_root(root: &Path) -> Self {
+    pub(crate) fn from_synthetic_root(root: &Path) -> Self {
         Self {
             database_key_paths: crate::storage_foundation::database_key_persistence_paths(root),
         }

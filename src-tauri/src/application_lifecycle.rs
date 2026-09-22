@@ -15,6 +15,16 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 mod production_database_migration_confirmation;
+#[cfg(test)]
+pub(crate) use production_database_migration_confirmation::genuine_full_integrity_validated_migration_handoff_for_test;
+#[cfg(test)]
+pub(crate) use production_database_migration_confirmation::production_database_migration_backup_stage::{
+    PreparedProductionDatabaseMigrationBackupStage,
+    ProductionDatabaseMigrationBackupContext, ProductionDatabaseMigrationBackupStageOutcome,
+    ProductionDatabaseMigrationRecoveryEnvelopeOutcome, prepare_migration_recovery_key_custody,
+    stage_encrypted_production_database_migration_backup,
+    verify_production_database_migration_recovery_envelope,
+};
 
 #[cfg(windows)]
 pub(crate) use production_database_migration_confirmation::production_database_migration_backup_stage::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup;

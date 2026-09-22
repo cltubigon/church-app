@@ -230,7 +230,7 @@ impl PreparedUndisclosedMigrationRecoveryKeyCustody {
     }
 
     #[cfg(test)]
-    fn encoded_for_test(&self) -> &[u8; 196] {
+    pub(crate) fn encoded_for_test(&self) -> &[u8; 196] {
         self.encoded.bytes_for_test()
     }
 }
