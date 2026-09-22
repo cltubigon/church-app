@@ -184,6 +184,22 @@ impl RecoverySetManifestV1 {
         encoded
     }
 
+    pub(crate) fn backup_set_identifier(&self) -> MigrationBackupSetIdentifier {
+        self.backup_set_identifier
+    }
+
+    pub(crate) fn database_byte_length(&self) -> u64 {
+        self.database_byte_length
+    }
+
+    pub(crate) fn database_sha256(&self) -> [u8; 32] {
+        self.database_sha256
+    }
+
+    pub(crate) fn recovery_envelope_sha256(&self) -> [u8; 32] {
+        self.recovery_envelope_sha256
+    }
+
     pub(crate) fn required_set_bytes(
         &self,
     ) -> Result<RecoverySetRequiredBytes, RecoverySetRequiredBytesError> {

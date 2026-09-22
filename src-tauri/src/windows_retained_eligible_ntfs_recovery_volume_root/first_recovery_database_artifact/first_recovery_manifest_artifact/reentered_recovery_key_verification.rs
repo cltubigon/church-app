@@ -1,5 +1,15 @@
 //! Private recovered-key verification of the already published first set.
 
+#[path = "reentered_recovery_key_verification/first_complete_set.rs"]
+mod first_complete_recovery_set_verification;
+
+#[allow(unused_imports)]
+pub(crate) use first_complete_recovery_set_verification::{
+    FirstCompleteRecoverySetVerificationError, FirstCompleteRecoverySetVerificationFailure,
+    FirstCompleteRecoverySetVerificationOutcome, FirstCompleteRecoverySetVerified,
+    verify_first_complete_recovery_set,
+};
+
 use std::{
     ffi::OsString,
     fmt,
@@ -786,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_reentered_record_runs_the_complete_production_transition() {
+    fn valid_reentered_record_runs_first_complete_recovery_set_transition() {
         let mut fixture = published_fixture();
         let entered =
             ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
@@ -801,7 +811,16 @@ mod tests {
             format!("{verified:?}"),
             "FirstRecoverySetRecoveredKeyVerified([REDACTED])"
         );
-        drop(verified);
+        let FirstCompleteRecoverySetVerificationOutcome::Verified(complete) =
+            verify_first_complete_recovery_set(verified)
+        else {
+            panic!("the exact freshly verified first recovery set must be complete");
+        };
+        assert_eq!(
+            format!("{complete:?}"),
+            "FirstCompleteRecoverySetVerified([REDACTED])"
+        );
+        drop(complete);
     }
 
     #[test]
@@ -845,6 +864,36 @@ mod tests {
             failure.category(),
             FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed
         );
+    }
+
+    #[test]
+    fn layout_change_across_complete_set_verification_fails_and_preserves_retry() {
+        let mut fixture = published_fixture();
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("recovered-key predecessor must verify");
+        };
+        let outcome =
+            first_complete_recovery_set_verification::with_second_layout_observation_failure(
+                || verify_first_complete_recovery_set(verified),
+            );
+        let FirstCompleteRecoverySetVerificationOutcome::Failed(failure) = outcome else {
+            panic!("a failed second layout observation must fail closed");
+        };
+        assert_eq!(
+            failure.category(),
+            FirstCompleteRecoverySetVerificationError::DirectoryLayoutInvalid
+        );
+        assert!(matches!(
+            failure.retry(),
+            FirstCompleteRecoverySetVerificationOutcome::Verified(_)
+        ));
     }
 
     #[test]
