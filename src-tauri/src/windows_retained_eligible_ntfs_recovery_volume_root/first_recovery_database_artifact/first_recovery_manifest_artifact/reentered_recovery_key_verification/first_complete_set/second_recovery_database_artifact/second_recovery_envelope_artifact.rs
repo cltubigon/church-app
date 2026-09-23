@@ -327,7 +327,8 @@ fn attempt_publication(
             error: SecondRecoveryEnvelopeArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
         });
     }
-    if envelope_publication::close_writer(writer).is_err() {
+    if let Err(writer) = envelope_publication::close_writer(writer) {
+        partial.file = Some(writer);
         return Err(AttemptFailure {
             partial: Some(partial),
             phase: PublicationPhase::DuringFlushOrClose,
@@ -715,6 +716,25 @@ mod tests {
             );
         }
         assert!(!production.contains("destinations.first.initial_child"));
+    }
+
+    #[test]
+    fn close_failure_restores_second_writer_and_preserves_coarse_failure() {
+        let source = include_str!("second_recovery_envelope_artifact.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let close_failure = production
+            .split_once("if let Err(writer) = envelope_publication::close_writer(writer)")
+            .unwrap()
+            .1
+            .split_once("if destinations.revalidate()")
+            .unwrap()
+            .0;
+        assert!(close_failure.contains("partial.file = Some(writer)"));
+        assert!(close_failure.contains("partial: Some(partial)"));
+        assert!(close_failure.contains("ArtifactFlushOrCloseUnavailable"));
+        assert!(!close_failure.contains("close_writer"));
+        assert!(!production.contains("remove_file"));
+        assert!(!production.contains("remove_dir"));
     }
 
     #[test]
