@@ -5,13 +5,16 @@ mod first_complete_recovery_set_verification;
 
 #[allow(unused_imports)]
 pub(crate) use first_complete_recovery_set_verification::{
+    FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
     FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
     FirstCompleteRecoverySetVerificationError, FirstCompleteRecoverySetVerificationFailure,
     FirstCompleteRecoverySetVerificationOutcome, FirstCompleteRecoverySetVerified,
     SecondCompleteRecoverySetVerificationError, SecondCompleteRecoverySetVerificationFailure,
     SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
-    verify_first_complete_recovery_set, verify_second_complete_recovery_set,
+    TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    verify_final_two_recovery_sets, verify_first_complete_recovery_set,
+    verify_second_complete_recovery_set,
 };
 
 use std::{
@@ -1240,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn genuine_second_complete_set_verification_is_keyless_and_preserves_both_sets() {
+    fn genuine_final_two_set_verification_is_keyless_and_preserves_both_sets() {
         use crate::storage_foundation::{
             PRODUCTION_DATABASE_FILENAME, PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME,
         };
@@ -1268,17 +1271,28 @@ mod tests {
         ];
         let fresh =
             ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
-        let SecondCompleteRecoverySetVerificationOutcome::Verified(verified) =
+        let SecondCompleteRecoverySetVerificationOutcome::Verified(second_complete) =
             verify_second_complete_recovery_set(published, fresh)
         else {
             panic!("the independently reopened second complete set must verify");
         };
         assert_eq!(
-            format!("{verified:?}"),
+            format!("{second_complete:?}"),
             "SecondCompleteRecoverySetVerified([REDACTED])"
+        );
+        let FinalTwoSetVerificationOutcome::Verified(verified) =
+            verify_final_two_recovery_sets(second_complete)
+        else {
+            panic!("the final aggregate two-set proof must verify");
+        };
+        assert_eq!(
+            format!("{verified:?}"),
+            "TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup([REDACTED])"
         );
         assert_eq!(first_before[0], source_database);
         assert_eq!(second_before[0], source_database);
+        assert_eq!(first_before[1], second_before[1]);
+        assert_eq!(first_before[2], second_before[2]);
         assert_eq!(
             first_before,
             [
@@ -1295,20 +1309,63 @@ mod tests {
                 fs::read(second_set.join("recovery-set-v1.manifest")).unwrap(),
             ]
         );
-        let mut names: Vec<_> = fs::read_dir(&second_set)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            [
-                std::ffi::OsString::from("migration-recovery-envelope-v1.bin"),
-                std::ffi::OsString::from("parish-data.db"),
-                std::ffi::OsString::from("recovery-set-v1.manifest"),
-            ]
+        for set in [&first_set, &second_set] {
+            let mut names: Vec<_> = fs::read_dir(set)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            assert_eq!(
+                names,
+                [
+                    std::ffi::OsString::from("migration-recovery-envelope-v1.bin"),
+                    std::ffi::OsString::from("parish-data.db"),
+                    std::ffi::OsString::from("recovery-set-v1.manifest"),
+                ]
+            );
+        }
+        assert!(
+            fixture
+                ._stage_root
+                .path()
+                .join(PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME)
+                .exists()
         );
         drop(verified);
+    }
+
+    #[test]
+    fn final_two_set_verification_rejects_an_extra_entry_and_preserves_retry_owner() {
+        let mut fixture = published_fixture();
+        let published = publish_complete_second_set(&mut fixture);
+        let fresh =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let SecondCompleteRecoverySetVerificationOutcome::Verified(second_complete) =
+            verify_second_complete_recovery_set(published, fresh)
+        else {
+            panic!("the second complete-set predecessor must verify");
+        };
+        let extra = fixture
+            ._destination_root
+            .path()
+            .join("second")
+            .join("unexpected-entry.synthetic");
+        fs::write(&extra, b"synthetic non-secret test entry").unwrap();
+        let FinalTwoSetVerificationOutcome::Failed(failure) =
+            verify_final_two_recovery_sets(second_complete)
+        else {
+            panic!("an extra final-layout entry must fail closed");
+        };
+        assert_eq!(
+            failure.category(),
+            FinalTwoSetVerificationError::DirectoryLayoutInvalid
+        );
+        assert!(extra.exists(), "the transition must not clean up artifacts");
+        fs::remove_file(extra).unwrap();
+        assert!(matches!(
+            failure.retry(),
+            FinalTwoSetVerificationOutcome::Verified(_)
+        ));
     }
 
     #[test]

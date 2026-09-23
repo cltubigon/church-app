@@ -5,12 +5,15 @@ mod second_recovery_manifest_artifact;
 
 #[allow(unused_imports)]
 pub(crate) use second_recovery_manifest_artifact::{
+    FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
     FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
     SecondCompleteRecoverySetVerificationError, SecondCompleteRecoverySetVerificationFailure,
     SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
     SecondRecoveryManifestArtifactPublicationError,
-    SecondRecoveryManifestArtifactPublicationFailure, publish_second_recovery_manifest_artifact,
+    SecondRecoveryManifestArtifactPublicationFailure,
+    TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    publish_second_recovery_manifest_artifact, verify_final_two_recovery_sets,
     verify_second_complete_recovery_set,
 };
 #[cfg(test)]

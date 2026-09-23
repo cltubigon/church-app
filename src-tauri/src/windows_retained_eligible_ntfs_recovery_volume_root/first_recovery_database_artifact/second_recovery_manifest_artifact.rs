@@ -5,10 +5,12 @@ mod second_complete_set;
 
 #[allow(unused_imports)]
 pub(crate) use second_complete_set::{
+    FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
     SecondCompleteRecoverySetVerificationError, SecondCompleteRecoverySetVerificationFailure,
     SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
-    verify_second_complete_recovery_set,
+    TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    verify_final_two_recovery_sets, verify_second_complete_recovery_set,
 };
 #[cfg(test)]
 pub(crate) use second_complete_set::{

@@ -5,6 +5,7 @@ mod second_recovery_envelope_artifact;
 
 #[allow(unused_imports)]
 pub(crate) use second_recovery_envelope_artifact::{
+    FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
     FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
     FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
     SecondCompleteRecoverySetVerificationError, SecondCompleteRecoverySetVerificationFailure,
@@ -13,8 +14,10 @@ pub(crate) use second_recovery_envelope_artifact::{
     SecondRecoveryEnvelopeArtifactPublicationError,
     SecondRecoveryEnvelopeArtifactPublicationFailure,
     SecondRecoveryManifestArtifactPublicationError,
-    SecondRecoveryManifestArtifactPublicationFailure, publish_second_recovery_envelope_artifact,
-    publish_second_recovery_manifest_artifact, verify_second_complete_recovery_set,
+    SecondRecoveryManifestArtifactPublicationFailure,
+    TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    publish_second_recovery_envelope_artifact, publish_second_recovery_manifest_artifact,
+    verify_final_two_recovery_sets, verify_second_complete_recovery_set,
 };
 #[cfg(test)]
 pub(crate) use second_recovery_envelope_artifact::{

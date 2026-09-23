@@ -1,5 +1,15 @@
 //! Independent verification of the complete second digital recovery set.
 
+#[path = "final_two.rs"]
+mod final_two_set_verification;
+
+#[allow(unused_imports)]
+pub(crate) use final_two_set_verification::{
+    FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
+    TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    verify_final_two_recovery_sets,
+};
+
 use std::{ffi::OsString, fmt, fs::File, io::Read, os::windows::ffi::OsStringExt, path::PathBuf};
 
 use rusqlite::Connection;
