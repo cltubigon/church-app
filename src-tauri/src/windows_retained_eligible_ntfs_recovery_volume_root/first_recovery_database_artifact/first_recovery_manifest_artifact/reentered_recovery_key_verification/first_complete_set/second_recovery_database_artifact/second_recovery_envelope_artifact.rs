@@ -327,14 +327,7 @@ fn attempt_publication(
             error: SecondRecoveryEnvelopeArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
         });
     }
-    if let Err(writer) = envelope_publication::close_writer(writer) {
-        partial.file = Some(writer);
-        return Err(AttemptFailure {
-            partial: Some(partial),
-            phase: PublicationPhase::DuringFlushOrClose,
-            error: SecondRecoveryEnvelopeArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
-        });
-    }
+    envelope_publication::close_writer(writer);
     if destinations.revalidate().is_err() {
         return Err(AttemptFailure {
             partial: Some(partial),
@@ -719,20 +712,19 @@ mod tests {
     }
 
     #[test]
-    fn close_failure_restores_second_writer_and_preserves_coarse_failure() {
+    fn second_writer_uses_shared_terminal_close_without_fabricating_retry_ownership() {
         let source = include_str!("second_recovery_envelope_artifact.rs");
         let production = source.split("#[cfg(test)]").next().unwrap();
-        let close_failure = production
-            .split_once("if let Err(writer) = envelope_publication::close_writer(writer)")
+        let close_transition = production
+            .split_once("envelope_publication::close_writer(writer)")
             .unwrap()
             .1
             .split_once("if destinations.revalidate()")
             .unwrap()
             .0;
-        assert!(close_failure.contains("partial.file = Some(writer)"));
-        assert!(close_failure.contains("partial: Some(partial)"));
-        assert!(close_failure.contains("ArtifactFlushOrCloseUnavailable"));
-        assert!(!close_failure.contains("close_writer"));
+        assert!(!close_transition.contains("partial.file = Some(writer)"));
+        assert!(!close_transition.contains("ArtifactFlushOrCloseUnavailable"));
+        assert!(!production.contains("if let Err(writer) = envelope_publication::close_writer"));
         assert!(!production.contains("remove_file"));
         assert!(!production.contains("remove_dir"));
     }

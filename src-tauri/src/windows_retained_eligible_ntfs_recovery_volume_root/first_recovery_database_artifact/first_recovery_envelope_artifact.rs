@@ -462,22 +462,31 @@ pub(crate) fn flush(file: &File) -> Result<(), FirstRecoveryEnvelopeArtifactPubl
     }
 }
 
-pub(crate) fn close_writer(file: File) -> Result<(), File> {
-    let raw = file.into_raw_handle() as HANDLE;
-    // SAFETY: ownership was transferred out of File exactly once and this is
-    // the sole close attempt for the writer handle. A failed CloseHandle leaves
-    // the handle open, so ownership is reconstructed exactly once below.
-    let closed = unsafe { CloseHandle(raw) } != 0;
-    writer_after_close_attempt(raw, closed)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriterCloseAttempt {
+    Closed,
+    OwnershipAmbiguous,
 }
 
-fn writer_after_close_attempt(raw: HANDLE, closed: bool) -> Result<(), File> {
+fn classify_writer_close_attempt(closed: bool) -> WriterCloseAttempt {
     if closed {
-        Ok(())
+        WriterCloseAttempt::Closed
     } else {
-        // SAFETY: CloseHandle reported failure, so the handle remains open and
-        // no Rust owner exists after the single into_raw_handle call above.
-        Err(unsafe { File::from_raw_handle(raw as RawHandle) })
+        WriterCloseAttempt::OwnershipAmbiguous
+    }
+}
+
+pub(crate) fn close_writer(file: File) {
+    let raw = file.into_raw_handle() as HANDLE;
+    // SAFETY: ownership was transferred out of File exactly once and this is
+    // the sole close attempt for the writer handle.
+    let attempt = classify_writer_close_attempt(unsafe { CloseHandle(raw) } != 0);
+    if attempt == WriterCloseAttempt::OwnershipAmbiguous {
+        // CloseHandle does not document that every failure leaves the supplied
+        // handle valid. Continuing or reconstructing a File could therefore
+        // double-close or re-own an invalid handle. This boundary is terminal
+        // and returns no ownership-bearing publication failure.
+        std::process::abort();
     }
 }
 
@@ -571,14 +580,7 @@ fn attempt_publication(
             error: FirstRecoveryEnvelopeArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
         });
     }
-    if let Err(writer) = close_writer(writer) {
-        partial.file = Some(writer);
-        return Err(AttemptFailure {
-            partial: Some(partial),
-            phase: PublicationPhase::DuringFlushOrClose,
-            error: FirstRecoveryEnvelopeArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
-        });
-    }
+    close_writer(writer);
     if prior.destinations.revalidate().is_err() {
         return Err(AttemptFailure {
             partial: Some(partial),
@@ -742,9 +744,8 @@ pub(super) fn publish_first_recovery_envelope_artifact(
 mod tests {
     use super::*;
 
-    fn close_writer_with(file: File, close: impl FnOnce(HANDLE) -> bool) -> Result<(), File> {
-        let raw = file.into_raw_handle() as HANDLE;
-        writer_after_close_attempt(raw, close(raw))
+    fn classify_writer_close_with(close: impl FnOnce() -> bool) -> WriterCloseAttempt {
+        classify_writer_close_attempt(close())
     }
 
     #[test]
@@ -930,7 +931,7 @@ mod tests {
         write_exact_envelope(&mut writer, &expected).unwrap();
         flush(&writer).unwrap();
         let initial = query_envelope_facts(&writer).unwrap();
-        close_writer(writer).unwrap();
+        close_writer(writer);
         let mut reopened = open_envelope_for_verification(&encoded).unwrap();
         let before = query_envelope_facts(&reopened).unwrap();
         assert!(before.identity == initial.identity);
@@ -951,42 +952,24 @@ mod tests {
     }
 
     #[test]
-    fn close_writer_injected_failure_restores_one_file_owner_and_success_consumes_it() {
-        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    fn injected_close_seam_classifies_success_and_ambiguous_failure_once_without_ownership() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "church-app-envelope-close-ownership-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
-
-        let failure_path = root.join("failure.bin");
         let failure_calls = AtomicUsize::new(0);
-        let retained = close_writer_with(File::create(&failure_path).unwrap(), |_raw| {
+        let failure = classify_writer_close_with(|| {
             failure_calls.fetch_add(1, Ordering::Relaxed);
             false
-        })
-        .unwrap_err();
+        });
         assert_eq!(failure_calls.load(Ordering::Relaxed), 1);
-        assert!(retained.metadata().is_ok());
-        drop(retained);
+        assert_eq!(failure, WriterCloseAttempt::OwnershipAmbiguous);
 
-        let success_path = root.join("success.bin");
         let success_calls = AtomicUsize::new(0);
-        close_writer_with(File::create(&success_path).unwrap(), |raw| {
+        let success = classify_writer_close_with(|| {
             success_calls.fetch_add(1, Ordering::Relaxed);
-            // SAFETY: this callback receives the sole raw owner and is the one
-            // simulated successful close attempt.
-            (unsafe { CloseHandle(raw) }) != 0
-        })
-        .unwrap();
+            true
+        });
         assert_eq!(success_calls.load(Ordering::Relaxed), 1);
-
-        std::fs::remove_file(failure_path).unwrap();
-        std::fs::remove_file(success_path).unwrap();
-        std::fs::remove_dir(root).unwrap();
+        assert_eq!(success, WriterCloseAttempt::Closed);
     }
 
     #[test]
@@ -1081,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn first_recovery_envelope_failure_retains_prior_and_partial_without_cleanup() {
+    fn first_recovery_envelope_recoverable_failure_retains_prior_and_partial_without_cleanup() {
         const SOURCE: &str = include_str!("first_recovery_envelope_artifact.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
         let failure = production
@@ -1097,22 +1080,22 @@ mod tests {
                 .contains("partial_first_envelope: Option<RetainedFirstRecoveryEnvelopeArtifact>")
         );
         assert!(failure.contains("phase: PublicationPhase"));
-        let close_failure = production
-            .split_once("if let Err(writer) = close_writer(writer)")
+        let flush_failure = production
+            .split_once("if flush(&writer).is_err()")
             .unwrap()
             .1
-            .split_once("if prior.destinations.revalidate()")
+            .split_once("close_writer(writer)")
             .unwrap()
             .0;
-        assert!(close_failure.contains("partial.file = Some(writer)"));
-        assert!(close_failure.contains("partial: Some(partial)"));
-        assert!(close_failure.contains("ArtifactFlushOrCloseUnavailable"));
+        assert!(flush_failure.contains("partial.file = Some(writer)"));
+        assert!(flush_failure.contains("partial: Some(partial)"));
+        assert!(flush_failure.contains("ArtifactFlushOrCloseUnavailable"));
         assert!(!production.contains("remove_file"));
         assert!(!production.contains("remove_dir"));
     }
 
     #[test]
-    fn close_writer_production_contract_retains_ownership_without_retry_or_raw_exposure() {
+    fn close_writer_production_contract_fail_stops_without_reownership_or_retry() {
         const SOURCE: &str = include_str!("first_recovery_envelope_artifact.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
         let close = production
@@ -1122,14 +1105,18 @@ mod tests {
             .split_once("pub(crate) fn read_and_verify_fresh_envelope_contents")
             .unwrap()
             .0;
-        assert!(close.contains("-> Result<(), File>"));
         assert!(close.contains("file.into_raw_handle()"));
         assert!(close.contains("CloseHandle(raw)"));
-        assert!(close.contains("File::from_raw_handle(raw as RawHandle)"));
+        assert!(close.contains("WriterCloseAttempt::OwnershipAmbiguous"));
+        assert!(close.contains("std::process::abort()"));
         assert_eq!(close.matches("CloseHandle(raw)").count(), 1);
+        assert!(!close.contains("File::from_raw_handle"));
+        assert!(!close.contains("Result<"));
+        assert!(!close.contains("Err("));
         assert!(!close.contains("loop"));
         assert!(!close.contains("pub fn"));
-        assert!(!production.contains("close_writer_with"));
+        assert!(!production.contains("File::from_raw_handle"));
+        assert!(!production.contains("classify_writer_close_with"));
     }
 
     #[test]
