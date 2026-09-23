@@ -1,6 +1,20 @@
 //! Publication of only the second recovery set's fixed database artifact.
 
-use std::{fmt, fs::File, io::Write};
+#[path = "second_recovery_database_artifact/second_recovery_envelope_artifact.rs"]
+mod second_recovery_envelope_artifact;
+
+#[allow(unused_imports)]
+pub(crate) use second_recovery_envelope_artifact::{
+    FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
+    SecondRecoveryEnvelopeArtifactPublicationError,
+    SecondRecoveryEnvelopeArtifactPublicationFailure, publish_second_recovery_envelope_artifact,
+};
+
+use std::{
+    fmt,
+    fs::File,
+    io::{Seek, SeekFrom, Write},
+};
 
 use super::super::super::super::super as database_publication;
 use super::*;
@@ -8,6 +22,44 @@ use super::*;
 struct RetainedSecondRecoveryDatabaseArtifact {
     file: Option<File>,
     initial: Option<database_publication::PublishedDatabaseFacts>,
+}
+
+impl RetainedSecondRecoveryDatabaseArtifact {
+    fn revalidate(
+        &mut self,
+        parent_identity: &database_publication::RootIdentity,
+        parent_path: &[u16],
+        expected_length: u64,
+        expected_digest: [u8; 32],
+    ) -> Result<(), SecondRecoveryDatabaseArtifactPublicationError> {
+        let file = self
+            .file
+            .as_mut()
+            .ok_or(SecondRecoveryDatabaseArtifactPublicationError::ArtifactVerificationFailed)?;
+        let before = database_publication::query_database_facts(file)
+            .and_then(|facts| {
+                database_publication::validate_database_facts(
+                    parent_identity,
+                    parent_path,
+                    &facts,
+                )?;
+                Ok(facts)
+            })
+            .map_err(map_shared_error)?;
+        if self.initial.as_ref() != Some(&before) || before.byte_length != expected_length {
+            return Err(SecondRecoveryDatabaseArtifactPublicationError::ArtifactVerificationFailed);
+        }
+        file.seek(SeekFrom::Start(0)).map_err(|_| {
+            SecondRecoveryDatabaseArtifactPublicationError::ArtifactVerificationFailed
+        })?;
+        database_publication::verify_fresh_contents(file, expected_length, expected_digest)
+            .map_err(map_shared_error)?;
+        let after = database_publication::query_database_facts(file).map_err(map_shared_error)?;
+        if before != after {
+            return Err(SecondRecoveryDatabaseArtifactPublicationError::ArtifactVerificationFailed);
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished {

@@ -904,6 +904,91 @@ mod tests {
     }
 
     #[test]
+    fn second_database_owner_publishes_only_original_second_envelope_create_new() {
+        use crate::storage_foundation::{
+            PRODUCTION_DATABASE_FILENAME, PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME,
+        };
+
+        let mut fixture = published_fixture();
+        let first_set = fixture._destination_root.path().join("first");
+        let second_set = fixture._destination_root.path().join("second");
+        let first_database_path = first_set.join(PRODUCTION_DATABASE_FILENAME);
+        let first_envelope_path = first_set.join("migration-recovery-envelope-v1.bin");
+        let first_manifest_path = first_set.join("recovery-set-v1.manifest");
+        let second_database_path = second_set.join(PRODUCTION_DATABASE_FILENAME);
+        let second_envelope_path = second_set.join("migration-recovery-envelope-v1.bin");
+        let second_manifest_path = second_set.join("recovery-set-v1.manifest");
+        let original_stage = fs::read(
+            fixture
+                ._stage_root
+                .path()
+                .join(PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME),
+        )
+        .unwrap();
+        let first_database_before = fs::read(&first_database_path).unwrap();
+        let first_envelope_before = fs::read(&first_envelope_path).unwrap();
+        let first_manifest_before = fs::read(&first_manifest_path).unwrap();
+
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("the recovered-key predecessor must verify");
+        };
+        let FirstCompleteRecoverySetVerificationOutcome::Verified(complete) =
+            verify_first_complete_recovery_set(verified)
+        else {
+            panic!("the first set must independently verify as complete");
+        };
+        let database =
+            first_complete_recovery_set_verification::publish_second_recovery_database_artifact(
+                complete,
+            )
+            .unwrap();
+        assert!(!second_envelope_path.exists());
+        let published =
+            first_complete_recovery_set_verification::publish_second_recovery_envelope_artifact(
+                database,
+            )
+            .unwrap();
+        assert_eq!(
+            format!("{published:?}"),
+            "FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished([REDACTED])"
+        );
+        assert_eq!(fs::read(&second_database_path).unwrap(), original_stage);
+        assert_eq!(
+            fs::read(&second_envelope_path).unwrap(),
+            first_envelope_before
+        );
+        assert_eq!(
+            fs::read(&first_database_path).unwrap(),
+            first_database_before
+        );
+        assert_eq!(
+            fs::read(&first_envelope_path).unwrap(),
+            first_envelope_before
+        );
+        assert_eq!(
+            fs::read(&first_manifest_path).unwrap(),
+            first_manifest_before
+        );
+        assert!(!second_manifest_path.exists());
+
+        use std::os::windows::ffi::OsStrExt;
+        let second_envelope_wide: Vec<u16> =
+            second_envelope_path.as_os_str().encode_wide().collect();
+        assert_eq!(
+            super::super::super::create_new_envelope(&second_envelope_wide).unwrap_err(),
+            super::super::super::FirstRecoveryEnvelopeArtifactPublicationError::ArtifactConflict
+        );
+        drop(published);
+    }
+
+    #[test]
     fn correctly_associated_wrong_key_fails_envelope_authentication_and_retry_needs_fresh_record() {
         let mut fixture = published_fixture();
         let wrong = correctly_associated_wrong_key_record_for_test(&fixture.record);
