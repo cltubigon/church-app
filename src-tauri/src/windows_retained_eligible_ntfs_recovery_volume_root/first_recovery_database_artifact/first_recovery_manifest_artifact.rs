@@ -46,18 +46,18 @@ use super::{
     FirstRecoveryEnvelopeArtifactPublicationError, RootIdentity, fold_ascii,
 };
 
-const FIRST_RECOVERY_MANIFEST_FILENAME: &str = "recovery-set-v1.manifest";
+pub(crate) const FIRST_RECOVERY_MANIFEST_FILENAME: &str = "recovery-set-v1.manifest";
 
 #[derive(Clone, Eq, PartialEq)]
-struct PublishedManifestFacts {
-    identity: RootIdentity,
-    disk_entry: bool,
-    directory: bool,
-    delete_pending: bool,
-    attributes: u32,
-    reparse_tag: u32,
-    byte_length: u64,
-    normalized_path: Vec<u16>,
+pub(crate) struct PublishedManifestFacts {
+    pub(crate) identity: RootIdentity,
+    pub(crate) disk_entry: bool,
+    pub(crate) directory: bool,
+    pub(crate) delete_pending: bool,
+    pub(crate) attributes: u32,
+    pub(crate) reparse_tag: u32,
+    pub(crate) byte_length: u64,
+    pub(crate) normalized_path: Vec<u16>,
 }
 
 struct RetainedFirstRecoveryManifestArtifact {
@@ -161,7 +161,7 @@ fn fail(
     }))
 }
 
-fn fixed_manifest_path(directory_path: &[u16]) -> Vec<u16> {
+pub(crate) fn fixed_manifest_path(directory_path: &[u16]) -> Vec<u16> {
     directory_path
         .iter()
         .copied()
@@ -185,7 +185,7 @@ fn nul_terminated(path: &[u16]) -> Result<Vec<u16>, FirstRecoveryManifestArtifac
     Ok(value)
 }
 
-fn create_new_manifest(
+pub(crate) fn create_new_manifest(
     path: &[u16],
 ) -> Result<File, FirstRecoveryManifestArtifactPublicationError> {
     let path = nul_terminated(path)?;
@@ -218,7 +218,7 @@ fn create_new_manifest(
     }))
 }
 
-fn open_manifest_for_verification(
+pub(crate) fn open_manifest_for_verification(
     path: &[u16],
 ) -> Result<File, FirstRecoveryManifestArtifactPublicationError> {
     let path = nul_terminated(path)?;
@@ -289,7 +289,7 @@ fn query_normalized_path(
     Ok(output)
 }
 
-fn query_manifest_facts(
+pub(crate) fn query_manifest_facts(
     file: &File,
 ) -> Result<PublishedManifestFacts, FirstRecoveryManifestArtifactPublicationError> {
     let handle = file.as_raw_handle() as HANDLE;
@@ -364,7 +364,7 @@ fn exact_manifest_path(directory: &[u16], observed: &[u16]) -> bool {
         && observed.get(directory.len() + 1..) == Some(filename.as_slice())
 }
 
-fn validate_manifest_facts(
+pub(crate) fn validate_manifest_facts(
     parent_identity: &RootIdentity,
     parent_path: &[u16],
     facts: &PublishedManifestFacts,
@@ -383,7 +383,7 @@ fn validate_manifest_facts(
     Ok(())
 }
 
-fn validate_fresh_manifest_facts(
+pub(crate) fn validate_fresh_manifest_facts(
     parent_identity: &RootIdentity,
     parent_path: &[u16],
     facts: &PublishedManifestFacts,
@@ -395,7 +395,7 @@ fn validate_fresh_manifest_facts(
     Ok(())
 }
 
-fn write_exact_manifest(
+pub(crate) fn write_exact_manifest(
     writer: &mut impl Write,
     expected: &[u8; RECOVERY_SET_MANIFEST_V1_LENGTH],
 ) -> Result<(), FirstRecoveryManifestArtifactPublicationError> {
@@ -412,7 +412,7 @@ fn write_exact_manifest(
     Ok(())
 }
 
-fn flush(file: &File) -> Result<(), FirstRecoveryManifestArtifactPublicationError> {
+pub(crate) fn flush(file: &File) -> Result<(), FirstRecoveryManifestArtifactPublicationError> {
     // SAFETY: the live writer was opened with GENERIC_WRITE.
     if unsafe { FlushFileBuffers(file.as_raw_handle() as HANDLE) } == 0 {
         Err(FirstRecoveryManifestArtifactPublicationError::ArtifactFlushOrCloseUnavailable)
@@ -432,10 +432,10 @@ fn close_writer(file: File) -> Result<(), FirstRecoveryManifestArtifactPublicati
     }
 }
 
-fn verify_fresh_manifest_contents(
+pub(crate) fn read_and_verify_fresh_manifest_contents(
     file: &mut impl Read,
     expected: &[u8; RECOVERY_SET_MANIFEST_V1_LENGTH],
-) -> Result<(), FirstRecoveryManifestArtifactPublicationError> {
+) -> Result<[u8; RECOVERY_SET_MANIFEST_V1_LENGTH], FirstRecoveryManifestArtifactPublicationError> {
     let mut actual = [0_u8; RECOVERY_SET_MANIFEST_V1_LENGTH];
     file.read_exact(&mut actual)
         .map_err(|_| FirstRecoveryManifestArtifactPublicationError::ArtifactVerificationFailed)?;
@@ -455,7 +455,14 @@ fn verify_fresh_manifest_contents(
     if canonical != actual || canonical != *expected {
         return Err(FirstRecoveryManifestArtifactPublicationError::ArtifactVerificationFailed);
     }
-    Ok(())
+    Ok(actual)
+}
+
+fn verify_fresh_manifest_contents(
+    file: &mut impl Read,
+    expected: &[u8; RECOVERY_SET_MANIFEST_V1_LENGTH],
+) -> Result<(), FirstRecoveryManifestArtifactPublicationError> {
+    read_and_verify_fresh_manifest_contents(file, expected).map(|_| ())
 }
 
 fn attempt_publication(
@@ -1099,7 +1106,7 @@ mod tests {
             "VerifiedCompleteRecoverySet",
             "FirstRecoverySetComplete",
         ] {
-            assert!(!production.contains(forbidden));
+            assert!(!success.contains(forbidden));
         }
         for output in [
             format!(

@@ -989,6 +989,122 @@ mod tests {
     }
 
     #[test]
+    fn second_envelope_owner_publishes_manifest_last_from_original_source_facts() {
+        use crate::storage_foundation::PRODUCTION_DATABASE_FILENAME;
+
+        let mut fixture = published_fixture();
+        let first_set = fixture._destination_root.path().join("first");
+        let second_set = fixture._destination_root.path().join("second");
+        let first_database_path = first_set.join(PRODUCTION_DATABASE_FILENAME);
+        let first_envelope_path = first_set.join("migration-recovery-envelope-v1.bin");
+        let first_manifest_path = first_set.join("recovery-set-v1.manifest");
+        let second_database_path = second_set.join(PRODUCTION_DATABASE_FILENAME);
+        let second_envelope_path = second_set.join("migration-recovery-envelope-v1.bin");
+        let second_manifest_path = second_set.join("recovery-set-v1.manifest");
+        let trusted_source_manifest = fixture
+            .published
+            .as_ref()
+            .unwrap()
+            .prior
+            .prior
+            .source
+            .prepare_recovery_set_manifest_v1()
+            .unwrap()
+            .encode();
+        let first_database_before = fs::read(&first_database_path).unwrap();
+        let first_envelope_before = fs::read(&first_envelope_path).unwrap();
+        let first_manifest_before = fs::read(&first_manifest_path).unwrap();
+
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("the recovered-key predecessor must verify");
+        };
+        let FirstCompleteRecoverySetVerificationOutcome::Verified(complete) =
+            verify_first_complete_recovery_set(verified)
+        else {
+            panic!("the first set must independently verify as complete");
+        };
+        let database =
+            first_complete_recovery_set_verification::publish_second_recovery_database_artifact(
+                complete,
+            )
+            .unwrap();
+        let envelope =
+            first_complete_recovery_set_verification::publish_second_recovery_envelope_artifact(
+                database,
+            )
+            .unwrap();
+        let second_database_before = fs::read(&second_database_path).unwrap();
+        let second_envelope_before = fs::read(&second_envelope_path).unwrap();
+        assert!(!second_manifest_path.exists());
+
+        let published =
+            first_complete_recovery_set_verification::publish_second_recovery_manifest_artifact(
+                envelope,
+            )
+            .unwrap();
+        let debug = format!("{published:?}");
+        assert_eq!(
+            debug,
+            "FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished([REDACTED])"
+        );
+        assert!(!debug.contains("CompleteSecondRecoverySet"));
+        let second_manifest = fs::read(&second_manifest_path).unwrap();
+        assert_eq!(second_manifest.len(), RECOVERY_SET_MANIFEST_V1_LENGTH);
+        assert_eq!(second_manifest, trusted_source_manifest);
+        assert_eq!(second_manifest, first_manifest_before);
+        assert_eq!(
+            fs::read(&first_database_path).unwrap(),
+            first_database_before
+        );
+        assert_eq!(
+            fs::read(&first_envelope_path).unwrap(),
+            first_envelope_before
+        );
+        assert_eq!(
+            fs::read(&first_manifest_path).unwrap(),
+            first_manifest_before
+        );
+        assert_eq!(
+            fs::read(&second_database_path).unwrap(),
+            second_database_before
+        );
+        assert_eq!(
+            fs::read(&second_envelope_path).unwrap(),
+            second_envelope_before
+        );
+
+        let mut names: Vec<_> = fs::read_dir(&second_set)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                std::ffi::OsString::from("migration-recovery-envelope-v1.bin"),
+                std::ffi::OsString::from("parish-data.db"),
+                std::ffi::OsString::from("recovery-set-v1.manifest"),
+            ]
+        );
+
+        use std::os::windows::ffi::OsStrExt;
+        let second_manifest_wide: Vec<u16> =
+            second_manifest_path.as_os_str().encode_wide().collect();
+        assert_eq!(
+            super::super::create_new_manifest(&second_manifest_wide).unwrap_err(),
+            super::super::FirstRecoveryManifestArtifactPublicationError::ArtifactConflict
+        );
+        drop(published);
+    }
+
+    #[test]
     fn correctly_associated_wrong_key_fails_envelope_authentication_and_retry_needs_fresh_record() {
         let mut fixture = published_fixture();
         let wrong = correctly_associated_wrong_key_record_for_test(&fixture.record);

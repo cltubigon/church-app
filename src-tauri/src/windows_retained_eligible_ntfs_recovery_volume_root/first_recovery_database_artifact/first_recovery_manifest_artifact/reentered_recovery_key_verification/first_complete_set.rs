@@ -7,11 +7,14 @@ mod second_recovery_database_artifact;
 pub(crate) use second_recovery_database_artifact::{
     FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
     FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
+    FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
     SecondRecoveryDatabaseArtifactPublicationError,
     SecondRecoveryDatabaseArtifactPublicationFailure,
     SecondRecoveryEnvelopeArtifactPublicationError,
-    SecondRecoveryEnvelopeArtifactPublicationFailure, publish_second_recovery_database_artifact,
-    publish_second_recovery_envelope_artifact,
+    SecondRecoveryEnvelopeArtifactPublicationFailure,
+    SecondRecoveryManifestArtifactPublicationError,
+    SecondRecoveryManifestArtifactPublicationFailure, publish_second_recovery_database_artifact,
+    publish_second_recovery_envelope_artifact, publish_second_recovery_manifest_artifact,
 };
 
 use std::{fmt, io::Read};

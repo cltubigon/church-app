@@ -1,5 +1,15 @@
 //! Publication of only the second recovery set's fixed recovery envelope.
 
+#[path = "../../../../second_recovery_manifest_artifact.rs"]
+mod second_recovery_manifest_artifact;
+
+#[allow(unused_imports)]
+pub(crate) use second_recovery_manifest_artifact::{
+    FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
+    SecondRecoveryManifestArtifactPublicationError,
+    SecondRecoveryManifestArtifactPublicationFailure, publish_second_recovery_manifest_artifact,
+};
+
 use std::{
     fmt,
     fs::File,

@@ -6,8 +6,12 @@ mod second_recovery_envelope_artifact;
 #[allow(unused_imports)]
 pub(crate) use second_recovery_envelope_artifact::{
     FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
+    FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
     SecondRecoveryEnvelopeArtifactPublicationError,
-    SecondRecoveryEnvelopeArtifactPublicationFailure, publish_second_recovery_envelope_artifact,
+    SecondRecoveryEnvelopeArtifactPublicationFailure,
+    SecondRecoveryManifestArtifactPublicationError,
+    SecondRecoveryManifestArtifactPublicationFailure, publish_second_recovery_envelope_artifact,
+    publish_second_recovery_manifest_artifact,
 };
 
 use std::{
