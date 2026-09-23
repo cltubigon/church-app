@@ -421,14 +421,31 @@ pub(crate) fn flush(file: &File) -> Result<(), FirstRecoveryManifestArtifactPubl
     }
 }
 
-fn close_writer(file: File) -> Result<(), FirstRecoveryManifestArtifactPublicationError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriterCloseAttempt {
+    Closed,
+    OwnershipAmbiguous,
+}
+
+fn classify_writer_close_attempt(closed: bool) -> WriterCloseAttempt {
+    if closed {
+        WriterCloseAttempt::Closed
+    } else {
+        WriterCloseAttempt::OwnershipAmbiguous
+    }
+}
+
+fn close_writer(file: File) {
     let raw = file.into_raw_handle() as HANDLE;
     // SAFETY: ownership was transferred out of File exactly once and this is
-    // the sole terminal close attempt for the writer handle.
-    if unsafe { CloseHandle(raw) } == 0 {
-        Err(FirstRecoveryManifestArtifactPublicationError::ArtifactFlushOrCloseUnavailable)
-    } else {
-        Ok(())
+    // the sole close attempt for the writer handle.
+    let attempt = classify_writer_close_attempt(unsafe { CloseHandle(raw) } != 0);
+    if attempt == WriterCloseAttempt::OwnershipAmbiguous {
+        // CloseHandle does not document that every failure leaves the supplied
+        // handle valid. Continuing or reconstructing a File could therefore
+        // double-close or re-own an invalid handle. This boundary is terminal
+        // and returns no ownership-bearing publication failure.
+        std::process::abort();
     }
 }
 
@@ -526,13 +543,7 @@ fn attempt_publication(
             error: FirstRecoveryManifestArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
         });
     }
-    if close_writer(writer).is_err() {
-        return Err(AttemptFailure {
-            partial: Some(partial),
-            phase: PublicationPhase::DuringFlushOrClose,
-            error: FirstRecoveryManifestArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
-        });
-    }
+    close_writer(writer);
     if prior.prior.destinations.revalidate().is_err() {
         return Err(AttemptFailure {
             partial: Some(partial),
@@ -726,6 +737,10 @@ pub(super) fn publish_first_recovery_manifest_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn classify_writer_close_with(close: impl FnOnce() -> bool) -> WriterCloseAttempt {
+        classify_writer_close_attempt(close())
+    }
 
     fn canonical_manifest() -> [u8; RECOVERY_SET_MANIFEST_V1_LENGTH] {
         let mut bytes = [0_u8; RECOVERY_SET_MANIFEST_V1_LENGTH];
@@ -927,7 +942,7 @@ mod tests {
         write_exact_manifest(&mut writer, &expected).unwrap();
         flush(&writer).unwrap();
         let initial = query_manifest_facts(&writer).unwrap();
-        close_writer(writer).unwrap();
+        close_writer(writer);
         let mut reopened = open_manifest_for_verification(&encoded).unwrap();
         let before = query_manifest_facts(&reopened).unwrap();
         assert!(before.identity == initial.identity);
@@ -942,6 +957,27 @@ mod tests {
         drop(reopened);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn injected_close_seam_classifies_success_and_ambiguous_failure_once_without_ownership() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let failure_calls = AtomicUsize::new(0);
+        let failure = classify_writer_close_with(|| {
+            failure_calls.fetch_add(1, Ordering::Relaxed);
+            false
+        });
+        assert_eq!(failure_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(failure, WriterCloseAttempt::OwnershipAmbiguous);
+
+        let success_calls = AtomicUsize::new(0);
+        let success = classify_writer_close_with(|| {
+            success_calls.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        assert_eq!(success_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(success, WriterCloseAttempt::Closed);
     }
 
     #[test]
@@ -1074,6 +1110,64 @@ mod tests {
         let reopen = attempt.find("open_manifest_for_verification").unwrap();
         let verify = attempt.find("verify_fresh_manifest_contents").unwrap();
         assert!(write < flush && flush < close && close < reopen && reopen < verify);
+    }
+
+    #[test]
+    fn flush_failure_retains_writer_but_close_ambiguity_cannot_return_partial_failure() {
+        const SOURCE: &str = include_str!("first_recovery_manifest_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let attempt = production
+            .split_once("fn attempt_publication")
+            .unwrap()
+            .1
+            .split_once("fn map_prior_revalidation_error")
+            .unwrap()
+            .0;
+        let flush_failure = attempt
+            .split_once("if flush(&writer).is_err()")
+            .unwrap()
+            .1
+            .split_once("close_writer(writer)")
+            .unwrap()
+            .0;
+        assert!(flush_failure.contains("partial.file = Some(writer)"));
+        assert!(flush_failure.contains("partial: Some(partial)"));
+        assert!(flush_failure.contains("ArtifactFlushOrCloseUnavailable"));
+
+        let close_transition = attempt
+            .split_once("close_writer(writer)")
+            .unwrap()
+            .1
+            .split_once("if prior.prior.destinations.revalidate()")
+            .unwrap()
+            .0;
+        assert!(!close_transition.contains("AttemptFailure"));
+        assert!(!close_transition.contains("partial.file = Some(writer)"));
+        assert!(!close_transition.contains("ArtifactFlushOrCloseUnavailable"));
+    }
+
+    #[test]
+    fn close_writer_production_contract_fail_stops_without_reownership_or_retry() {
+        const SOURCE: &str = include_str!("first_recovery_manifest_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let close = production
+            .split_once("fn close_writer")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn read_and_verify_fresh_manifest_contents")
+            .unwrap()
+            .0;
+        assert!(close.contains("file.into_raw_handle()"));
+        assert!(close.contains("CloseHandle(raw)"));
+        assert!(close.contains("WriterCloseAttempt::OwnershipAmbiguous"));
+        assert!(close.contains("std::process::abort()"));
+        assert_eq!(close.matches("CloseHandle(raw)").count(), 1);
+        assert!(!close.contains("File::from_raw_handle"));
+        assert!(!close.contains("Result<"));
+        assert!(!close.contains("Err("));
+        assert!(!close.contains("loop"));
+        assert!(!production.contains("File::from_raw_handle"));
+        assert!(!production.contains("classify_writer_close_with"));
     }
 
     #[test]
