@@ -1,5 +1,20 @@
 //! Publication of only the second recovery set's fixed manifest-last artifact.
 
+#[path = "second_complete_recovery_set_verification.rs"]
+mod second_complete_set;
+
+#[allow(unused_imports)]
+pub(crate) use second_complete_set::{
+    SecondCompleteRecoverySetVerificationError, SecondCompleteRecoverySetVerificationFailure,
+    SecondCompleteRecoverySetVerificationOutcome,
+    SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
+    verify_second_complete_recovery_set,
+};
+#[cfg(test)]
+pub(crate) use second_complete_set::{
+    with_fresh_second_envelope_difference_injected, with_second_layout_change_injected,
+};
+
 use std::{
     fmt,
     fs::File,

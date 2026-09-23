@@ -6,8 +6,16 @@ mod second_recovery_manifest_artifact;
 #[allow(unused_imports)]
 pub(crate) use second_recovery_manifest_artifact::{
     FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
+    SecondCompleteRecoverySetVerificationError, SecondCompleteRecoverySetVerificationFailure,
+    SecondCompleteRecoverySetVerificationOutcome,
+    SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
     SecondRecoveryManifestArtifactPublicationError,
     SecondRecoveryManifestArtifactPublicationFailure, publish_second_recovery_manifest_artifact,
+    verify_second_complete_recovery_set,
+};
+#[cfg(test)]
+pub(crate) use second_recovery_manifest_artifact::{
+    with_fresh_second_envelope_difference_injected, with_second_layout_change_injected,
 };
 
 use std::{

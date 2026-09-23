@@ -5,9 +5,13 @@ mod first_complete_recovery_set_verification;
 
 #[allow(unused_imports)]
 pub(crate) use first_complete_recovery_set_verification::{
+    FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
     FirstCompleteRecoverySetVerificationError, FirstCompleteRecoverySetVerificationFailure,
     FirstCompleteRecoverySetVerificationOutcome, FirstCompleteRecoverySetVerified,
-    verify_first_complete_recovery_set,
+    SecondCompleteRecoverySetVerificationError, SecondCompleteRecoverySetVerificationFailure,
+    SecondCompleteRecoverySetVerificationOutcome,
+    SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
+    verify_first_complete_recovery_set, verify_second_complete_recovery_set,
 };
 
 use std::{
@@ -625,6 +629,7 @@ mod tests {
         database_key::DatabaseKey,
         installation_evidence_contract::DatabaseKeyGenerationIdentifier,
         installation_evidence_protection::protect_database_key,
+        production_database_connection_handoff::with_production_database_close_failure_injected,
         production_database_migration_recovery_envelope::{
             ReenteredMigrationRecoveryKeyCustodyV1, correctly_associated_wrong_key_record_for_test,
         },
@@ -727,6 +732,40 @@ mod tests {
             _stage_root: stage_root,
             _source_root: source_root,
         }
+    }
+
+    fn publish_complete_second_set(
+        fixture: &mut PublishedFixture,
+    ) -> FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished {
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("the first recovered-key predecessor must verify");
+        };
+        let FirstCompleteRecoverySetVerificationOutcome::Verified(complete) =
+            verify_first_complete_recovery_set(verified)
+        else {
+            panic!("the first complete set must verify");
+        };
+        let database =
+            first_complete_recovery_set_verification::publish_second_recovery_database_artifact(
+                complete,
+            )
+            .unwrap();
+        let envelope =
+            first_complete_recovery_set_verification::publish_second_recovery_envelope_artifact(
+                database,
+            )
+            .unwrap();
+        first_complete_recovery_set_verification::publish_second_recovery_manifest_artifact(
+            envelope,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1198,5 +1237,158 @@ mod tests {
             .unwrap();
         assert!(association < fresh && fresh < release && release < parse && parse < authenticate);
         assert!(!production.contains("Ok(*expected)"));
+    }
+
+    #[test]
+    fn genuine_second_complete_set_verification_is_keyless_and_preserves_both_sets() {
+        use crate::storage_foundation::{
+            PRODUCTION_DATABASE_FILENAME, PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME,
+        };
+
+        let mut fixture = published_fixture();
+        let first_set = fixture._destination_root.path().join("first");
+        let second_set = fixture._destination_root.path().join("second");
+        let source_database = fs::read(
+            fixture
+                ._stage_root
+                .path()
+                .join(PRODUCTION_DATABASE_MIGRATION_BACKUP_STAGE_FILENAME),
+        )
+        .unwrap();
+        let published = publish_complete_second_set(&mut fixture);
+        let first_before = [
+            fs::read(first_set.join(PRODUCTION_DATABASE_FILENAME)).unwrap(),
+            fs::read(first_set.join("migration-recovery-envelope-v1.bin")).unwrap(),
+            fs::read(first_set.join("recovery-set-v1.manifest")).unwrap(),
+        ];
+        let second_before = [
+            fs::read(second_set.join(PRODUCTION_DATABASE_FILENAME)).unwrap(),
+            fs::read(second_set.join("migration-recovery-envelope-v1.bin")).unwrap(),
+            fs::read(second_set.join("recovery-set-v1.manifest")).unwrap(),
+        ];
+        let fresh =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let SecondCompleteRecoverySetVerificationOutcome::Verified(verified) =
+            verify_second_complete_recovery_set(published, fresh)
+        else {
+            panic!("the independently reopened second complete set must verify");
+        };
+        assert_eq!(
+            format!("{verified:?}"),
+            "SecondCompleteRecoverySetVerified([REDACTED])"
+        );
+        assert_eq!(first_before[0], source_database);
+        assert_eq!(second_before[0], source_database);
+        assert_eq!(
+            first_before,
+            [
+                fs::read(first_set.join(PRODUCTION_DATABASE_FILENAME)).unwrap(),
+                fs::read(first_set.join("migration-recovery-envelope-v1.bin")).unwrap(),
+                fs::read(first_set.join("recovery-set-v1.manifest")).unwrap(),
+            ]
+        );
+        assert_eq!(
+            second_before,
+            [
+                fs::read(second_set.join(PRODUCTION_DATABASE_FILENAME)).unwrap(),
+                fs::read(second_set.join("migration-recovery-envelope-v1.bin")).unwrap(),
+                fs::read(second_set.join("recovery-set-v1.manifest")).unwrap(),
+            ]
+        );
+        let mut names: Vec<_> = fs::read_dir(&second_set)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                std::ffi::OsString::from("migration-recovery-envelope-v1.bin"),
+                std::ffi::OsString::from("parish-data.db"),
+                std::ffi::OsString::from("recovery-set-v1.manifest"),
+            ]
+        );
+        drop(verified);
+    }
+
+    #[test]
+    fn second_complete_set_wrong_key_fails_and_retry_requires_a_fresh_record() {
+        let mut fixture = published_fixture();
+        let published = publish_complete_second_set(&mut fixture);
+        let wrong = correctly_associated_wrong_key_record_for_test(&fixture.record);
+        let SecondCompleteRecoverySetVerificationOutcome::Failed(failure) =
+            verify_second_complete_recovery_set(published, wrong)
+        else {
+            panic!("a checksum-valid wrong key must fail envelope authentication");
+        };
+        assert_eq!(
+            failure.category(),
+            SecondCompleteRecoverySetVerificationError::EnvelopeVerificationFailed
+        );
+        let fresh =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        assert!(matches!(
+            failure.retry_with_fresh_record(fresh),
+            SecondCompleteRecoverySetVerificationOutcome::Verified(_)
+        ));
+    }
+
+    #[test]
+    fn second_complete_set_rejects_changed_fresh_envelope_and_layout_observation() {
+        let mut envelope_fixture = published_fixture();
+        let published = publish_complete_second_set(&mut envelope_fixture);
+        let fresh =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&envelope_fixture.record)
+                .unwrap();
+        let outcome = first_complete_recovery_set_verification::with_fresh_second_envelope_difference_injected(|| {
+            verify_second_complete_recovery_set(published, fresh)
+        });
+        let SecondCompleteRecoverySetVerificationOutcome::Failed(failure) = outcome else {
+            panic!("changed freshly read second envelope bytes must fail");
+        };
+        assert_eq!(
+            failure.category(),
+            SecondCompleteRecoverySetVerificationError::EnvelopeVerificationFailed
+        );
+
+        let mut layout_fixture = published_fixture();
+        let published = publish_complete_second_set(&mut layout_fixture);
+        let fresh =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&layout_fixture.record)
+                .unwrap();
+        let outcome =
+            first_complete_recovery_set_verification::with_second_layout_change_injected(|| {
+                verify_second_complete_recovery_set(published, fresh)
+            });
+        let SecondCompleteRecoverySetVerificationOutcome::Failed(failure) = outcome else {
+            panic!("a changed second layout observation must fail closed");
+        };
+        assert_eq!(
+            failure.category(),
+            SecondCompleteRecoverySetVerificationError::DirectoryLayoutInvalid
+        );
+    }
+
+    #[test]
+    fn second_complete_set_verifier_close_failure_retains_only_close_retry_ownership() {
+        let mut fixture = published_fixture();
+        let published = publish_complete_second_set(&mut fixture);
+        let fresh =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let outcome = with_production_database_close_failure_injected(|| {
+            verify_second_complete_recovery_set(published, fresh)
+        });
+        let SecondCompleteRecoverySetVerificationOutcome::VerifierCloseFailed(failure) = outcome
+        else {
+            panic!("injected verifier close failure must retain close-only ownership");
+        };
+        assert_eq!(
+            failure.category(),
+            SecondCompleteRecoverySetVerificationError::VerifierCloseFailed
+        );
+        assert!(matches!(
+            failure.retry_close(),
+            SecondCompleteRecoverySetVerificationOutcome::Failed(_)
+        ));
     }
 }
