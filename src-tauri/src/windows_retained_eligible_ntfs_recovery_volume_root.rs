@@ -1,7 +1,7 @@
 //! Private retained authority for one exact eligible NTFS recovery-volume root.
 //!
 //! Exact-root acquisition remains observation-only. It accepts only the opaque
-//! result of a future Rust-native selector, retains the opened root, and
+//! result of the private Rust-native selector, retains the opened root, and
 //! composes the existing topology and external/disconnectable eligibility
 //! proofs. This private subtree also contains a separately typed consuming
 //! boundary that creates and retains the two fixed recovery-set children.
@@ -45,6 +45,8 @@ use super::{
     },
 };
 
+#[path = "windows_retained_eligible_ntfs_recovery_volume_root/native_windows_selection.rs"]
+mod native_windows_selection;
 #[path = "windows_retained_eligible_ntfs_recovery_volume_root/retained_recovery_set_directories.rs"]
 mod retained_recovery_set_directories;
 
@@ -55,6 +57,16 @@ const FINAL_PATH_FLAGS: u32 = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;
 
 pub(super) struct NativeSelectedRecoveryVolumeRoot {
     selected: PathBuf,
+}
+
+impl NativeSelectedRecoveryVolumeRoot {
+    fn from_native_volume_guid_root(selected: [u16; VOLUME_GUID_ROOT_UNITS]) -> Self {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+        Self {
+            selected: PathBuf::from(OsString::from_wide(&selected)),
+        }
+    }
 }
 
 impl fmt::Debug for NativeSelectedRecoveryVolumeRoot {
