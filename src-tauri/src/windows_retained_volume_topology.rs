@@ -28,6 +28,11 @@ mod windows_external_recovery_device_eligibility;
 #[path = "windows_retained_eligible_ntfs_recovery_volume_root.rs"]
 mod windows_retained_eligible_ntfs_recovery_volume_root;
 
+pub(crate) use windows_retained_eligible_ntfs_recovery_volume_root::{
+    NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
+    retain_and_separate_first_recovery_volume, select_native_recovery_volume_root,
+};
+
 const FINAL_PATH_FLAGS: GETFINALPATHNAMEBYHANDLE_FLAGS = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;
 const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
 const VOLUME_GUID_ROOT_UNITS: usize = 49;

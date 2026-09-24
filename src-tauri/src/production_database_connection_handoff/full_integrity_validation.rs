@@ -30,6 +30,15 @@ impl fmt::Debug for FullIntegrityValidatedProductionDatabaseMigrationSource {
 }
 
 impl FullIntegrityValidatedProductionDatabaseMigrationSource {
+    pub(crate) fn observe_retained_single_physical_device(
+        &self,
+    ) -> Result<
+        crate::windows_retained_volume_topology::RetainedVolumeSinglePhysicalDeviceObservation,
+        crate::windows_retained_volume_topology::RetainedVolumeTopologyError,
+    > {
+        self.source.observe_retained_single_physical_device()
+    }
+
     pub(crate) fn with_migration_backup_source<R>(
         &self,
         operation: impl FnOnce(

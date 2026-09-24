@@ -73,6 +73,20 @@ impl fmt::Debug for RevalidatedProductionDatabaseMigrationOpportunity {
 }
 
 impl RevalidatedProductionDatabaseMigrationOpportunity {
+    /// Projects only the retained production file into the canonical physical-
+    /// device topology observation. No path, file, connection, or callback is
+    /// released across this boundary.
+    pub(in crate::production_database_connection_handoff) fn observe_retained_single_physical_device(
+        &self,
+    ) -> Result<
+        crate::windows_retained_volume_topology::RetainedVolumeSinglePhysicalDeviceObservation,
+        crate::windows_retained_volume_topology::RetainedVolumeTopologyError,
+    > {
+        self.owner
+            .inspected
+            .observe_retained_single_physical_device()
+    }
+
     pub(in crate::production_database_connection_handoff) fn migration_backup_source_parts(
         &self,
     ) -> (

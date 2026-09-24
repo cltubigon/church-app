@@ -103,6 +103,10 @@ use crate::{
         database_key_persistence_paths, freshness_anchor_persistence_paths,
         installation_evidence_persistence_paths, production_database_path,
     },
+    windows_retained_volume_topology::{
+        NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
+        retain_and_separate_first_recovery_volume, select_native_recovery_volume_root,
+    },
 };
 
 #[cfg(all(windows, debug_assertions))]
@@ -366,6 +370,7 @@ enum MigrationPreparationState {
     CustodyInterruptedBeforeExposure,
     CustodyUnavailableBeforeExposure,
     CustodyVerifiedAwaitingPublication,
+    FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -375,6 +380,34 @@ enum MigrationPreparationState {
 enum MigrationWorkerCommand {
     Shutdown,
     CustodyCompleted(NativeMigrationRecoveryKeyCustodyOutcome),
+    SelectFirstRecoveryVolume,
+    FirstRecoveryVolumeSelectionCompleted(NativeRecoveryVolumeSelectionOutcome),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FirstRecoveryVolumeSelectionDispatchEscrow {
+    Pending,
+    TakenByMainThread,
+    CancelledBeforeExecution,
+}
+
+fn cancel_armed_first_recovery_volume_selection_dispatch(
+    dispatch: &Mutex<FirstRecoveryVolumeSelectionDispatchEscrow>,
+) -> bool {
+    let mut escrow = dispatch
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match std::mem::replace(
+        &mut *escrow,
+        FirstRecoveryVolumeSelectionDispatchEscrow::CancelledBeforeExecution,
+    ) {
+        FirstRecoveryVolumeSelectionDispatchEscrow::Pending => true,
+        FirstRecoveryVolumeSelectionDispatchEscrow::TakenByMainThread => {
+            *escrow = FirstRecoveryVolumeSelectionDispatchEscrow::TakenByMainThread;
+            false
+        }
+        FirstRecoveryVolumeSelectionDispatchEscrow::CancelledBeforeExecution => false,
+    }
 }
 
 enum CustodyDispatchEscrow<T> {
@@ -444,6 +477,10 @@ fn observe_pre_custody_dispatch_control(
         Ok(MigrationWorkerCommand::CustodyCompleted(_)) => {
             PreCustodyDispatchControl::ImpossibleCustodyCompleted
         }
+        Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+        | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_)) => {
+            PreCustodyDispatchControl::ImpossibleCustodyCompleted
+        }
         Err(std::sync::mpsc::TryRecvError::Empty) => PreCustodyDispatchControl::NoCommand,
         Err(std::sync::mpsc::TryRecvError::Disconnected) => PreCustodyDispatchControl::Disconnected,
     }
@@ -469,6 +506,22 @@ where
 }
 
 #[cfg(windows)]
+fn run_main_thread_first_recovery_volume_picker<Handle, Resolve, Run>(
+    resolve_parent: Resolve,
+    run_native: Run,
+) -> NativeRecoveryVolumeSelectionOutcome
+where
+    Resolve: FnOnce() -> Option<Handle>,
+    Run: FnOnce(Handle) -> NativeRecoveryVolumeSelectionOutcome,
+{
+    match catch_unwind(AssertUnwindSafe(resolve_parent)) {
+        Ok(Some(parent)) => catch_unwind(AssertUnwindSafe(|| run_native(parent)))
+            .unwrap_or_else(|_| std::process::abort()),
+        Ok(None) | Err(_) => NativeRecoveryVolumeSelectionOutcome::Unavailable,
+    }
+}
+
+#[cfg(windows)]
 #[allow(clippy::large_enum_variant)]
 enum MigrationWorkerParkedOwnership {
     OperationalClose(
@@ -479,6 +532,10 @@ enum MigrationWorkerParkedOwnership {
     Interrupted(UndisclosedMigrationRecoveryKeyCustodyInterruption),
     Unavailable(PreparedUndisclosedMigrationRecoveryKeyCustody),
     Verified(RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup),
+    FirstRecoveryVolumePrepared {
+        source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+        first_root: RecoveryVolumeRootSeparatedFromProductionStorage,
+    },
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
 }
@@ -639,6 +696,7 @@ struct LifecycleInner {
     migration_worker: Option<thread::JoinHandle<()>>,
     migration_control: Option<std::sync::mpsc::Sender<MigrationWorkerCommand>>,
     migration_preparation: MigrationPreparationState,
+    first_recovery_volume_selection_outstanding: bool,
     migration_shutdown_requested: bool,
     startup_work_resolved: bool,
     close_work_resolved: bool,
@@ -665,6 +723,7 @@ impl ApplicationLifecycle {
                 migration_worker: None,
                 migration_control: None,
                 migration_preparation: MigrationPreparationState::Inactive,
+                first_recovery_volume_selection_outstanding: false,
                 migration_shutdown_requested: false,
                 startup_work_resolved: false,
                 close_work_resolved: true,
@@ -713,6 +772,58 @@ impl ApplicationLifecycle {
             }
             CustodyDispatchEscrow::TakenByMainThread => std::process::abort(),
         }
+    }
+
+    fn take_armed_first_recovery_volume_selection_dispatch_for_main(
+        &self,
+        dispatch: &Mutex<FirstRecoveryVolumeSelectionDispatchEscrow>,
+    ) -> bool {
+        let _boundary = self
+            .custody_dispatch_boundary
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.lock().migration_shutdown_requested {
+            return false;
+        }
+
+        let mut escrow = dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match std::mem::replace(
+            &mut *escrow,
+            FirstRecoveryVolumeSelectionDispatchEscrow::TakenByMainThread,
+        ) {
+            FirstRecoveryVolumeSelectionDispatchEscrow::Pending => true,
+            FirstRecoveryVolumeSelectionDispatchEscrow::CancelledBeforeExecution => {
+                *escrow = FirstRecoveryVolumeSelectionDispatchEscrow::CancelledBeforeExecution;
+                false
+            }
+            FirstRecoveryVolumeSelectionDispatchEscrow::TakenByMainThread => std::process::abort(),
+        }
+    }
+
+    /// Private retry seam for a later explicitly initiated first-volume
+    /// selection attempt. This is intentionally not exposed through IPC.
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn request_first_recovery_volume_selection(&self) -> bool {
+        let control = {
+            let inner = self.lock();
+            if !matches!(
+                inner.migration_preparation,
+                MigrationPreparationState::CustodyVerifiedAwaitingPublication
+            ) || inner.first_recovery_volume_selection_outstanding
+                || inner.migration_shutdown_requested
+            {
+                return false;
+            }
+            inner.migration_control.clone()
+        };
+        control.is_some_and(|sender| {
+            sender
+                .send(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+                .is_ok()
+        })
     }
 
     pub(crate) fn status(&self) -> StartupStatus {
@@ -1420,10 +1531,24 @@ impl ApplicationLifecycle {
                                 self.park_migration_worker(owner, control, exclusivity, app)
                             }
                         }
+                    } else if matches!(owner, MigrationWorkerParkedOwnership::Verified(_)) {
+                        let MigrationWorkerParkedOwnership::Verified(verified) = owner else {
+                            unreachable!()
+                        };
+                        self.run_first_recovery_volume_selection_dispatch(
+                            verified,
+                            control,
+                            exclusivity,
+                            app,
+                        );
                     } else {
                         self.park_migration_worker(owner, control, exclusivity, app);
                     }
                     return;
+                }
+                Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+                | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_)) => {
+                    std::process::abort()
                 }
                 Err(_) => std::process::abort(),
             }
@@ -1431,8 +1556,144 @@ impl ApplicationLifecycle {
     }
 
     #[cfg(windows)]
+    fn run_first_recovery_volume_selection_dispatch(
+        self: &Arc<Self>,
+        source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+        control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+        exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
+        app: &AppHandle,
+    ) {
+        let dispatch = {
+            let _boundary = self
+                .custody_dispatch_boundary
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut inner = self.lock();
+            if inner.migration_shutdown_requested {
+                drop(inner);
+                match retry_migration_worker_ownership(
+                    MigrationWorkerParkedOwnership::Verified(source),
+                    self,
+                ) {
+                    MigrationWorkerRetryOutcome::Resolved => {
+                        drop(exclusivity);
+                        self.finish_migration_preparation_worker(Some(app));
+                    }
+                    MigrationWorkerRetryOutcome::Retained(owner) => {
+                        self.park_migration_worker(owner, control, exclusivity, app)
+                    }
+                }
+                return;
+            }
+            if inner.first_recovery_volume_selection_outstanding {
+                std::process::abort();
+            }
+            inner.first_recovery_volume_selection_outstanding = true;
+            Arc::new(Mutex::new(
+                FirstRecoveryVolumeSelectionDispatchEscrow::Pending,
+            ))
+        };
+
+        let main_dispatch = Arc::clone(&dispatch);
+        let main_app = app.clone();
+        let lifecycle = Arc::clone(self);
+        let scheduled = catch_unwind(AssertUnwindSafe(|| {
+            app.run_on_main_thread(move || {
+                if !lifecycle
+                    .take_armed_first_recovery_volume_selection_dispatch_for_main(&main_dispatch)
+                {
+                    return;
+                }
+                let outcome = run_main_thread_first_recovery_volume_picker(
+                    || {
+                        main_app
+                            .get_webview_window("main")
+                            .and_then(|window| window.hwnd().ok())
+                    },
+                    |hwnd| {
+                        select_native_recovery_volume_root(windows::Win32::Foundation::HWND(hwnd.0))
+                    },
+                );
+                let sender = lifecycle.lock().migration_control.clone();
+                let Some(sender) = sender else {
+                    std::process::abort();
+                };
+                if let Err(error) = sender
+                    .send(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(outcome))
+                {
+                    let _retained_selection = error.0;
+                    std::process::abort();
+                }
+            })
+        }))
+        .map_err(|_| ())
+        .and_then(|result| result.map_err(|_| ()));
+
+        if scheduled.is_err() && cancel_armed_first_recovery_volume_selection_dispatch(&dispatch) {
+            self.lock().first_recovery_volume_selection_outstanding = false;
+            self.park_migration_worker(
+                MigrationWorkerParkedOwnership::Verified(source),
+                control,
+                exclusivity,
+                app,
+            );
+            return;
+        }
+
+        let mut shutdown_requested = false;
+        loop {
+            match control.recv() {
+                Ok(MigrationWorkerCommand::Shutdown) => {
+                    if cancel_armed_first_recovery_volume_selection_dispatch(&dispatch) {
+                        self.lock().first_recovery_volume_selection_outstanding = false;
+                        match retry_migration_worker_ownership(
+                            MigrationWorkerParkedOwnership::Verified(source),
+                            self,
+                        ) {
+                            MigrationWorkerRetryOutcome::Resolved => {
+                                drop(exclusivity);
+                                self.finish_migration_preparation_worker(Some(app));
+                            }
+                            MigrationWorkerRetryOutcome::Retained(owner) => {
+                                self.park_migration_worker(owner, control, exclusivity, app)
+                            }
+                        }
+                        return;
+                    }
+                    shutdown_requested = true;
+                }
+                Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(outcome)) => {
+                    self.lock().first_recovery_volume_selection_outstanding = false;
+                    if shutdown_requested || self.lock().migration_shutdown_requested {
+                        drop(outcome);
+                        match retry_migration_worker_ownership(
+                            MigrationWorkerParkedOwnership::Verified(source),
+                            self,
+                        ) {
+                            MigrationWorkerRetryOutcome::Resolved => {
+                                drop(exclusivity);
+                                self.finish_migration_preparation_worker(Some(app));
+                            }
+                            MigrationWorkerRetryOutcome::Retained(owner) => {
+                                self.park_migration_worker(owner, control, exclusivity, app)
+                            }
+                        }
+                    } else {
+                        let owner = prepare_first_recovery_volume(source, outcome);
+                        self.park_migration_worker(owner, control, exclusivity, app);
+                    }
+                    return;
+                }
+                Ok(MigrationWorkerCommand::CustodyCompleted(_))
+                | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume) => std::process::abort(),
+                Err(_) => std::process::abort(),
+            }
+        }
+    }
+
+    #[cfg(windows)]
     fn park_migration_worker(
-        &self,
+        self: &Arc<Self>,
         mut owner: MigrationWorkerParkedOwnership,
         control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
         exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
@@ -1451,6 +1712,9 @@ impl ApplicationLifecycle {
             MigrationWorkerParkedOwnership::Verified(_) => {
                 MigrationPreparationState::CustodyVerifiedAwaitingPublication
             }
+            MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { .. } => {
+                MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication
+            }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
             }
@@ -1459,7 +1723,22 @@ impl ApplicationLifecycle {
         loop {
             match control.recv() {
                 Ok(MigrationWorkerCommand::Shutdown) => {}
-                Ok(MigrationWorkerCommand::CustodyCompleted(_)) => std::process::abort(),
+                Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume) => {
+                    let MigrationWorkerParkedOwnership::Verified(source) = owner else {
+                        std::process::abort()
+                    };
+                    self.run_first_recovery_volume_selection_dispatch(
+                        source,
+                        control,
+                        exclusivity,
+                        app,
+                    );
+                    return;
+                }
+                Ok(MigrationWorkerCommand::CustodyCompleted(_))
+                | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_)) => {
+                    std::process::abort()
+                }
                 Err(_) => std::process::abort(),
             }
             match retry_migration_worker_ownership(owner, self) {
@@ -1478,6 +1757,7 @@ impl ApplicationLifecycle {
         {
             let mut inner = self.lock();
             inner.migration_preparation = MigrationPreparationState::Inactive;
+            inner.first_recovery_volume_selection_outstanding = false;
             inner.migration_work_resolved = true;
             inner.migration_control = None;
             if matches!(inner.state, LifecycleState::Stopping) {
@@ -1819,6 +2099,30 @@ fn close_authorized_migration_for_shutdown(
 }
 
 #[cfg(windows)]
+fn prepare_first_recovery_volume(
+    source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    outcome: NativeRecoveryVolumeSelectionOutcome,
+) -> MigrationWorkerParkedOwnership {
+    let selection = match outcome {
+        NativeRecoveryVolumeSelectionOutcome::Selected(selection) => selection,
+        NativeRecoveryVolumeSelectionOutcome::Cancelled
+        | NativeRecoveryVolumeSelectionOutcome::Unavailable => {
+            return MigrationWorkerParkedOwnership::Verified(source);
+        }
+    };
+    let production_topology = match source.observe_retained_production_single_physical_device() {
+        Ok(production_topology) => production_topology,
+        Err(_) => return MigrationWorkerParkedOwnership::Verified(source),
+    };
+    match retain_and_separate_first_recovery_volume(production_topology, selection) {
+        Ok(first_root) => {
+            MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { source, first_root }
+        }
+        Err(_) => MigrationWorkerParkedOwnership::Verified(source),
+    }
+}
+
+#[cfg(windows)]
 fn retry_migration_worker_ownership(
     owner: MigrationWorkerParkedOwnership,
     lifecycle: &ApplicationLifecycle,
@@ -1906,6 +2210,23 @@ fn retry_migration_worker_ownership(
         }
         MigrationWorkerParkedOwnership::Verified(verified) => {
             let shutdown = verified.abort_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { source, first_root } => {
+            drop(first_root);
+            let shutdown = source.abort_for_shutdown();
             match shutdown.retry_source_close() {
                 UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
                     shutdown,
@@ -5885,6 +6206,176 @@ mod tests {
             "Metadata",
         ] {
             assert!(!result_definition.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn first_recovery_selection_dispatch_token_transfers_or_cancels_exactly_once() {
+        let cancelled = Mutex::new(FirstRecoveryVolumeSelectionDispatchEscrow::Pending);
+        assert!(cancel_armed_first_recovery_volume_selection_dispatch(
+            &cancelled
+        ));
+        assert!(!cancel_armed_first_recovery_volume_selection_dispatch(
+            &cancelled
+        ));
+
+        let lifecycle = ApplicationLifecycle::new();
+        let taken = Mutex::new(FirstRecoveryVolumeSelectionDispatchEscrow::Pending);
+        assert!(lifecycle.take_armed_first_recovery_volume_selection_dispatch_for_main(&taken));
+        assert!(!cancel_armed_first_recovery_volume_selection_dispatch(
+            &taken
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_recovery_picker_seam_is_deterministic_without_tauri_or_native_ui() {
+        let native_calls = std::cell::Cell::new(0);
+        let unavailable = run_main_thread_first_recovery_volume_picker(
+            || None::<usize>,
+            |_| {
+                native_calls.set(native_calls.get() + 1);
+                NativeRecoveryVolumeSelectionOutcome::Cancelled
+            },
+        );
+        assert!(matches!(
+            unavailable,
+            NativeRecoveryVolumeSelectionOutcome::Unavailable
+        ));
+        assert_eq!(native_calls.get(), 0);
+
+        let cancelled = run_main_thread_first_recovery_volume_picker(
+            || Some(7usize),
+            |parent| {
+                assert_eq!(parent, 7);
+                native_calls.set(native_calls.get() + 1);
+                NativeRecoveryVolumeSelectionOutcome::Cancelled
+            },
+        );
+        assert!(matches!(
+            cancelled,
+            NativeRecoveryVolumeSelectionOutcome::Cancelled
+        ));
+        assert_eq!(native_calls.get(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_first_recovery_selection_retry_is_private_parked_and_one_shot() {
+        let lifecycle = ApplicationLifecycle::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_control = Some(sender);
+            inner.migration_preparation =
+                MigrationPreparationState::CustodyVerifiedAwaitingPublication;
+            inner.migration_work_resolved = false;
+        }
+        assert!(lifecycle.request_first_recovery_volume_selection());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+        ));
+
+        lifecycle.lock().first_recovery_volume_selection_outstanding = true;
+        assert!(!lifecycle.request_first_recovery_volume_selection());
+        assert!(receiver.try_recv().is_err());
+
+        lifecycle.lock().first_recovery_volume_selection_outstanding = false;
+        assert!(lifecycle.request_first_recovery_volume_selection());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+        ));
+        assert!(!lifecycle.lock().migration_work_resolved);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_recovery_selection_composition_uses_locked_native_and_storage_boundaries() {
+        const LIFECYCLE: &str = include_str!("application_lifecycle.rs");
+        const ROOT: &str = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
+        const CUSTODY: &str =
+            include_str!("production_database_migration_backup_stage/recovery_envelope/custody.rs");
+        const SOURCE: &str =
+            include_str!("production_database_connection_handoff/full_integrity_validation.rs");
+
+        let dispatch = LIFECYCLE
+            .split_once("fn run_first_recovery_volume_selection_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        assert!(dispatch.contains("app.run_on_main_thread"));
+        assert!(dispatch.contains("get_webview_window(\"main\")"));
+        assert!(dispatch.contains("window.hwnd()"));
+        assert!(dispatch.contains("select_native_recovery_volume_root"));
+        assert!(dispatch.contains("MigrationWorkerCommand::Shutdown"));
+        assert!(dispatch.contains("drop(outcome)"));
+        assert!(!dispatch.contains("from_test_path"));
+        assert!(!dispatch.contains("PathBuf"));
+
+        let preparation = LIFECYCLE
+            .split_once("fn prepare_first_recovery_volume")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .0;
+        assert!(preparation.contains("NativeRecoveryVolumeSelectionOutcome::Cancelled"));
+        assert!(preparation.contains("NativeRecoveryVolumeSelectionOutcome::Unavailable"));
+        assert!(preparation.contains("MigrationWorkerParkedOwnership::Verified(source)"));
+        assert!(preparation.contains("observe_retained_production_single_physical_device"));
+        assert!(preparation.contains("retain_and_separate_first_recovery_volume"));
+        assert!(preparation.contains("FirstRecoveryVolumePrepared { source, first_root }"));
+        for forbidden in [
+            "validate_two_recovery_volume_root_capacities",
+            "create_recovery_set",
+            "publish",
+            "recovery_key",
+        ] {
+            assert!(!preparation.contains(forbidden));
+        }
+
+        let facade = ROOT
+            .split_once("pub(crate) fn retain_and_separate_first_recovery_volume")
+            .unwrap()
+            .1
+            .split_once("impl RecoveryVolumeRootSeparatedFromProductionStorage")
+            .unwrap()
+            .0;
+        assert!(facade.contains("retain_eligible_ntfs_recovery_volume_root(selection)"));
+        assert!(facade.contains("separate_recovery_volume_root_from_production_storage"));
+        assert!(CUSTODY.contains("observe_retained_production_single_physical_device"));
+        assert!(SOURCE.contains("self.source.observe_retained_single_physical_device()"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_recovery_success_shutdown_drops_root_then_uses_canonical_source_close_chain() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let retry = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_preparation_failure")
+            .unwrap()
+            .0;
+        let prepared = retry
+            .split_once("MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        let drop_root = prepared.find("drop(first_root)").unwrap();
+        let abort = prepared.find("source.abort_for_shutdown()").unwrap();
+        let close = prepared.find("shutdown.retry_source_close()").unwrap();
+        assert!(drop_root < abort && abort < close);
+        assert!(prepared.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
+        for forbidden in ["remove_", "delete", "cleanup", "publish"] {
+            assert!(!prepared.contains(forbidden));
         }
     }
 }

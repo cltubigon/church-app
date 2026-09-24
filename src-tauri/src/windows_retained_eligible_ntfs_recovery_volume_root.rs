@@ -50,12 +50,16 @@ mod native_windows_selection;
 #[path = "windows_retained_eligible_ntfs_recovery_volume_root/retained_recovery_set_directories.rs"]
 mod retained_recovery_set_directories;
 
+pub(crate) use native_windows_selection::{
+    NativeRecoveryVolumeSelectionOutcome, select_native_recovery_volume_root,
+};
+
 const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
 const VOLUME_GUID_ROOT_UNITS: usize = 49;
 const FILESYSTEM_NAME_CAPACITY: usize = 32;
 const FINAL_PATH_FLAGS: u32 = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;
 
-pub(super) struct NativeSelectedRecoveryVolumeRoot {
+pub(crate) struct NativeSelectedRecoveryVolumeRoot {
     selected: PathBuf,
 }
 
@@ -98,7 +102,7 @@ pub(super) struct RetainedEligibleNtfsRecoveryVolumeRoot {
     eligible_device: RetainedExternalDisconnectableRecoveryDeviceObservation,
 }
 
-pub(super) struct RecoveryVolumeRootSeparatedFromProductionStorage {
+pub(crate) struct RecoveryVolumeRootSeparatedFromProductionStorage {
     selected_root: File,
     initial_root: RootFacts,
     separation: RecoveryDeviceSeparatedFromProductionStorage,
@@ -614,6 +618,15 @@ pub(super) fn separate_recovery_volume_root_from_production_storage(
         initial_root,
         separation,
     })
+}
+
+pub(crate) fn retain_and_separate_first_recovery_volume(
+    production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
+    selection: NativeSelectedRecoveryVolumeRoot,
+) -> Result<RecoveryVolumeRootSeparatedFromProductionStorage, ()> {
+    let retained_root = retain_eligible_ntfs_recovery_volume_root(selection).map_err(|_| ())?;
+    separate_recovery_volume_root_from_production_storage(production_topology, retained_root)
+        .map_err(|_| ())
 }
 
 impl RecoveryVolumeRootSeparatedFromProductionStorage {

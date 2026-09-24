@@ -27,7 +27,7 @@ const PICKER_OPTIONS: FILEOPENDIALOGOPTIONS = FILEOPENDIALOGOPTIONS(
 const STANDARD_DIALOG_CANCELLATION: HRESULT = HRESULT::from_win32(ERROR_CANCELLED.0);
 
 #[must_use = "the native selection outcome must be handled"]
-pub(super) enum NativeRecoveryVolumeSelectionOutcome {
+pub(crate) enum NativeRecoveryVolumeSelectionOutcome {
     Selected(NativeSelectedRecoveryVolumeRoot),
     Cancelled,
     Unavailable,
@@ -95,7 +95,7 @@ impl Drop for ShellAllocatedPath {
     }
 }
 
-pub(super) fn select_native_recovery_volume_root(
+pub(crate) fn select_native_recovery_volume_root(
     parent: HWND,
 ) -> NativeRecoveryVolumeSelectionOutcome {
     // SAFETY: the call supplies the required null reserved pointer and fixed approved flags.

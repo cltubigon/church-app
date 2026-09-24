@@ -390,6 +390,17 @@ impl PossiblyExposedMigrationRecoveryKeyCustodyFailure {
 }
 
 impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn observe_retained_production_single_physical_device(
+        &self,
+    ) -> Result<
+        crate::windows_retained_volume_topology::RetainedVolumeSinglePhysicalDeviceObservation,
+        crate::windows_retained_volume_topology::RetainedVolumeTopologyError,
+    > {
+        self.encrypted_stage
+            .source
+            .observe_retained_single_physical_device()
+    }
+
     pub(crate) fn bind_recovered_database_key_candidate(
         &self,
         candidate: DecodedDatabaseKeyCandidate,
