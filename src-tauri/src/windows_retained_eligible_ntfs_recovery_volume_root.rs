@@ -116,7 +116,7 @@ pub(crate) struct TwoRecoveryVolumeRootsSeparatedFromProductionStorage {
     separation: TwoRecoveryDevicesSeparatedFromProductionStorage,
 }
 
-pub(super) struct TwoCapacityValidatedRecoveryVolumeRoots {
+pub(crate) struct TwoCapacityValidatedRecoveryVolumeRoots {
     roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
 }
 
@@ -797,6 +797,13 @@ pub(super) fn validate_two_recovery_volume_root_capacities<SourceSizeError>(
     Ok(TwoCapacityValidatedRecoveryVolumeRoots { roots })
 }
 
+pub(crate) fn validate_recovery_volume_capacities_for_lifecycle<SourceSizeError>(
+    required: Result<RecoverySetRequiredBytes, SourceSizeError>,
+    roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
+) -> Result<TwoCapacityValidatedRecoveryVolumeRoots, ()> {
+    validate_two_recovery_volume_root_capacities(required, roots).map_err(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,7 +1030,7 @@ mod tests {
         assert!(production.contains(
             "use crate::production_database_migration_recovery_envelope::RecoverySetRequiredBytes;"
         ));
-        assert!(!lifecycle.contains(
+        assert!(lifecycle.contains(
             "pub(crate) use production_database_migration_confirmation::production_database_migration_backup_stage::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup;"
         ));
         assert!(
@@ -1058,6 +1065,21 @@ mod tests {
         assert!(transition.contains("SourceSizeUnavailable"));
         assert!(transition.contains("first_initial_root.normalized_root"));
         assert!(transition.contains("second_initial_root.normalized_root"));
+
+        let facade = production
+            .split_once("fn validate_recovery_volume_capacities_for_lifecycle")
+            .unwrap()
+            .1;
+        assert!(facade.contains("validate_two_recovery_volume_root_capacities(required, roots)"));
+        for forbidden in [
+            "normalized_root",
+            "available_bytes",
+            "is_satisfied_by",
+            "GetDiskFreeSpaceExW",
+            "CreateDirectoryW",
+        ] {
+            assert!(!facade.contains(forbidden));
+        }
     }
 
     #[test]

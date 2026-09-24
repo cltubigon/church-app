@@ -105,10 +105,10 @@ use crate::{
     },
     windows_retained_volume_topology::{
         NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
-        RetainAndSeparateSecondRecoveryVolumeError,
+        RetainAndSeparateSecondRecoveryVolumeError, TwoCapacityValidatedRecoveryVolumeRoots,
         TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
         retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
-        select_native_recovery_volume_root,
+        select_native_recovery_volume_root, validate_recovery_volume_capacities_for_lifecycle,
     },
 };
 
@@ -375,6 +375,7 @@ enum MigrationPreparationState {
     CustodyVerifiedAwaitingPublication,
     FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication,
     TwoRecoveryVolumesRetainedAndSeparatedAwaitingCapacity,
+    RecoveryVolumesCapacityValidatedAwaitingDirectories,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -547,6 +548,10 @@ enum MigrationWorkerParkedOwnership {
     TwoRecoveryVolumesPrepared {
         source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
         roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
+    },
+    CapacityValidatedRecoveryVolumes {
+        source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+        roots: TwoCapacityValidatedRecoveryVolumeRoots,
     },
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
@@ -1884,6 +1889,38 @@ impl ApplicationLifecycle {
                         }
                     } else {
                         let owner = prepare_second_recovery_volume(source, first_root, outcome);
+                        let owner = match owner {
+                            MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared {
+                                source,
+                                roots,
+                            } => {
+                                if self.lock().migration_shutdown_requested {
+                                    match retry_migration_worker_ownership(
+                                        MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared {
+                                            source,
+                                            roots,
+                                        },
+                                        self,
+                                    ) {
+                                        MigrationWorkerRetryOutcome::Resolved => {
+                                            drop(exclusivity);
+                                            self.finish_migration_preparation_worker(Some(app));
+                                        }
+                                        MigrationWorkerRetryOutcome::Retained(owner) => {
+                                            self.park_migration_worker(
+                                                owner,
+                                                control,
+                                                exclusivity,
+                                                app,
+                                            )
+                                        }
+                                    }
+                                    return;
+                                }
+                                prepare_recovery_volume_capacities(source, roots)
+                            }
+                            owner => owner,
+                        };
                         self.park_migration_worker(owner, control, exclusivity, app);
                     }
                     return;
@@ -1923,6 +1960,9 @@ impl ApplicationLifecycle {
             }
             MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared { .. } => {
                 MigrationPreparationState::TwoRecoveryVolumesRetainedAndSeparatedAwaitingCapacity
+            }
+            MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes { .. } => {
+                MigrationPreparationState::RecoveryVolumesCapacityValidatedAwaitingDirectories
             }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
@@ -2381,6 +2421,25 @@ fn prepare_second_recovery_volume(
 }
 
 #[cfg(windows)]
+fn prepare_recovery_volume_capacities(
+    source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
+) -> MigrationWorkerParkedOwnership {
+    let required = match source.prepare_recovery_set_required_bytes() {
+        Ok(required) => required,
+        Err(_) => {
+            return MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared { source, roots };
+        }
+    };
+    match validate_recovery_volume_capacities_for_lifecycle(Ok::<_, ()>(required), roots) {
+        Ok(roots) => {
+            MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes { source, roots }
+        }
+        Err(_) => MigrationWorkerParkedOwnership::Verified(source),
+    }
+}
+
+#[cfg(windows)]
 fn retry_migration_worker_ownership(
     owner: MigrationWorkerParkedOwnership,
     lifecycle: &ApplicationLifecycle,
@@ -2500,6 +2559,23 @@ fn retry_migration_worker_ownership(
             }
         }
         MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared { source, roots } => {
+            drop(roots);
+            let shutdown = source.abort_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes { source, roots } => {
             drop(roots);
             let shutdown = source.abort_for_shutdown();
             match shutdown.retry_source_close() {
@@ -6870,6 +6946,148 @@ mod tests {
         assert!(prepared.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
         for forbidden in ["remove_", "delete", "cleanup", "publish"] {
             assert!(!prepared.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capacity_lifecycle_composition_uses_exact_source_observation_and_canonical_transition() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let composition = SOURCE
+            .split_once("fn prepare_recovery_volume_capacities")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .0;
+
+        let observation = composition
+            .find("source.prepare_recovery_set_required_bytes()")
+            .unwrap();
+        let transition = composition
+            .find("validate_recovery_volume_capacities_for_lifecycle")
+            .unwrap();
+        assert!(observation < transition);
+        assert!(
+            composition
+                .contains("source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup")
+        );
+        assert!(
+            composition.contains("roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage")
+        );
+        assert!(composition.contains(
+            "MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes { source, roots }"
+        ));
+        assert!(composition.contains("Err(_) => MigrationWorkerParkedOwnership::Verified(source)"));
+        for forbidden in [
+            "checked_add",
+            "database_byte_length",
+            "available_bytes",
+            "create_and_retain_recovery_set_directories",
+            "publish",
+            "custody_record",
+        ] {
+            assert!(!composition.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preconsumption_source_observation_failure_preserves_both_roots_only() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let composition = SOURCE
+            .split_once("fn prepare_recovery_volume_capacities")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .0;
+        let source_failure = composition
+            .split_once("Err(_) => {")
+            .unwrap()
+            .1
+            .split_once("match validate_recovery_volume_capacities_for_lifecycle")
+            .unwrap()
+            .0;
+        assert!(source_failure.contains(
+            "MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared { source, roots }"
+        ));
+
+        let consuming_failure = composition
+            .split_once("validate_recovery_volume_capacities_for_lifecycle")
+            .unwrap()
+            .1
+            .split_once("Err(_) =>")
+            .unwrap()
+            .1
+            .lines()
+            .next()
+            .unwrap();
+        assert!(consuming_failure.contains("MigrationWorkerParkedOwnership::Verified(source)"));
+        assert!(!consuming_failure.contains("TwoRecoveryVolumesPrepared"));
+        assert!(!consuming_failure.contains("CapacityValidatedRecoveryVolumes { source, roots }"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capacity_work_starts_only_after_exact_two_root_success_and_parks_worker_only() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        const LIB: &str = include_str!("lib.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_second_recovery_volume_selection_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        let exact_owner_match = dispatch
+            .find("MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared")
+            .unwrap();
+        let capacity = dispatch
+            .find("prepare_recovery_volume_capacities(source, roots)")
+            .unwrap();
+        assert!(exact_owner_match < capacity);
+        assert!(dispatch[..capacity].contains("migration_shutdown_requested"));
+
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        assert!(parking.contains("CapacityValidatedRecoveryVolumes"));
+        assert!(parking.contains("RecoveryVolumesCapacityValidatedAwaitingDirectories"));
+        assert!(!parking.contains("migration_work_resolved = true"));
+        assert!(!LIB.contains("RecoveryVolumesCapacityValidatedAwaitingDirectories"));
+        assert!(!LIB.contains("prepare_recovery_volume_capacities"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capacity_validated_shutdown_drops_roots_before_canonical_source_close_chain() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let retry = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_preparation_failure")
+            .unwrap()
+            .0;
+        let validated = retry
+            .split_once("MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        let drop_roots = validated.find("drop(roots)").unwrap();
+        let abort = validated.find("source.abort_for_shutdown()").unwrap();
+        let close = validated.find("shutdown.retry_source_close()").unwrap();
+        assert!(drop_roots < abort && abort < close);
+        assert!(validated.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
+        for forbidden in ["remove_", "delete", "cleanup", "publish", "create_"] {
+            assert!(!validated.contains(forbidden));
         }
     }
 }
