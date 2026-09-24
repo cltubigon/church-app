@@ -108,7 +108,7 @@ pub(crate) struct RecoveryVolumeRootSeparatedFromProductionStorage {
     separation: RecoveryDeviceSeparatedFromProductionStorage,
 }
 
-pub(super) struct TwoRecoveryVolumeRootsSeparatedFromProductionStorage {
+pub(crate) struct TwoRecoveryVolumeRootsSeparatedFromProductionStorage {
     first_selected_root: File,
     first_initial_root: RootFacts,
     second_selected_root: File,
@@ -129,6 +129,20 @@ impl fmt::Debug for RecoveryVolumeRootSeparatedFromProductionStorage {
 impl fmt::Debug for TwoRecoveryVolumeRootsSeparatedFromProductionStorage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("TwoRecoveryVolumeRootsSeparatedFromProductionStorage([REDACTED])")
+    }
+}
+
+pub(crate) enum RetainAndSeparateSecondRecoveryVolumeError {
+    RetentionFailed(Box<RecoveryVolumeRootSeparatedFromProductionStorage>),
+    SeparationFailed,
+}
+
+impl fmt::Debug for RetainAndSeparateSecondRecoveryVolumeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::RetentionFailed(_) => "RetentionFailed",
+            Self::SeparationFailed => "SeparationFailed",
+        })
     }
 }
 
@@ -627,6 +641,25 @@ pub(crate) fn retain_and_separate_first_recovery_volume(
     let retained_root = retain_eligible_ntfs_recovery_volume_root(selection).map_err(|_| ())?;
     separate_recovery_volume_root_from_production_storage(production_topology, retained_root)
         .map_err(|_| ())
+}
+
+pub(crate) fn retain_and_separate_second_recovery_volume(
+    first_root: RecoveryVolumeRootSeparatedFromProductionStorage,
+    selection: NativeSelectedRecoveryVolumeRoot,
+) -> Result<
+    TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
+    RetainAndSeparateSecondRecoveryVolumeError,
+> {
+    let second_root = match retain_eligible_ntfs_recovery_volume_root(selection) {
+        Ok(second_root) => second_root,
+        Err(_) => {
+            return Err(RetainAndSeparateSecondRecoveryVolumeError::RetentionFailed(
+                Box::new(first_root),
+            ));
+        }
+    };
+    separate_two_recovery_volume_roots_from_production_storage(first_root, second_root)
+        .map_err(|_| RetainAndSeparateSecondRecoveryVolumeError::SeparationFailed)
 }
 
 impl RecoveryVolumeRootSeparatedFromProductionStorage {

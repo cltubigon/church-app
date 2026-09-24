@@ -30,7 +30,10 @@ mod windows_retained_eligible_ntfs_recovery_volume_root;
 
 pub(crate) use windows_retained_eligible_ntfs_recovery_volume_root::{
     NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
-    retain_and_separate_first_recovery_volume, select_native_recovery_volume_root,
+    RetainAndSeparateSecondRecoveryVolumeError,
+    TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
+    retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
+    select_native_recovery_volume_root,
 };
 
 const FINAL_PATH_FLAGS: GETFINALPATHNAMEBYHANDLE_FLAGS = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;

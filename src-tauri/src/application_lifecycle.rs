@@ -105,7 +105,10 @@ use crate::{
     },
     windows_retained_volume_topology::{
         NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
-        retain_and_separate_first_recovery_volume, select_native_recovery_volume_root,
+        RetainAndSeparateSecondRecoveryVolumeError,
+        TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
+        retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
+        select_native_recovery_volume_root,
     },
 };
 
@@ -371,6 +374,7 @@ enum MigrationPreparationState {
     CustodyUnavailableBeforeExposure,
     CustodyVerifiedAwaitingPublication,
     FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication,
+    TwoRecoveryVolumesRetainedAndSeparatedAwaitingCapacity,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -382,6 +386,8 @@ enum MigrationWorkerCommand {
     CustodyCompleted(NativeMigrationRecoveryKeyCustodyOutcome),
     SelectFirstRecoveryVolume,
     FirstRecoveryVolumeSelectionCompleted(NativeRecoveryVolumeSelectionOutcome),
+    SelectSecondRecoveryVolume,
+    SecondRecoveryVolumeSelectionCompleted(NativeRecoveryVolumeSelectionOutcome),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -478,7 +484,9 @@ fn observe_pre_custody_dispatch_control(
             PreCustodyDispatchControl::ImpossibleCustodyCompleted
         }
         Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
-        | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_)) => {
+        | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
+        | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
+        | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_)) => {
             PreCustodyDispatchControl::ImpossibleCustodyCompleted
         }
         Err(std::sync::mpsc::TryRecvError::Empty) => PreCustodyDispatchControl::NoCommand,
@@ -506,7 +514,7 @@ where
 }
 
 #[cfg(windows)]
-fn run_main_thread_first_recovery_volume_picker<Handle, Resolve, Run>(
+fn run_main_thread_recovery_volume_picker<Handle, Resolve, Run>(
     resolve_parent: Resolve,
     run_native: Run,
 ) -> NativeRecoveryVolumeSelectionOutcome
@@ -535,6 +543,10 @@ enum MigrationWorkerParkedOwnership {
     FirstRecoveryVolumePrepared {
         source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
         first_root: RecoveryVolumeRootSeparatedFromProductionStorage,
+    },
+    TwoRecoveryVolumesPrepared {
+        source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+        roots: TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
     },
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
@@ -697,6 +709,7 @@ struct LifecycleInner {
     migration_control: Option<std::sync::mpsc::Sender<MigrationWorkerCommand>>,
     migration_preparation: MigrationPreparationState,
     first_recovery_volume_selection_outstanding: bool,
+    second_recovery_volume_selection_outstanding: bool,
     migration_shutdown_requested: bool,
     startup_work_resolved: bool,
     close_work_resolved: bool,
@@ -724,6 +737,7 @@ impl ApplicationLifecycle {
                 migration_control: None,
                 migration_preparation: MigrationPreparationState::Inactive,
                 first_recovery_volume_selection_outstanding: false,
+                second_recovery_volume_selection_outstanding: false,
                 migration_shutdown_requested: false,
                 startup_work_resolved: false,
                 close_work_resolved: true,
@@ -802,6 +816,13 @@ impl ApplicationLifecycle {
         }
     }
 
+    fn take_armed_second_recovery_volume_selection_dispatch_for_main(
+        &self,
+        dispatch: &Mutex<FirstRecoveryVolumeSelectionDispatchEscrow>,
+    ) -> bool {
+        self.take_armed_first_recovery_volume_selection_dispatch_for_main(dispatch)
+    }
+
     /// Private retry seam for a later explicitly initiated first-volume
     /// selection attempt. This is intentionally not exposed through IPC.
     #[cfg(windows)]
@@ -824,6 +845,38 @@ impl ApplicationLifecycle {
                 .send(MigrationWorkerCommand::SelectFirstRecoveryVolume)
                 .is_ok()
         })
+    }
+
+    /// Private retry seam for an explicitly initiated second-volume selection
+    /// attempt. This is intentionally not exposed through IPC.
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn request_second_recovery_volume_selection(&self) -> bool {
+        let control = {
+            let mut inner = self.lock();
+            if !matches!(
+                inner.migration_preparation,
+                MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication
+            ) || inner.second_recovery_volume_selection_outstanding
+                || inner.migration_shutdown_requested
+            {
+                return false;
+            }
+            let Some(control) = inner.migration_control.clone() else {
+                return false;
+            };
+            inner.second_recovery_volume_selection_outstanding = true;
+            control
+        };
+        if control
+            .send(MigrationWorkerCommand::SelectSecondRecoveryVolume)
+            .is_ok()
+        {
+            true
+        } else {
+            self.lock().second_recovery_volume_selection_outstanding = false;
+            false
+        }
     }
 
     pub(crate) fn status(&self) -> StartupStatus {
@@ -1547,7 +1600,9 @@ impl ApplicationLifecycle {
                     return;
                 }
                 Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
-                | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_)) => {
+                | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
+                | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
+                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_)) => {
                     std::process::abort()
                 }
                 Err(_) => std::process::abort(),
@@ -1604,7 +1659,7 @@ impl ApplicationLifecycle {
                 {
                     return;
                 }
-                let outcome = run_main_thread_first_recovery_volume_picker(
+                let outcome = run_main_thread_recovery_volume_picker(
                     || {
                         main_app
                             .get_webview_window("main")
@@ -1685,7 +1740,158 @@ impl ApplicationLifecycle {
                     return;
                 }
                 Ok(MigrationWorkerCommand::CustodyCompleted(_))
-                | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume) => std::process::abort(),
+                | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+                | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
+                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_)) => {
+                    std::process::abort()
+                }
+                Err(_) => std::process::abort(),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn run_second_recovery_volume_selection_dispatch(
+        self: &Arc<Self>,
+        source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+        first_root: RecoveryVolumeRootSeparatedFromProductionStorage,
+        control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+        exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
+        app: &AppHandle,
+    ) {
+        let dispatch = {
+            let _boundary = self
+                .custody_dispatch_boundary
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let inner = self.lock();
+            if inner.migration_shutdown_requested {
+                drop(inner);
+                match retry_migration_worker_ownership(
+                    MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared {
+                        source,
+                        first_root,
+                    },
+                    self,
+                ) {
+                    MigrationWorkerRetryOutcome::Resolved => {
+                        drop(exclusivity);
+                        self.finish_migration_preparation_worker(Some(app));
+                    }
+                    MigrationWorkerRetryOutcome::Retained(owner) => {
+                        self.park_migration_worker(owner, control, exclusivity, app)
+                    }
+                }
+                return;
+            }
+            if !inner.second_recovery_volume_selection_outstanding {
+                std::process::abort();
+            }
+            Arc::new(Mutex::new(
+                FirstRecoveryVolumeSelectionDispatchEscrow::Pending,
+            ))
+        };
+
+        let main_dispatch = Arc::clone(&dispatch);
+        let main_app = app.clone();
+        let lifecycle = Arc::clone(self);
+        let scheduled = catch_unwind(AssertUnwindSafe(|| {
+            app.run_on_main_thread(move || {
+                if !lifecycle
+                    .take_armed_second_recovery_volume_selection_dispatch_for_main(&main_dispatch)
+                {
+                    return;
+                }
+                let outcome = run_main_thread_recovery_volume_picker(
+                    || {
+                        main_app
+                            .get_webview_window("main")
+                            .and_then(|window| window.hwnd().ok())
+                    },
+                    |hwnd| {
+                        select_native_recovery_volume_root(windows::Win32::Foundation::HWND(hwnd.0))
+                    },
+                );
+                let sender = lifecycle.lock().migration_control.clone();
+                let Some(sender) = sender else {
+                    std::process::abort();
+                };
+                if let Err(error) = sender
+                    .send(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(outcome))
+                {
+                    let _retained_selection = error.0;
+                    std::process::abort();
+                }
+            })
+        }))
+        .map_err(|_| ())
+        .and_then(|result| result.map_err(|_| ()));
+
+        if scheduled.is_err() && cancel_armed_first_recovery_volume_selection_dispatch(&dispatch) {
+            self.lock().second_recovery_volume_selection_outstanding = false;
+            self.park_migration_worker(
+                MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { source, first_root },
+                control,
+                exclusivity,
+                app,
+            );
+            return;
+        }
+
+        let mut shutdown_requested = false;
+        loop {
+            match control.recv() {
+                Ok(MigrationWorkerCommand::Shutdown) => {
+                    if cancel_armed_first_recovery_volume_selection_dispatch(&dispatch) {
+                        self.lock().second_recovery_volume_selection_outstanding = false;
+                        match retry_migration_worker_ownership(
+                            MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared {
+                                source,
+                                first_root,
+                            },
+                            self,
+                        ) {
+                            MigrationWorkerRetryOutcome::Resolved => {
+                                drop(exclusivity);
+                                self.finish_migration_preparation_worker(Some(app));
+                            }
+                            MigrationWorkerRetryOutcome::Retained(owner) => {
+                                self.park_migration_worker(owner, control, exclusivity, app)
+                            }
+                        }
+                        return;
+                    }
+                    shutdown_requested = true;
+                }
+                Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(outcome)) => {
+                    self.lock().second_recovery_volume_selection_outstanding = false;
+                    if shutdown_requested || self.lock().migration_shutdown_requested {
+                        drop(outcome);
+                        match retry_migration_worker_ownership(
+                            MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared {
+                                source,
+                                first_root,
+                            },
+                            self,
+                        ) {
+                            MigrationWorkerRetryOutcome::Resolved => {
+                                drop(exclusivity);
+                                self.finish_migration_preparation_worker(Some(app));
+                            }
+                            MigrationWorkerRetryOutcome::Retained(owner) => {
+                                self.park_migration_worker(owner, control, exclusivity, app)
+                            }
+                        }
+                    } else {
+                        let owner = prepare_second_recovery_volume(source, first_root, outcome);
+                        self.park_migration_worker(owner, control, exclusivity, app);
+                    }
+                    return;
+                }
+                Ok(MigrationWorkerCommand::CustodyCompleted(_))
+                | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+                | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
+                | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume) => std::process::abort(),
                 Err(_) => std::process::abort(),
             }
         }
@@ -1715,6 +1921,9 @@ impl ApplicationLifecycle {
             MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { .. } => {
                 MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication
             }
+            MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared { .. } => {
+                MigrationPreparationState::TwoRecoveryVolumesRetainedAndSeparatedAwaitingCapacity
+            }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
             }
@@ -1735,8 +1944,26 @@ impl ApplicationLifecycle {
                     );
                     return;
                 }
+                Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume) => {
+                    let MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared {
+                        source,
+                        first_root,
+                    } = owner
+                    else {
+                        std::process::abort()
+                    };
+                    self.run_second_recovery_volume_selection_dispatch(
+                        source,
+                        first_root,
+                        control,
+                        exclusivity,
+                        app,
+                    );
+                    return;
+                }
                 Ok(MigrationWorkerCommand::CustodyCompleted(_))
-                | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_)) => {
+                | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
+                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_)) => {
                     std::process::abort()
                 }
                 Err(_) => std::process::abort(),
@@ -1758,6 +1985,7 @@ impl ApplicationLifecycle {
             let mut inner = self.lock();
             inner.migration_preparation = MigrationPreparationState::Inactive;
             inner.first_recovery_volume_selection_outstanding = false;
+            inner.second_recovery_volume_selection_outstanding = false;
             inner.migration_work_resolved = true;
             inner.migration_control = None;
             if matches!(inner.state, LifecycleState::Stopping) {
@@ -2123,6 +2351,36 @@ fn prepare_first_recovery_volume(
 }
 
 #[cfg(windows)]
+fn prepare_second_recovery_volume(
+    source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    first_root: RecoveryVolumeRootSeparatedFromProductionStorage,
+    outcome: NativeRecoveryVolumeSelectionOutcome,
+) -> MigrationWorkerParkedOwnership {
+    let selection = match outcome {
+        NativeRecoveryVolumeSelectionOutcome::Selected(selection) => selection,
+        NativeRecoveryVolumeSelectionOutcome::Cancelled
+        | NativeRecoveryVolumeSelectionOutcome::Unavailable => {
+            return MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared {
+                source,
+                first_root,
+            };
+        }
+    };
+    match retain_and_separate_second_recovery_volume(first_root, selection) {
+        Ok(roots) => MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared { source, roots },
+        Err(RetainAndSeparateSecondRecoveryVolumeError::RetentionFailed(first_root)) => {
+            MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared {
+                source,
+                first_root: *first_root,
+            }
+        }
+        Err(RetainAndSeparateSecondRecoveryVolumeError::SeparationFailed) => {
+            MigrationWorkerParkedOwnership::Verified(source)
+        }
+    }
+}
+
+#[cfg(windows)]
 fn retry_migration_worker_ownership(
     owner: MigrationWorkerParkedOwnership,
     lifecycle: &ApplicationLifecycle,
@@ -2226,6 +2484,23 @@ fn retry_migration_worker_ownership(
         }
         MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { source, first_root } => {
             drop(first_root);
+            let shutdown = source.abort_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared { source, roots } => {
+            drop(roots);
             let shutdown = source.abort_for_shutdown();
             match shutdown.retry_source_close() {
                 UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
@@ -6231,7 +6506,7 @@ mod tests {
     #[test]
     fn first_recovery_picker_seam_is_deterministic_without_tauri_or_native_ui() {
         let native_calls = std::cell::Cell::new(0);
-        let unavailable = run_main_thread_first_recovery_volume_picker(
+        let unavailable = run_main_thread_recovery_volume_picker(
             || None::<usize>,
             |_| {
                 native_calls.set(native_calls.get() + 1);
@@ -6244,7 +6519,7 @@ mod tests {
         ));
         assert_eq!(native_calls.get(), 0);
 
-        let cancelled = run_main_thread_first_recovery_volume_picker(
+        let cancelled = run_main_thread_recovery_volume_picker(
             || Some(7usize),
             |parent| {
                 assert_eq!(parent, 7);
@@ -6373,6 +6648,225 @@ mod tests {
         let abort = prepared.find("source.abort_for_shutdown()").unwrap();
         let close = prepared.find("shutdown.retry_source_close()").unwrap();
         assert!(drop_root < abort && abort < close);
+        assert!(prepared.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
+        for forbidden in ["remove_", "delete", "cleanup", "publish"] {
+            assert!(!prepared.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_second_recovery_selection_is_private_state_limited_and_one_shot() {
+        let lifecycle = ApplicationLifecycle::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_control = Some(sender);
+            inner.migration_preparation =
+                MigrationPreparationState::CustodyVerifiedAwaitingPublication;
+            inner.migration_work_resolved = false;
+        }
+        assert!(!lifecycle.request_second_recovery_volume_selection());
+        assert!(receiver.try_recv().is_err());
+
+        lifecycle.lock().migration_preparation =
+            MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication;
+        assert!(lifecycle.request_second_recovery_volume_selection());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
+        ));
+        assert!(!lifecycle.request_second_recovery_volume_selection());
+        assert!(receiver.try_recv().is_err());
+
+        lifecycle
+            .lock()
+            .second_recovery_volume_selection_outstanding = false;
+        assert!(lifecycle.request_second_recovery_volume_selection());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
+        ));
+        assert!(!lifecycle.lock().migration_work_resolved);
+
+        lifecycle
+            .lock()
+            .second_recovery_volume_selection_outstanding = false;
+        lifecycle.lock().migration_shutdown_requested = true;
+        assert!(!lifecycle.request_second_recovery_volume_selection());
+
+        const LIB: &str = include_str!("lib.rs");
+        assert!(!LIB.contains("request_second_recovery_volume_selection"));
+    }
+
+    #[test]
+    fn second_recovery_selection_dispatch_token_transfers_or_cancels_exactly_once() {
+        let cancelled = Mutex::new(FirstRecoveryVolumeSelectionDispatchEscrow::Pending);
+        assert!(cancel_armed_first_recovery_volume_selection_dispatch(
+            &cancelled
+        ));
+        assert!(!cancel_armed_first_recovery_volume_selection_dispatch(
+            &cancelled
+        ));
+
+        let lifecycle = ApplicationLifecycle::new();
+        let taken = Mutex::new(FirstRecoveryVolumeSelectionDispatchEscrow::Pending);
+        assert!(lifecycle.take_armed_second_recovery_volume_selection_dispatch_for_main(&taken));
+        assert!(!cancel_armed_first_recovery_volume_selection_dispatch(
+            &taken
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_recovery_selection_reuses_main_thread_picker_and_parks_exact_owners() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_second_recovery_volume_selection_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        for required in [
+            "app.run_on_main_thread",
+            "get_webview_window(\"main\")",
+            "window.hwnd()",
+            "select_native_recovery_volume_root",
+            "MigrationWorkerCommand::Shutdown",
+            "drop(outcome)",
+            "FirstRecoveryVolumePrepared",
+            "source",
+            "first_root",
+            "exclusivity",
+        ] {
+            assert!(
+                dispatch.contains(required),
+                "missing dispatch contract: {required}"
+            );
+        }
+        for forbidden in ["from_test_path", "PathBuf", "cleanup", "delete", "publish"] {
+            assert!(
+                !dispatch.contains(forbidden),
+                "unexpected dispatch behavior: {forbidden}"
+            );
+        }
+
+        let preparation = SOURCE
+            .split_once("fn prepare_second_recovery_volume")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .0;
+        for required in [
+            "NativeRecoveryVolumeSelectionOutcome::Cancelled",
+            "NativeRecoveryVolumeSelectionOutcome::Unavailable",
+            "retain_and_separate_second_recovery_volume(first_root, selection)",
+            "RetentionFailed(first_root)",
+            "FirstRecoveryVolumePrepared",
+            "SeparationFailed",
+            "MigrationWorkerParkedOwnership::Verified(source)",
+            "TwoRecoveryVolumesPrepared { source, roots }",
+        ] {
+            assert!(
+                preparation.contains(required),
+                "missing preparation contract: {required}"
+            );
+        }
+        for forbidden in [
+            "observe_retained_production_single_physical_device",
+            "validate_two_recovery_volume_root_capacities",
+            "create_recovery_set",
+            "publish",
+            "recovery_key",
+            "complete_set",
+            "run_second_recovery_volume_selection_dispatch",
+        ] {
+            assert!(
+                !preparation.contains(forbidden),
+                "unexpected preparation behavior: {forbidden}"
+            );
+        }
+
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        assert!(parking.contains("TwoRecoveryVolumesPrepared"));
+        assert!(parking.contains("TwoRecoveryVolumesRetainedAndSeparatedAwaitingCapacity"));
+        assert!(!parking.contains("migration_work_resolved = true"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_recovery_facade_preserves_only_preconsumption_first_root_failure() {
+        const ROOT: &str = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
+        let facade = ROOT
+            .split_once("pub(crate) fn retain_and_separate_second_recovery_volume")
+            .unwrap()
+            .1
+            .split_once("impl RecoveryVolumeRootSeparatedFromProductionStorage")
+            .unwrap()
+            .0;
+        let retain = facade
+            .find("retain_eligible_ntfs_recovery_volume_root(selection)")
+            .unwrap();
+        let separate = facade
+            .find("separate_two_recovery_volume_roots_from_production_storage(")
+            .unwrap();
+        assert!(retain < separate);
+        assert!(facade.contains("RetentionFailed("));
+        assert!(facade.contains("first_root"));
+        assert!(facade.contains("SeparationFailed"));
+        assert!(!facade.contains("separate_recovery_volume_root_from_production_storage"));
+        assert!(!facade.contains("accepted_disk_number"));
+
+        let canonical = ROOT
+            .split_once("pub(super) fn separate_two_recovery_volume_roots_from_production_storage")
+            .unwrap()
+            .1
+            .split_once("impl TwoRecoveryVolumeRootsSeparatedFromProductionStorage")
+            .unwrap()
+            .0;
+        let first_root = canonical.find("first_root").unwrap();
+        let first_revalidation = canonical.find(".revalidate()").unwrap();
+        let second_root = canonical.find("second_root").unwrap();
+        let second_revalidation = canonical[first_revalidation + 1..]
+            .find(".revalidate()")
+            .unwrap()
+            + first_revalidation
+            + 1;
+        assert!(first_root < first_revalidation);
+        assert!(second_root < second_revalidation);
+        assert!(canonical.contains("separate_second_recovery_device"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn two_recovery_success_shutdown_drops_roots_then_uses_canonical_source_close_chain() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let retry = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_preparation_failure")
+            .unwrap()
+            .0;
+        let prepared = retry
+            .split_once("MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        let drop_roots = prepared.find("drop(roots)").unwrap();
+        let abort = prepared.find("source.abort_for_shutdown()").unwrap();
+        let close = prepared.find("shutdown.retry_source_close()").unwrap();
+        assert!(drop_roots < abort && abort < close);
         assert!(prepared.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
         for forbidden in ["remove_", "delete", "cleanup", "publish"] {
             assert!(!prepared.contains(forbidden));
