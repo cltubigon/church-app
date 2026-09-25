@@ -3,6 +3,8 @@ use std::sync::Arc;
 use serde::Serialize;
 
 mod application_lifecycle;
+#[allow(dead_code)]
+mod native_recovery_key_reentry;
 
 mod database_freshness_classification;
 mod database_key;

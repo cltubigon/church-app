@@ -566,6 +566,24 @@ impl FirstCompleteRecoverySetVerificationFailure {
     pub(crate) fn retry(self) -> FirstCompleteRecoverySetVerificationOutcome {
         verify_first_complete_recovery_set(self.recovered_key_verified)
     }
+
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.recovered_key_verified
+            .abandon_published_destination_and_retain_source()
+    }
+}
+
+impl FirstCompleteRecoverySetVerified {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.recovered_key_verified
+            .abandon_published_destination_and_retain_source()
+    }
 }
 
 #[cfg(test)]

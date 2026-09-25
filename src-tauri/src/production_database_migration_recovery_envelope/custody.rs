@@ -87,6 +87,11 @@ impl ReenteredMigrationRecoveryKeyCustodyV1 {
             generation_identifier: expected_generation_identifier,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn matches_bounded_entry_for_test(&self, expected: &[u8]) -> bool {
+        self.length == expected.len() && self.bytes[..self.length] == *expected
+    }
 }
 
 impl fmt::Debug for AssociationValidatedReenteredMigrationRecoveryKeyCustodyV1 {

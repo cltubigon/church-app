@@ -606,6 +606,22 @@ impl FirstRecoverySetRecoveredKeyVerificationFailure {
     ) -> FirstRecoverySetRecoveredKeyVerificationOutcome {
         verify_first_recovery_set_with_reentered_recovery_key(self.prior, entered_record)
     }
+
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.prior.abandon_published_destination_and_retain_source()
+    }
+}
+
+impl FirstRecoverySetRecoveredKeyVerified {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.prior.abandon_published_destination_and_retain_source()
+    }
 }
 
 #[cfg(test)]
@@ -1206,6 +1222,174 @@ mod tests {
             failure.retry_with_fresh_record(fresh),
             FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(_)
         ));
+    }
+
+    #[test]
+    fn ordinary_failure_abandonment_is_source_only_and_filesystem_inert() {
+        let mut fixture = published_fixture();
+        let before = first_set_bytes(&fixture);
+        let wrong = correctly_associated_wrong_key_record_for_test(&fixture.record);
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Failed(failure) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                wrong,
+            )
+        else {
+            panic!("wrong recovery key must produce ordinary failure ownership");
+        };
+        let source = failure.abandon_published_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&fixture), before);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
+    }
+
+    #[test]
+    fn verifier_close_must_resolve_before_source_only_abandonment() {
+        let mut fixture = published_fixture();
+        let before = first_set_bytes(&fixture);
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let outcome = with_production_database_close_failure_injected(|| {
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        });
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::VerifierCloseFailed(failure) = outcome
+        else {
+            panic!("injected close failure must retain close-only ownership");
+        };
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Failed(failure) =
+            failure.retry_close()
+        else {
+            panic!("successful retry-close must yield ordinary failure ownership");
+        };
+        let source = failure.abandon_published_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&fixture), before);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
+    }
+
+    #[test]
+    fn recovered_key_success_abandonment_is_source_only_and_filesystem_inert() {
+        let mut fixture = published_fixture();
+        let before = first_set_bytes(&fixture);
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("valid recovered key must verify");
+        };
+        let source = verified.abandon_published_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&fixture), before);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
+    }
+
+    #[test]
+    fn complete_set_failure_and_success_abandonment_are_source_only_and_filesystem_inert() {
+        let mut failure_fixture = published_fixture();
+        let failure_before = first_set_bytes(&failure_fixture);
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&failure_fixture.record)
+                .unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                failure_fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("valid recovered key must verify");
+        };
+        let outcome =
+            first_complete_recovery_set_verification::with_second_layout_observation_failure(
+                || verify_first_complete_recovery_set(verified),
+            );
+        let FirstCompleteRecoverySetVerificationOutcome::Failed(failure) = outcome else {
+            panic!("injected layout failure must retain complete-set failure ownership");
+        };
+        let source = failure.abandon_published_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&failure_fixture), failure_before);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
+
+        let mut success_fixture = published_fixture();
+        let success_before = first_set_bytes(&success_fixture);
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&success_fixture.record)
+                .unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                success_fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("valid recovered key must verify");
+        };
+        let FirstCompleteRecoverySetVerificationOutcome::Verified(complete) =
+            verify_first_complete_recovery_set(verified)
+        else {
+            panic!("complete first set must verify");
+        };
+        let source = complete.abandon_published_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&success_fixture), success_before);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
+    }
+
+    #[test]
+    fn abandonment_surfaces_are_consuming_delegations_with_no_close_shortcut_or_filesystem_work() {
+        let source = include_str!("reentered_recovery_key_verification.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let close_only = production
+            .split_once("impl FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure")
+            .unwrap()
+            .1
+            .split_once("impl FirstRecoverySetRecoveredKeyVerificationFailure")
+            .unwrap()
+            .0;
+        assert!(close_only.contains("retry_close(self)"));
+        assert!(!close_only.contains("abandon_published_destination_and_retain_source"));
+
+        let complete_source =
+            include_str!("reentered_recovery_key_verification/first_complete_set.rs");
+        let complete_production = complete_source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        for region in [production, complete_production] {
+            let mut remainder = region;
+            let mut methods = 0;
+            while let Some((_, after_name)) = remainder
+                .split_once("pub(crate) fn abandon_published_destination_and_retain_source")
+            {
+                let (body, after_body) = after_name.split_once("\n    }\n").unwrap();
+                for forbidden in [
+                    "remove_file",
+                    "remove_dir",
+                    "rename(",
+                    "truncate",
+                    "publish_",
+                    "verify_",
+                    "select_",
+                ] {
+                    assert!(
+                        !body.contains(forbidden),
+                        "forbidden abandonment token: {forbidden}"
+                    );
+                }
+                assert!(body.contains(".abandon_published_destination_and_retain_source()"));
+                methods += 1;
+                remainder = after_body;
+            }
+            assert_eq!(methods, 2);
+        }
+        assert!(production.contains("retry_with_fresh_record"));
+        assert!(complete_production.contains("pub(crate) fn retry(self)"));
     }
 
     #[test]
