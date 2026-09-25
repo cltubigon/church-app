@@ -771,6 +771,45 @@ mod tests {
         .unwrap()
     }
 
+    fn first_set_bytes(fixture: &PublishedFixture) -> [Vec<u8>; 3] {
+        let first = fixture._destination_root.path().join("first");
+        [
+            fs::read(first.join(crate::storage_foundation::PRODUCTION_DATABASE_FILENAME)).unwrap(),
+            fs::read(first.join(super::super::super::FIRST_RECOVERY_ENVELOPE_FILENAME)).unwrap(),
+            fs::read(first.join(super::super::FIRST_RECOVERY_MANIFEST_FILENAME)).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn manifest_success_abandonment_leaves_all_artifacts_and_returns_shutdown_source() {
+        let mut fixture = published_fixture();
+        let before = first_set_bytes(&fixture);
+        let source = fixture
+            .published
+            .take()
+            .unwrap()
+            .abandon_published_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&fixture), before);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
+    }
+
+    #[test]
+    fn manifest_failure_abandonment_leaves_existing_artifacts_and_returns_shutdown_source() {
+        let mut fixture = published_fixture();
+        let before = first_set_bytes(&fixture);
+        let FirstRecoverySetArtifactsPublished {
+            prior,
+            first_manifest,
+        } = fixture.published.take().unwrap();
+        drop(first_manifest);
+        let failure = super::super::publish_first_recovery_manifest_artifact(prior).unwrap_err();
+        let source = failure.abandon_partial_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&fixture), before);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
+    }
+
     #[test]
     fn outward_owners_are_keyless_and_success_is_not_complete_set_proof() {
         assert!(needs_drop::<FirstRecoverySetRecoveredKeyVerified>());

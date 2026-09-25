@@ -3,7 +3,10 @@
 #[path = "first_recovery_database_artifact/first_recovery_envelope_artifact.rs"]
 mod first_recovery_envelope_artifact;
 
-pub(crate) use first_recovery_envelope_artifact::FirstRecoveryDatabaseAndEnvelopeArtifactsPublished;
+pub(crate) use first_recovery_envelope_artifact::{
+    FirstRecoveryDatabaseAndEnvelopeArtifactsPublished, FirstRecoveryManifestPublicationOutcome,
+    FirstRecoverySetArtifactsPublished, publish_first_recovery_manifest_artifact,
+};
 
 use std::{
     ffi::c_void,

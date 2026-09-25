@@ -5,7 +5,9 @@ mod first_recovery_database_artifact;
 
 pub(crate) use first_recovery_database_artifact::{
     FirstRecoveryDatabaseAndEnvelopeArtifactsPublished, FirstRecoveryDatabaseArtifactPublished,
-    FirstRecoveryEnvelopePublicationOutcome, publish_first_recovery_envelope_artifact,
+    FirstRecoveryEnvelopePublicationOutcome, FirstRecoveryManifestPublicationOutcome,
+    FirstRecoverySetArtifactsPublished, publish_first_recovery_envelope_artifact,
+    publish_first_recovery_manifest_artifact,
 };
 
 #[allow(clippy::large_enum_variant)]

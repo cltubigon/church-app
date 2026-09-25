@@ -65,7 +65,7 @@ struct RetainedFirstRecoveryManifestArtifact {
     initial: Option<PublishedManifestFacts>,
 }
 
-pub(super) struct FirstRecoverySetArtifactsPublished {
+pub(crate) struct FirstRecoverySetArtifactsPublished {
     prior: FirstRecoveryDatabaseAndEnvelopeArtifactsPublished,
     first_manifest: RetainedFirstRecoveryManifestArtifact,
 }
@@ -95,6 +95,34 @@ pub(super) struct FirstRecoveryManifestArtifactPublicationFailure {
     partial_first_manifest: Option<RetainedFirstRecoveryManifestArtifact>,
     phase: PublicationPhase,
     error: FirstRecoveryManifestArtifactPublicationError,
+}
+
+impl FirstRecoverySetArtifactsPublished {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            prior,
+            first_manifest: _first_manifest,
+        } = self;
+        prior.abandon_published_destination_and_retain_source()
+    }
+}
+
+impl FirstRecoveryManifestArtifactPublicationFailure {
+    pub(super) fn abandon_partial_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            prior,
+            partial_first_manifest: _partial_first_manifest,
+            phase: _phase,
+            error: _error,
+        } = self;
+        prior.abandon_published_destination_and_retain_source()
+    }
 }
 
 struct AttemptFailure {
@@ -1216,5 +1244,88 @@ mod tests {
             assert!(!output.contains("CHLDRSM"));
             assert!(!output.contains("Volume"));
         }
+    }
+
+    #[test]
+    fn failure_abandonment_consumes_all_destination_authority_without_filesystem_mutation() {
+        const SOURCE: &str = include_str!("first_recovery_manifest_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let abandonment = production
+            .split_once("impl FirstRecoveryManifestArtifactPublicationFailure")
+            .unwrap()
+            .1
+            .split_once("struct AttemptFailure")
+            .unwrap()
+            .0;
+        for required in [
+            "self",
+            "prior,",
+            "partial_first_manifest: _partial_first_manifest",
+            "phase: _phase",
+            "error: _error",
+            "prior.abandon_published_destination_and_retain_source()",
+        ] {
+            assert!(abandonment.contains(required));
+        }
+        for forbidden in [
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "set_len",
+            "truncate",
+            "write",
+            "create",
+            "open",
+            "revalidate",
+            "retry",
+        ] {
+            assert!(!abandonment.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn success_abandonment_preserves_next_verification_predecessor_contract() {
+        const SOURCE: &str = include_str!("first_recovery_manifest_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let owner_impl = production
+            .split_once("impl FirstRecoverySetArtifactsPublished")
+            .unwrap()
+            .1
+            .split_once("impl FirstRecoveryManifestArtifactPublicationFailure")
+            .unwrap()
+            .0;
+        let abandonment = owner_impl
+            .split_once("abandon_published_destination_and_retain_source")
+            .unwrap()
+            .1;
+        assert!(abandonment.contains("prior,"));
+        assert!(abandonment.contains("first_manifest: _first_manifest"));
+        assert!(abandonment.contains("prior.abandon_published_destination_and_retain_source()"));
+        for forbidden in [
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "set_len",
+            "truncate",
+            "write",
+            "create",
+            "open",
+            "verify_first_complete",
+            "second_recovery",
+        ] {
+            assert!(!abandonment.contains(forbidden));
+        }
+
+        let recovered_key_predecessor =
+            include_str!("first_recovery_manifest_artifact/reentered_recovery_key_verification.rs")
+                .split_once("pub(crate) fn verify_first_recovery_set_with_reentered_recovery_key")
+                .unwrap()
+                .1
+                .split_once('{')
+                .unwrap()
+                .0;
+        assert!(
+            recovered_key_predecessor.contains("published: FirstRecoverySetArtifactsPublished")
+        );
     }
 }

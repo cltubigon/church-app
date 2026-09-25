@@ -3,6 +3,8 @@
 #[path = "first_recovery_manifest_artifact.rs"]
 mod first_recovery_manifest_artifact;
 
+pub(crate) use first_recovery_manifest_artifact::FirstRecoverySetArtifactsPublished;
+
 use std::{
     ffi::c_void,
     fmt,
@@ -83,6 +85,25 @@ impl RetainedFirstRecoveryEnvelopeArtifact {
 pub(crate) struct FirstRecoveryDatabaseAndEnvelopeArtifactsPublished {
     prior: FirstRecoveryDatabaseArtifactPublished,
     first_envelope: RetainedFirstRecoveryEnvelopeArtifact,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum FirstRecoveryManifestPublicationOutcome {
+    Published(FirstRecoverySetArtifactsPublished),
+    Source(
+        crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    ),
+}
+
+pub(crate) fn publish_first_recovery_manifest_artifact(
+    prior: FirstRecoveryDatabaseAndEnvelopeArtifactsPublished,
+) -> FirstRecoveryManifestPublicationOutcome {
+    match first_recovery_manifest_artifact::publish_first_recovery_manifest_artifact(prior) {
+        Ok(published) => FirstRecoveryManifestPublicationOutcome::Published(published),
+        Err(failure) => FirstRecoveryManifestPublicationOutcome::Source(
+            failure.abandon_partial_destination_and_retain_source(),
+        ),
+    }
 }
 
 impl FirstRecoveryDatabaseAndEnvelopeArtifactsPublished {
