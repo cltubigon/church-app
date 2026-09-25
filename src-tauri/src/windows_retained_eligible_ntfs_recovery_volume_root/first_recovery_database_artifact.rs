@@ -145,6 +145,21 @@ pub(super) struct FirstRecoveryDatabaseArtifactPublicationFailure {
     error: FirstRecoveryDatabaseArtifactPublicationError,
 }
 
+impl FirstRecoveryDatabaseArtifactPublicationFailure {
+    pub(super) fn abandon_partial_destination_and_retain_source(
+        self,
+    ) -> RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+        let Self {
+            source,
+            destinations: _destinations,
+            partial_first_database: _partial_first_database,
+            phase: _phase,
+            error: _error,
+        } = self;
+        source
+    }
+}
+
 impl fmt::Debug for RetainedFirstRecoveryDatabaseArtifact {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RetainedFirstRecoveryDatabaseArtifact([REDACTED])")
@@ -421,15 +436,33 @@ fn flush(file: &File) -> Result<(), FirstRecoveryDatabaseArtifactPublicationErro
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriterCloseAttempt {
+    Closed,
+    OwnershipAmbiguous,
+}
+
+fn classify_writer_close_attempt(closed: bool) -> WriterCloseAttempt {
+    if closed {
+        WriterCloseAttempt::Closed
+    } else {
+        WriterCloseAttempt::OwnershipAmbiguous
+    }
+}
+
 fn close_writer(file: File) -> Result<(), FirstRecoveryDatabaseArtifactPublicationError> {
     let raw = file.into_raw_handle() as HANDLE;
     // SAFETY: ownership was transferred out of File exactly once and this is
-    // the sole terminal close attempt for the writer handle.
-    if unsafe { CloseHandle(raw) } == 0 {
-        Err(FirstRecoveryDatabaseArtifactPublicationError::ArtifactFlushOrCloseUnavailable)
-    } else {
-        Ok(())
+    // the sole close attempt for the writer handle.
+    let attempt = classify_writer_close_attempt(unsafe { CloseHandle(raw) } != 0);
+    if attempt == WriterCloseAttempt::OwnershipAmbiguous {
+        // CloseHandle does not document that every failure leaves the supplied
+        // handle valid. Continuing or reconstructing a File could therefore
+        // double-close or re-own an invalid handle. This boundary is terminal
+        // and returns no ownership-bearing publication failure.
+        std::process::abort();
     }
+    Ok(())
 }
 
 fn verify_fresh_contents(
@@ -588,15 +621,7 @@ pub(super) fn publish_first_recovery_database_artifact(
             FirstRecoveryDatabaseArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
         );
     }
-    if close_writer(writer).is_err() {
-        return fail(
-            source,
-            destinations,
-            Some(partial),
-            PublicationPhase::DuringFlushOrClose,
-            FirstRecoveryDatabaseArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
-        );
-    }
+    close_writer(writer).expect("native writer close either succeeds or fail-stops");
     if destinations.revalidate().is_err() {
         return fail(
             source,
@@ -704,6 +729,101 @@ pub(super) fn publish_first_recovery_database_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use crate::{
+        application_lifecycle::{
+            PreparedProductionDatabaseMigrationBackupStage,
+            ProductionDatabaseMigrationBackupContext,
+            ProductionDatabaseMigrationBackupStageOutcome,
+            ProductionDatabaseMigrationRecoveryEnvelopeOutcome,
+            genuine_full_integrity_validated_migration_handoff_for_test,
+            prepare_migration_recovery_key_custody,
+            stage_encrypted_production_database_migration_backup,
+            verify_production_database_migration_recovery_envelope,
+        },
+        database_key::DatabaseKey,
+        installation_evidence_contract::DatabaseKeyGenerationIdentifier,
+        installation_evidence_protection::protect_database_key,
+        storage_foundation::database_key_persistence_paths,
+    };
+
+    static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn create(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "church-app-first-database-ownership-{label}-{}-{}",
+                std::process::id(),
+                TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn custody_verified_source() -> (
+        crate::production_database_connection_handoff::MigrationDiscoveryTestRoot,
+        TestRoot,
+        RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    ) {
+        let (source_root, handoff) = genuine_full_integrity_validated_migration_handoff_for_test();
+        let paths = database_key_persistence_paths(source_root.path());
+        fs::create_dir_all(paths.database_key_directory.as_path()).unwrap();
+        let key = DatabaseKey::from_bytes([0x74; 32]);
+        let generation = DatabaseKeyGenerationIdentifier::from_bytes([0x43; 16]).unwrap();
+        let wrapper = protect_database_key(&key, generation).unwrap();
+        fs::write(paths.active_database_key.as_path(), wrapper.as_bytes()).unwrap();
+
+        let stage_root = TestRoot::create("stage");
+        let prepared = PreparedProductionDatabaseMigrationBackupStage::from_synthetic_temp_root(
+            stage_root.path(),
+        )
+        .unwrap();
+        let ProductionDatabaseMigrationBackupStageOutcome::Verified(stage) =
+            stage_encrypted_production_database_migration_backup(
+                handoff,
+                prepared,
+                ProductionDatabaseMigrationBackupContext::from_synthetic_root(source_root.path()),
+            )
+        else {
+            panic!("stage fixture must verify");
+        };
+        let ProductionDatabaseMigrationRecoveryEnvelopeOutcome::Verified(enveloped) =
+            verify_production_database_migration_recovery_envelope(stage)
+        else {
+            panic!("envelope fixture must verify");
+        };
+        let prepared_custody = prepare_migration_recovery_key_custody(enveloped);
+        let record = *prepared_custody.encoded_for_test();
+        let source = prepared_custody
+            .disclose()
+            .verify_first_copy(&record)
+            .unwrap()
+            .verify_second_copy(&record)
+            .unwrap();
+        (source_root, stage_root, source)
+    }
+
+    fn classify_writer_close_with(close: impl FnOnce() -> bool) -> WriterCloseAttempt {
+        classify_writer_close_attempt(close())
+    }
 
     #[test]
     fn fixed_final_name_and_path_are_not_caller_supplied() {
@@ -919,5 +1039,245 @@ mod tests {
         );
         assert!(!production.contains("CompleteRecoverySet"));
         assert!(!production.contains("SecondRecoveryDatabase"));
+    }
+
+    #[test]
+    fn writer_close_classification_is_single_attempt_and_ambiguous_on_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let failure_calls = AtomicUsize::new(0);
+        let failure = classify_writer_close_with(|| {
+            failure_calls.fetch_add(1, Ordering::Relaxed);
+            false
+        });
+        assert_eq!(failure_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(failure, WriterCloseAttempt::OwnershipAmbiguous);
+
+        let success_calls = AtomicUsize::new(0);
+        let success = classify_writer_close_with(|| {
+            success_calls.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        assert_eq!(success_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(success, WriterCloseAttempt::Closed);
+    }
+
+    #[test]
+    fn close_writer_fail_stops_without_reownership_retry_or_fresh_verification() {
+        const SOURCE: &str = include_str!("first_recovery_database_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let close = production
+            .split_once("fn close_writer")
+            .unwrap()
+            .1
+            .split_once("fn verify_fresh_contents")
+            .unwrap()
+            .0;
+        assert!(close.contains("file.into_raw_handle()"));
+        assert!(close.contains("CloseHandle(raw)"));
+        assert!(close.contains("WriterCloseAttempt::OwnershipAmbiguous"));
+        assert!(close.contains("std::process::abort()"));
+        assert_eq!(close.matches("CloseHandle(raw)").count(), 1);
+        assert!(!close.contains("File::from_raw_handle"));
+        assert!(close.contains("Ok(())"));
+        assert!(!close.contains("Err("));
+        assert!(!close.contains("loop"));
+
+        let publication = production
+            .split_once("pub(super) fn publish_first_recovery_database_artifact")
+            .unwrap()
+            .1;
+        let after_close = publication
+            .split_once(
+                "close_writer(writer).expect(\"native writer close either succeeds or fail-stops\");",
+            )
+            .unwrap()
+            .1;
+        assert!(after_close.starts_with("\n    if destinations.revalidate()"));
+        assert!(!production.contains("File::from_raw_handle"));
+        assert!(!production.contains("classify_writer_close_with"));
+    }
+
+    #[test]
+    fn flush_failure_remains_recoverable_but_close_ambiguity_cannot_return_failure() {
+        const SOURCE: &str = include_str!("first_recovery_database_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let publication = production
+            .split_once("pub(super) fn publish_first_recovery_database_artifact")
+            .unwrap()
+            .1;
+        let flush_failure = publication
+            .split_once("if flush(&writer).is_err()")
+            .unwrap()
+            .1
+            .split_once("close_writer(writer).expect")
+            .unwrap()
+            .0;
+        assert!(flush_failure.contains("partial.file = Some(writer)"));
+        assert!(flush_failure.contains("Some(partial)"));
+        assert!(flush_failure.contains("ArtifactFlushOrCloseUnavailable"));
+
+        let close_transition = publication
+            .split_once("close_writer(writer).expect")
+            .unwrap()
+            .1
+            .split_once("if destinations.revalidate()")
+            .unwrap()
+            .0;
+        assert!(!close_transition.contains("fail("));
+        assert!(!close_transition.contains("ArtifactFlushOrCloseUnavailable"));
+        assert!(!close_transition.contains("open_database_for_verification"));
+    }
+
+    #[test]
+    fn abandonment_is_consuming_source_only_and_filesystem_inert() {
+        const SOURCE: &str = include_str!("first_recovery_database_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let abandonment = production
+            .split_once("pub(super) fn abandon_partial_destination_and_retain_source")
+            .unwrap()
+            .1
+            .split_once("impl fmt::Debug for RetainedFirstRecoveryDatabaseArtifact")
+            .unwrap()
+            .0;
+        for required in [
+            "self",
+            "source,",
+            "destinations: _destinations",
+            "partial_first_database: _partial_first_database",
+            "phase: _phase",
+            "error: _error",
+        ] {
+            assert!(abandonment.contains(required));
+        }
+        for forbidden in [
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "set_len",
+            "truncate",
+            "write",
+            "create",
+            "open",
+            "verify",
+            "publish_first_recovery_database_artifact",
+            "retry",
+        ] {
+            assert!(
+                !abandonment.contains(forbidden),
+                "unexpected operation: {forbidden}"
+            );
+        }
+        assert!(abandonment.trim_end().ends_with("source\n    }\n}"));
+
+        let failure_fields = production
+            .split_once("pub(super) struct FirstRecoveryDatabaseArtifactPublicationFailure")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            failure_fields
+                .contains("source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup")
+        );
+        assert!(failure_fields.contains("destinations: TwoRetainedRecoverySetDirectories"));
+        assert!(
+            failure_fields
+                .contains("partial_first_database: Option<RetainedFirstRecoveryDatabaseArtifact>")
+        );
+        assert!(!abandonment.contains("Result<"));
+        assert!(!abandonment.contains("Option<"));
+        assert!(!abandonment.contains("TwoRetainedRecoverySetDirectories"));
+        assert!(!abandonment.contains("RetainedFirstRecoveryDatabaseArtifact"));
+    }
+
+    #[test]
+    fn abandonment_returns_exact_source_drops_handles_and_supports_shutdown() {
+        fn accepts_fresh_destination_selection_source(
+            source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+        ) -> RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+            source
+        }
+
+        let (source_root, _stage_root, source) = custody_verified_source();
+        let original_observation = source.observe_recovery_database_source().unwrap();
+        let destination_root = TestRoot::create("destinations");
+        let first = destination_root.path().join("first");
+        let second = destination_root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let destinations =
+            super::super::retained_recovery_set_directories_for_test(&first, &second);
+
+        use std::os::windows::ffi::OsStrExt;
+        let partial_path = first.join(PRODUCTION_DATABASE_FILENAME);
+        let partial_encoded: Vec<u16> = partial_path.as_os_str().encode_wide().collect();
+        let mut partial_file = create_new_database(&partial_encoded).unwrap();
+        let partial_bytes = b"synthetic represented partial database";
+        partial_file.write_all(partial_bytes).unwrap();
+        flush(&partial_file).unwrap();
+        let initial = query_database_facts(&partial_file).unwrap();
+        let failure = FirstRecoveryDatabaseArtifactPublicationFailure {
+            source,
+            destinations,
+            partial_first_database: Some(RetainedFirstRecoveryDatabaseArtifact {
+                file: Some(partial_file),
+                initial: Some(initial),
+            }),
+            phase: PublicationPhase::DuringFlushOrClose,
+            error: FirstRecoveryDatabaseArtifactPublicationError::ArtifactFlushOrCloseUnavailable,
+        };
+
+        let retained_source = failure.abandon_partial_destination_and_retain_source();
+        assert!(
+            retained_source.observe_recovery_database_source().unwrap() == original_observation
+        );
+        assert_eq!(fs::read(&partial_path).unwrap(), partial_bytes);
+        assert!(first.is_dir());
+        assert!(second.is_dir());
+
+        let moved_partial = first.join("represented-partial-moved-by-test.db");
+        fs::rename(&partial_path, &moved_partial).unwrap();
+        let moved_first = destination_root.path().join("first-moved-by-test");
+        fs::rename(&first, &moved_first).unwrap();
+        let moved_second = destination_root.path().join("second-moved-by-test");
+        fs::rename(&second, &moved_second).unwrap();
+
+        let retained_source = accepts_fresh_destination_selection_source(retained_source);
+        let shutdown = retained_source.abort_for_shutdown();
+        let _source_close_outcome = shutdown.retry_source_close();
+        drop(source_root);
+    }
+
+    #[test]
+    fn create_new_conflict_returns_ordinary_failure_resolvable_to_source() {
+        let (source_root, _stage_root, source) = custody_verified_source();
+        let original_observation = source.observe_recovery_database_source().unwrap();
+        let destination_root = TestRoot::create("conflict");
+        let first = destination_root.path().join("first");
+        let second = destination_root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let conflict = first.join(PRODUCTION_DATABASE_FILENAME);
+        let conflict_bytes = b"synthetic pre-existing conflict";
+        fs::write(&conflict, conflict_bytes).unwrap();
+        let destinations =
+            super::super::retained_recovery_set_directories_for_test(&first, &second);
+
+        let failure = *publish_first_recovery_database_artifact(source, destinations).unwrap_err();
+        assert!(failure.partial_first_database.is_none());
+        assert!(failure.phase == PublicationPhase::BeforeCreation);
+        assert!(failure.error == FirstRecoveryDatabaseArtifactPublicationError::ArtifactConflict);
+        assert_eq!(fs::read(&conflict).unwrap(), conflict_bytes);
+        assert_eq!(fs::read_dir(&second).unwrap().count(), 0);
+
+        let retained_source = failure.abandon_partial_destination_and_retain_source();
+        assert!(
+            retained_source.observe_recovery_database_source().unwrap() == original_observation
+        );
+        let shutdown = retained_source.abort_for_shutdown();
+        let _source_close_outcome = shutdown.retry_source_close();
+        drop(source_root);
     }
 }
