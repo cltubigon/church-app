@@ -80,12 +80,23 @@ impl RetainedFirstRecoveryEnvelopeArtifact {
     }
 }
 
-pub(super) struct FirstRecoveryDatabaseAndEnvelopeArtifactsPublished {
+pub(crate) struct FirstRecoveryDatabaseAndEnvelopeArtifactsPublished {
     prior: FirstRecoveryDatabaseArtifactPublished,
     first_envelope: RetainedFirstRecoveryEnvelopeArtifact,
 }
 
 impl FirstRecoveryDatabaseAndEnvelopeArtifactsPublished {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            prior,
+            first_envelope: _first_envelope,
+        } = self;
+        prior.abandon_published_destination_and_retain_source()
+    }
+
     fn revalidate_for_manifest_publication(
         &mut self,
         expected_database_length: u64,
@@ -151,6 +162,21 @@ pub(super) struct FirstRecoveryEnvelopeArtifactPublicationFailure {
     partial_first_envelope: Option<RetainedFirstRecoveryEnvelopeArtifact>,
     phase: PublicationPhase,
     error: FirstRecoveryEnvelopeArtifactPublicationError,
+}
+
+impl FirstRecoveryEnvelopeArtifactPublicationFailure {
+    pub(super) fn abandon_partial_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            prior,
+            partial_first_envelope: _partial_first_envelope,
+            phase: _phase,
+            error: _error,
+        } = self;
+        prior.abandon_published_destination_and_retain_source()
+    }
 }
 
 struct AttemptFailure {
@@ -1140,5 +1166,82 @@ mod tests {
         ] {
             assert!(!owner.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn envelope_failure_abandonment_is_consuming_source_only_and_filesystem_inert() {
+        const SOURCE: &str = include_str!("first_recovery_envelope_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let abandonment = production
+            .split_once("impl FirstRecoveryEnvelopeArtifactPublicationFailure")
+            .unwrap()
+            .1
+            .split_once("struct AttemptFailure")
+            .unwrap()
+            .0;
+        for required in [
+            "self",
+            "prior,",
+            "partial_first_envelope: _partial_first_envelope",
+            "phase: _phase",
+            "error: _error",
+            "prior.abandon_published_destination_and_retain_source()",
+        ] {
+            assert!(abandonment.contains(required));
+        }
+        for forbidden in [
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "set_len",
+            "truncate",
+            "write",
+            "create",
+            "open",
+            "revalidate",
+            "retry",
+        ] {
+            assert!(!abandonment.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn envelope_success_abandonment_preserves_manifest_predecessor_contract() {
+        const SOURCE: &str = include_str!("first_recovery_envelope_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let owner_impl = production
+            .split_once("impl FirstRecoveryDatabaseAndEnvelopeArtifactsPublished")
+            .unwrap()
+            .1
+            .split_once("enum FirstRecoveryEnvelopeArtifactPublicationError")
+            .unwrap()
+            .0;
+        let abandonment = owner_impl
+            .split_once("abandon_published_destination_and_retain_source")
+            .unwrap()
+            .1
+            .split_once("fn revalidate_for_manifest_publication")
+            .unwrap()
+            .0;
+        assert!(abandonment.contains("prior,"));
+        assert!(abandonment.contains("first_envelope: _first_envelope"));
+        assert!(abandonment.contains("prior.abandon_published_destination_and_retain_source()"));
+        for forbidden in [
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "set_len",
+            "truncate",
+            "write",
+            "create",
+            "open",
+            "manifest",
+            "retry",
+        ] {
+            assert!(!abandonment.contains(forbidden));
+        }
+        assert!(owner_impl.contains("fn revalidate_for_manifest_publication"));
+        assert!(owner_impl.contains("self.prior"));
+        assert!(owner_impl.contains("self.first_envelope.revalidate"));
     }
 }

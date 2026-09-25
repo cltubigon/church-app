@@ -3,7 +3,10 @@
 #[path = "first_recovery_database_artifact.rs"]
 mod first_recovery_database_artifact;
 
-pub(crate) use first_recovery_database_artifact::FirstRecoveryDatabaseArtifactPublished;
+pub(crate) use first_recovery_database_artifact::{
+    FirstRecoveryDatabaseAndEnvelopeArtifactsPublished, FirstRecoveryDatabaseArtifactPublished,
+    FirstRecoveryEnvelopePublicationOutcome, publish_first_recovery_envelope_artifact,
+};
 
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum FirstRecoveryDatabasePublicationOutcome {

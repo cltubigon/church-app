@@ -104,13 +104,15 @@ use crate::{
         installation_evidence_persistence_paths, production_database_path,
     },
     windows_retained_volume_topology::{
-        FirstRecoveryDatabaseArtifactPublished, FirstRecoveryDatabasePublicationOutcome,
+        FirstRecoveryDatabaseAndEnvelopeArtifactsPublished, FirstRecoveryDatabaseArtifactPublished,
+        FirstRecoveryDatabasePublicationOutcome, FirstRecoveryEnvelopePublicationOutcome,
         NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
         RetainAndSeparateSecondRecoveryVolumeError, TwoCapacityValidatedRecoveryVolumeRoots,
         TwoRecoveryVolumeRootsSeparatedFromProductionStorage, TwoRetainedRecoverySetDirectories,
         create_recovery_set_directories_for_lifecycle, publish_first_recovery_database_artifact,
-        retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
-        select_native_recovery_volume_root, validate_recovery_volume_capacities_for_lifecycle,
+        publish_first_recovery_envelope_artifact, retain_and_separate_first_recovery_volume,
+        retain_and_separate_second_recovery_volume, select_native_recovery_volume_root,
+        validate_recovery_volume_capacities_for_lifecycle,
     },
 };
 
@@ -380,6 +382,7 @@ enum MigrationPreparationState {
     RecoveryVolumesCapacityValidatedAwaitingDirectories,
     RecoverySetDirectoriesRetainedAwaitingFirstPublication,
     FirstRecoveryDatabasePublishedAwaitingEnvelope,
+    FirstRecoveryDatabaseAndEnvelopePublishedAwaitingManifest,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -562,6 +565,7 @@ enum MigrationWorkerParkedOwnership {
         directories: TwoRetainedRecoverySetDirectories,
     },
     FirstRecoveryDatabasePublished(FirstRecoveryDatabaseArtifactPublished),
+    FirstRecoveryDatabaseAndEnvelopePublished(FirstRecoveryDatabaseAndEnvelopeArtifactsPublished),
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
 }
@@ -1966,10 +1970,18 @@ impl ApplicationLifecycle {
                                                         directories,
                                                     }
                                                 } else {
-                                                    publish_first_recovery_database(
+                                                    let owner = publish_first_recovery_database(
                                                         source,
                                                         directories,
-                                                    )
+                                                    );
+                                                    match owner {
+                                                        MigrationWorkerParkedOwnership::FirstRecoveryDatabasePublished(
+                                                            published,
+                                                        ) if !self.lock().migration_shutdown_requested => {
+                                                            publish_first_recovery_envelope(published)
+                                                        }
+                                                        owner => owner,
+                                                    }
                                                 }
                                             }
                                             owner => owner,
@@ -2028,6 +2040,9 @@ impl ApplicationLifecycle {
             }
             MigrationWorkerParkedOwnership::FirstRecoveryDatabasePublished(_) => {
                 MigrationPreparationState::FirstRecoveryDatabasePublishedAwaitingEnvelope
+            }
+            MigrationWorkerParkedOwnership::FirstRecoveryDatabaseAndEnvelopePublished(_) => {
+                MigrationPreparationState::FirstRecoveryDatabaseAndEnvelopePublishedAwaitingManifest
             }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
@@ -2534,6 +2549,20 @@ fn publish_first_recovery_database(
 }
 
 #[cfg(windows)]
+fn publish_first_recovery_envelope(
+    published: FirstRecoveryDatabaseArtifactPublished,
+) -> MigrationWorkerParkedOwnership {
+    match publish_first_recovery_envelope_artifact(published) {
+        FirstRecoveryEnvelopePublicationOutcome::Published(published) => {
+            MigrationWorkerParkedOwnership::FirstRecoveryDatabaseAndEnvelopePublished(published)
+        }
+        FirstRecoveryEnvelopePublicationOutcome::Source(source) => {
+            MigrationWorkerParkedOwnership::Verified(source)
+        }
+    }
+}
+
+#[cfg(windows)]
 fn retry_migration_worker_ownership(
     owner: MigrationWorkerParkedOwnership,
     lifecycle: &ApplicationLifecycle,
@@ -2707,6 +2736,23 @@ fn retry_migration_worker_ownership(
             }
         }
         MigrationWorkerParkedOwnership::FirstRecoveryDatabasePublished(published) => {
+            let source = published.abandon_published_destination_and_retain_source();
+            let shutdown = source.abort_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::FirstRecoveryDatabaseAndEnvelopePublished(published) => {
             let source = published.abandon_published_destination_and_retain_source();
             let shutdown = source.abort_for_shutdown();
             match shutdown.retry_source_close() {
@@ -7381,7 +7427,7 @@ mod tests {
             .split_once("fn publish_first_recovery_database")
             .unwrap()
             .1
-            .split_once("fn retry_migration_worker_ownership")
+            .split_once("fn publish_first_recovery_envelope")
             .unwrap()
             .0;
         assert!(
@@ -7428,7 +7474,7 @@ mod tests {
             .split_once("MigrationWorkerParkedOwnership::FirstRecoveryDatabasePublished")
             .unwrap()
             .1
-            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .split_once("MigrationWorkerParkedOwnership::FirstRecoveryDatabaseAndEnvelopePublished")
             .unwrap()
             .0;
         let abandon = published
@@ -7468,6 +7514,121 @@ mod tests {
         assert!(prepared.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
         for forbidden in ["remove_", "delete", "cleanup", "publish", "create_"] {
             assert!(!prepared.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_envelope_lifecycle_uses_exact_owner_canonical_facade_and_source_only_failure() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let composition = SOURCE
+            .split_once("fn publish_first_recovery_envelope")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .0;
+        assert!(composition.contains("published: FirstRecoveryDatabaseArtifactPublished"));
+        assert!(composition.contains("publish_first_recovery_envelope_artifact(published)"));
+        assert!(composition.contains("FirstRecoveryEnvelopePublicationOutcome::Published"));
+        assert!(composition.contains("FirstRecoveryEnvelopePublicationOutcome::Source(source)"));
+        assert!(composition.contains("FirstRecoveryDatabaseAndEnvelopePublished(published)"));
+        assert!(composition.contains("MigrationWorkerParkedOwnership::Verified(source)"));
+        for forbidden in [
+            "std::fs",
+            "File::",
+            "write",
+            "copy",
+            "retry",
+            "publish_first_recovery_manifest_artifact",
+            "custody_record",
+            "complete_set",
+            "second_recovery",
+        ] {
+            assert!(!composition.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_envelope_worker_continuation_is_shutdown_guarded_and_parks_unresolved() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        const LIB: &str = include_str!("lib.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_second_recovery_volume_selection_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        let database = dispatch.find("publish_first_recovery_database(").unwrap();
+        let shutdown = dispatch[database..]
+            .find("migration_shutdown_requested")
+            .unwrap()
+            + database;
+        let envelope = dispatch[database..]
+            .find("publish_first_recovery_envelope(published)")
+            .unwrap()
+            + database;
+        assert!(database < shutdown && shutdown < envelope);
+        assert!(!dispatch[database..envelope].contains("run_on_main_thread"));
+
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let success = parking
+            .split_once("MigrationWorkerParkedOwnership::FirstRecoveryDatabaseAndEnvelopePublished")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        assert!(success.contains("FirstRecoveryDatabaseAndEnvelopePublishedAwaitingManifest"));
+        assert!(!success.contains("migration_work_resolved = true"));
+        assert!(!success.contains("drop(exclusivity)"));
+        assert!(!LIB.contains("FirstRecoveryDatabaseAndEnvelopePublishedAwaitingManifest"));
+        assert!(!LIB.contains("FirstRecoveryDatabaseAndEnvelopePublished"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn published_database_and_envelope_shutdown_abandons_before_canonical_close_chain() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let retry = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_preparation_failure")
+            .unwrap()
+            .0;
+        let published = retry
+            .split_once("MigrationWorkerParkedOwnership::FirstRecoveryDatabaseAndEnvelopePublished")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        let abandon = published
+            .find("abandon_published_destination_and_retain_source()")
+            .unwrap();
+        let abort = published.find("source.abort_for_shutdown()").unwrap();
+        let close = published.find("shutdown.retry_source_close()").unwrap();
+        assert!(abandon < abort && abort < close);
+        assert!(published.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
+        for forbidden in [
+            "remove_",
+            "delete",
+            "cleanup",
+            "publish_first_recovery_manifest_artifact",
+            "verify_reentered",
+            "complete_set",
+            "second_recovery",
+        ] {
+            assert!(!published.contains(forbidden));
         }
     }
 }

@@ -3,6 +3,8 @@
 #[path = "first_recovery_database_artifact/first_recovery_envelope_artifact.rs"]
 mod first_recovery_envelope_artifact;
 
+pub(crate) use first_recovery_envelope_artifact::FirstRecoveryDatabaseAndEnvelopeArtifactsPublished;
+
 use std::{
     ffi::c_void,
     fmt,
@@ -126,6 +128,23 @@ impl FirstRecoveryDatabaseArtifactPublished {
         self.destinations.revalidate().map_err(|_| {
             FirstRecoveryDatabaseArtifactRevalidationError::DestinationChangedOrInconsistent
         })
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum FirstRecoveryEnvelopePublicationOutcome {
+    Published(FirstRecoveryDatabaseAndEnvelopeArtifactsPublished),
+    Source(RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup),
+}
+
+pub(crate) fn publish_first_recovery_envelope_artifact(
+    prior: FirstRecoveryDatabaseArtifactPublished,
+) -> FirstRecoveryEnvelopePublicationOutcome {
+    match first_recovery_envelope_artifact::publish_first_recovery_envelope_artifact(prior) {
+        Ok(published) => FirstRecoveryEnvelopePublicationOutcome::Published(published),
+        Err(failure) => FirstRecoveryEnvelopePublicationOutcome::Source(
+            failure.abandon_partial_destination_and_retain_source(),
+        ),
     }
 }
 
@@ -1378,6 +1397,114 @@ mod tests {
         assert!(
             retained_source.observe_recovery_database_source().unwrap() == original_observation
         );
+        let shutdown = retained_source.abort_for_shutdown();
+        let _source_close_outcome = shutdown.retry_source_close();
+        drop(source_root);
+    }
+
+    #[test]
+    fn envelope_failure_abandonment_returns_source_and_leaves_published_bytes_untouched() {
+        let (source_root, _stage_root, source) = custody_verified_source();
+        let original_observation = source.observe_recovery_database_source().unwrap();
+        let destination_root = TestRoot::create("envelope-conflict-abandonment");
+        let first = destination_root.path().join("first");
+        let second = destination_root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let destinations =
+            super::super::retained_recovery_set_directories_for_test(&first, &second);
+        let database = publish_first_recovery_database_artifact(source, destinations).unwrap();
+        let database_path = first.join(PRODUCTION_DATABASE_FILENAME);
+        let database_bytes = fs::read(&database_path).unwrap();
+        let envelope_path =
+            first.join(first_recovery_envelope_artifact::FIRST_RECOVERY_ENVELOPE_FILENAME);
+        let conflict_bytes = b"synthetic pre-existing envelope conflict";
+        fs::write(&envelope_path, conflict_bytes).unwrap();
+
+        let failure =
+            *first_recovery_envelope_artifact::publish_first_recovery_envelope_artifact(database)
+                .unwrap_err();
+        let retained_source = failure.abandon_partial_destination_and_retain_source();
+
+        assert!(
+            retained_source.observe_recovery_database_source().unwrap() == original_observation
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), database_bytes);
+        assert_eq!(fs::read(&envelope_path).unwrap(), conflict_bytes);
+        assert_eq!(fs::read_dir(&second).unwrap().count(), 0);
+
+        let moved_first = destination_root.path().join("first-moved-by-test");
+        fs::rename(&first, &moved_first).unwrap();
+        let moved_second = destination_root.path().join("second-moved-by-test");
+        fs::rename(&second, &moved_second).unwrap();
+        assert_eq!(
+            fs::read(moved_first.join(PRODUCTION_DATABASE_FILENAME)).unwrap(),
+            database_bytes
+        );
+        assert_eq!(
+            fs::read(
+                moved_first
+                    .join(first_recovery_envelope_artifact::FIRST_RECOVERY_ENVELOPE_FILENAME)
+            )
+            .unwrap(),
+            conflict_bytes
+        );
+
+        let shutdown = retained_source.abort_for_shutdown();
+        let _source_close_outcome = shutdown.retry_source_close();
+        drop(source_root);
+    }
+
+    #[test]
+    fn envelope_success_abandonment_returns_source_and_leaves_both_artifacts_untouched() {
+        let (source_root, _stage_root, source) = custody_verified_source();
+        let original_observation = source.observe_recovery_database_source().unwrap();
+        let destination_root = TestRoot::create("envelope-success-abandonment");
+        let first = destination_root.path().join("first");
+        let second = destination_root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let destinations =
+            super::super::retained_recovery_set_directories_for_test(&first, &second);
+        let database = publish_first_recovery_database_artifact(source, destinations).unwrap();
+        let published =
+            first_recovery_envelope_artifact::publish_first_recovery_envelope_artifact(database)
+                .unwrap();
+        let database_path = first.join(PRODUCTION_DATABASE_FILENAME);
+        let envelope_path =
+            first.join(first_recovery_envelope_artifact::FIRST_RECOVERY_ENVELOPE_FILENAME);
+        let database_bytes = fs::read(&database_path).unwrap();
+        let envelope_bytes = fs::read(&envelope_path).unwrap();
+
+        let retained_source = published.abandon_published_destination_and_retain_source();
+        assert!(
+            retained_source.observe_recovery_database_source().unwrap() == original_observation
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), database_bytes);
+        assert_eq!(fs::read(&envelope_path).unwrap(), envelope_bytes);
+        assert_eq!(
+            envelope_bytes.len(),
+            crate::production_database_migration_recovery_envelope::MIGRATION_RECOVERY_ENVELOPE_V1_LENGTH
+        );
+        assert_eq!(fs::read_dir(&second).unwrap().count(), 0);
+
+        let moved_first = destination_root.path().join("first-moved-by-test");
+        fs::rename(&first, &moved_first).unwrap();
+        let moved_second = destination_root.path().join("second-moved-by-test");
+        fs::rename(&second, &moved_second).unwrap();
+        assert_eq!(
+            fs::read(moved_first.join(PRODUCTION_DATABASE_FILENAME)).unwrap(),
+            database_bytes
+        );
+        assert_eq!(
+            fs::read(
+                moved_first
+                    .join(first_recovery_envelope_artifact::FIRST_RECOVERY_ENVELOPE_FILENAME)
+            )
+            .unwrap(),
+            envelope_bytes
+        );
+
         let shutdown = retained_source.abort_for_shutdown();
         let _source_close_outcome = shutdown.retry_source_close();
         drop(source_root);

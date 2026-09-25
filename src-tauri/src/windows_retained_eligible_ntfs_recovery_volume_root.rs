@@ -54,7 +54,9 @@ pub(crate) use native_windows_selection::{
     NativeRecoveryVolumeSelectionOutcome, select_native_recovery_volume_root,
 };
 pub(crate) use retained_recovery_set_directories::{
-    FirstRecoveryDatabaseArtifactPublished, FirstRecoveryDatabasePublicationOutcome,
+    FirstRecoveryDatabaseAndEnvelopeArtifactsPublished, FirstRecoveryDatabaseArtifactPublished,
+    FirstRecoveryDatabasePublicationOutcome, FirstRecoveryEnvelopePublicationOutcome,
+    publish_first_recovery_envelope_artifact,
 };
 
 pub(crate) struct TwoRetainedRecoverySetDirectories {
