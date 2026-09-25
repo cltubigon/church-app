@@ -622,8 +622,8 @@ mod tests {
             );
         }
         assert!(!production.contains("WS_EX_ACCEPTFILES"));
-        let lifecycle = include_str!("application_lifecycle.rs");
-        assert!(!lifecycle.contains("request_native_recovery_key_reentry"));
-        assert!(!lifecycle.contains("NativeRecoveryKeyReentryOutcome"));
+        let crate_root = include_str!("lib.rs");
+        assert!(!crate_root.contains("pub mod native_recovery_key_reentry"));
+        assert!(!crate_root.contains("request_native_recovery_key_reentry"));
     }
 }

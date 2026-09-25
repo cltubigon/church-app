@@ -4,10 +4,16 @@
 mod first_recovery_database_artifact;
 
 pub(crate) use first_recovery_database_artifact::{
-    FirstRecoveryDatabaseAndEnvelopeArtifactsPublished, FirstRecoveryDatabaseArtifactPublished,
-    FirstRecoveryEnvelopePublicationOutcome, FirstRecoveryManifestPublicationOutcome,
-    FirstRecoverySetArtifactsPublished, publish_first_recovery_envelope_artifact,
-    publish_first_recovery_manifest_artifact,
+    FirstCompleteRecoverySetVerificationFailure, FirstCompleteRecoverySetVerificationOutcome,
+    FirstCompleteRecoverySetVerified, FirstRecoveryDatabaseAndEnvelopeArtifactsPublished,
+    FirstRecoveryDatabaseArtifactPublished, FirstRecoveryEnvelopePublicationOutcome,
+    FirstRecoveryManifestPublicationOutcome, FirstRecoverySetArtifactsPublished,
+    FirstRecoverySetRecoveredKeyVerificationError, FirstRecoverySetRecoveredKeyVerificationFailure,
+    FirstRecoverySetRecoveredKeyVerificationOutcome,
+    FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
+    FirstRecoverySetRecoveredKeyVerified, publish_first_recovery_envelope_artifact,
+    publish_first_recovery_manifest_artifact, verify_first_complete_recovery_set,
+    verify_first_recovery_set_with_reentered_recovery_key,
 };
 
 #[allow(clippy::large_enum_variant)]

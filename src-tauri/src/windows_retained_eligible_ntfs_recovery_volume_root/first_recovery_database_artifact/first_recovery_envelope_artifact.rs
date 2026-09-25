@@ -3,7 +3,15 @@
 #[path = "first_recovery_manifest_artifact.rs"]
 mod first_recovery_manifest_artifact;
 
-pub(crate) use first_recovery_manifest_artifact::FirstRecoverySetArtifactsPublished;
+pub(crate) use first_recovery_manifest_artifact::{
+    FirstCompleteRecoverySetVerificationFailure, FirstCompleteRecoverySetVerificationOutcome,
+    FirstCompleteRecoverySetVerified, FirstRecoverySetArtifactsPublished,
+    FirstRecoverySetRecoveredKeyVerificationError, FirstRecoverySetRecoveredKeyVerificationFailure,
+    FirstRecoverySetRecoveredKeyVerificationOutcome,
+    FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
+    FirstRecoverySetRecoveredKeyVerified, verify_first_complete_recovery_set,
+    verify_first_recovery_set_with_reentered_recovery_key,
+};
 
 use std::{
     ffi::c_void,

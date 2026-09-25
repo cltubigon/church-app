@@ -76,6 +76,9 @@ use crate::{
         recover_database_key_candidate_from_loaded_wrapper,
     },
     installation_state::{ExpectedStorageEvidence, InstallationEvidence},
+    native_recovery_key_reentry::{
+        NativeRecoveryKeyReentryOutcome, request_native_recovery_key_reentry,
+    },
     production_database_connection_handoff::{
         DatabaseEvidenceCorrespondenceValidationCloseFailure,
         DatabaseEvidenceCorrespondenceValidationOutcome, FullIntegrityValidationCloseRetryOutcome,
@@ -104,16 +107,23 @@ use crate::{
         installation_evidence_persistence_paths, production_database_path,
     },
     windows_retained_volume_topology::{
-        FirstRecoveryDatabaseAndEnvelopeArtifactsPublished, FirstRecoveryDatabaseArtifactPublished,
-        FirstRecoveryDatabasePublicationOutcome, FirstRecoveryEnvelopePublicationOutcome,
-        FirstRecoveryManifestPublicationOutcome, FirstRecoverySetArtifactsPublished,
-        NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
+        FirstCompleteRecoverySetVerificationFailure, FirstCompleteRecoverySetVerificationOutcome,
+        FirstCompleteRecoverySetVerified, FirstRecoveryDatabaseAndEnvelopeArtifactsPublished,
+        FirstRecoveryDatabaseArtifactPublished, FirstRecoveryDatabasePublicationOutcome,
+        FirstRecoveryEnvelopePublicationOutcome, FirstRecoveryManifestPublicationOutcome,
+        FirstRecoverySetArtifactsPublished, FirstRecoverySetRecoveredKeyVerificationError,
+        FirstRecoverySetRecoveredKeyVerificationFailure,
+        FirstRecoverySetRecoveredKeyVerificationOutcome,
+        FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
+        FirstRecoverySetRecoveredKeyVerified, NativeRecoveryVolumeSelectionOutcome,
+        RecoveryVolumeRootSeparatedFromProductionStorage,
         RetainAndSeparateSecondRecoveryVolumeError, TwoCapacityValidatedRecoveryVolumeRoots,
         TwoRecoveryVolumeRootsSeparatedFromProductionStorage, TwoRetainedRecoverySetDirectories,
         create_recovery_set_directories_for_lifecycle, publish_first_recovery_database_artifact,
         publish_first_recovery_envelope_artifact, publish_first_recovery_manifest_artifact,
         retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
         select_native_recovery_volume_root, validate_recovery_volume_capacities_for_lifecycle,
+        verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
     },
 };
 
@@ -385,6 +395,10 @@ enum MigrationPreparationState {
     FirstRecoveryDatabasePublishedAwaitingEnvelope,
     FirstRecoveryDatabaseAndEnvelopePublishedAwaitingManifest,
     FirstRecoveryManifestPublishedAwaitingVerification,
+    FirstRecoverySetVerificationFailed,
+    FirstRecoverySetVerifierCloseRetryRequired,
+    FirstCompleteRecoverySetVerificationRetryRequired,
+    FirstCompleteRecoverySetVerifiedAwaitingSecondPublication,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -398,6 +412,10 @@ enum MigrationWorkerCommand {
     FirstRecoveryVolumeSelectionCompleted(NativeRecoveryVolumeSelectionOutcome),
     SelectSecondRecoveryVolume,
     SecondRecoveryVolumeSelectionCompleted(NativeRecoveryVolumeSelectionOutcome),
+    RequestFirstRecoveryKeyReentry,
+    FirstRecoveryKeyReentryCompleted(NativeRecoveryKeyReentryOutcome),
+    RetryFirstRecoverySetVerifierClose,
+    RetryFirstCompleteRecoverySetVerification,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -405,6 +423,32 @@ enum FirstRecoveryVolumeSelectionDispatchEscrow {
     Pending,
     TakenByMainThread,
     CancelledBeforeExecution,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RecoveryKeyReentryDispatchEscrow {
+    Pending,
+    TakenByMainThread,
+    CancelledBeforeExecution,
+}
+
+fn cancel_armed_recovery_key_reentry_dispatch(
+    dispatch: &Mutex<RecoveryKeyReentryDispatchEscrow>,
+) -> bool {
+    let mut escrow = dispatch
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match std::mem::replace(
+        &mut *escrow,
+        RecoveryKeyReentryDispatchEscrow::CancelledBeforeExecution,
+    ) {
+        RecoveryKeyReentryDispatchEscrow::Pending => true,
+        RecoveryKeyReentryDispatchEscrow::TakenByMainThread => {
+            *escrow = RecoveryKeyReentryDispatchEscrow::TakenByMainThread;
+            false
+        }
+        RecoveryKeyReentryDispatchEscrow::CancelledBeforeExecution => false,
+    }
 }
 
 fn cancel_armed_first_recovery_volume_selection_dispatch(
@@ -496,7 +540,11 @@ fn observe_pre_custody_dispatch_control(
         Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
         | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
         | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
-        | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_)) => {
+        | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_))
+        | Ok(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry)
+        | Ok(MigrationWorkerCommand::FirstRecoveryKeyReentryCompleted(_))
+        | Ok(MigrationWorkerCommand::RetryFirstRecoverySetVerifierClose)
+        | Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification) => {
             PreCustodyDispatchControl::ImpossibleCustodyCompleted
         }
         Err(std::sync::mpsc::TryRecvError::Empty) => PreCustodyDispatchControl::NoCommand,
@@ -540,6 +588,22 @@ where
 }
 
 #[cfg(windows)]
+fn run_main_thread_recovery_key_reentry<Handle, Resolve, Run>(
+    resolve_parent: Resolve,
+    run_native: Run,
+) -> NativeRecoveryKeyReentryOutcome
+where
+    Resolve: FnOnce() -> Option<Handle>,
+    Run: FnOnce(Handle) -> NativeRecoveryKeyReentryOutcome,
+{
+    match catch_unwind(AssertUnwindSafe(resolve_parent)) {
+        Ok(Some(parent)) => catch_unwind(AssertUnwindSafe(|| run_native(parent)))
+            .unwrap_or_else(|_| std::process::abort()),
+        Ok(None) | Err(_) => NativeRecoveryKeyReentryOutcome::Unavailable,
+    }
+}
+
+#[cfg(windows)]
 #[allow(clippy::large_enum_variant)]
 enum MigrationWorkerParkedOwnership {
     OperationalClose(
@@ -569,6 +633,14 @@ enum MigrationWorkerParkedOwnership {
     FirstRecoveryDatabasePublished(FirstRecoveryDatabaseArtifactPublished),
     FirstRecoveryDatabaseAndEnvelopePublished(FirstRecoveryDatabaseAndEnvelopeArtifactsPublished),
     FirstRecoverySetManifestPublished(FirstRecoverySetArtifactsPublished),
+    FirstRecoverySetAwaitingFreshRecoveryRecord(FirstRecoverySetRecoveredKeyVerificationFailure),
+    FirstRecoverySetVerificationFailed(FirstRecoverySetRecoveredKeyVerificationFailure),
+    FirstRecoverySetVerifierCloseFailure(
+        FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
+    ),
+    FirstRecoverySetRecoveredKeyVerified(FirstRecoverySetRecoveredKeyVerified),
+    FirstCompleteRecoverySetVerificationFailure(FirstCompleteRecoverySetVerificationFailure),
+    FirstCompleteRecoverySetVerified(FirstCompleteRecoverySetVerified),
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
 }
@@ -731,6 +803,8 @@ struct LifecycleInner {
     migration_preparation: MigrationPreparationState,
     first_recovery_volume_selection_outstanding: bool,
     second_recovery_volume_selection_outstanding: bool,
+    recovery_key_reentry_outstanding: bool,
+    migration_verification_retry_outstanding: bool,
     migration_shutdown_requested: bool,
     startup_work_resolved: bool,
     close_work_resolved: bool,
@@ -759,6 +833,8 @@ impl ApplicationLifecycle {
                 migration_preparation: MigrationPreparationState::Inactive,
                 first_recovery_volume_selection_outstanding: false,
                 second_recovery_volume_selection_outstanding: false,
+                recovery_key_reentry_outstanding: false,
+                migration_verification_retry_outstanding: false,
                 migration_shutdown_requested: false,
                 startup_work_resolved: false,
                 close_work_resolved: true,
@@ -844,6 +920,34 @@ impl ApplicationLifecycle {
         self.take_armed_first_recovery_volume_selection_dispatch_for_main(dispatch)
     }
 
+    fn take_armed_recovery_key_reentry_dispatch_for_main(
+        &self,
+        dispatch: &Mutex<RecoveryKeyReentryDispatchEscrow>,
+    ) -> bool {
+        let _boundary = self
+            .custody_dispatch_boundary
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.lock().migration_shutdown_requested {
+            return false;
+        }
+
+        let mut escrow = dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match std::mem::replace(
+            &mut *escrow,
+            RecoveryKeyReentryDispatchEscrow::TakenByMainThread,
+        ) {
+            RecoveryKeyReentryDispatchEscrow::Pending => true,
+            RecoveryKeyReentryDispatchEscrow::CancelledBeforeExecution => {
+                *escrow = RecoveryKeyReentryDispatchEscrow::CancelledBeforeExecution;
+                false
+            }
+            RecoveryKeyReentryDispatchEscrow::TakenByMainThread => std::process::abort(),
+        }
+    }
+
     /// Private retry seam for a later explicitly initiated first-volume
     /// selection attempt. This is intentionally not exposed through IPC.
     #[cfg(windows)]
@@ -896,6 +1000,84 @@ impl ApplicationLifecycle {
             true
         } else {
             self.lock().second_recovery_volume_selection_outstanding = false;
+            false
+        }
+    }
+
+    /// Private seam for an explicitly initiated first-set recovery-key
+    /// re-entry attempt. It is intentionally unreachable through IPC.
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn request_first_recovery_key_reentry(&self) -> bool {
+        let control = {
+            let mut inner = self.lock();
+            if !matches!(
+                inner.migration_preparation,
+                MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification
+            ) || inner.recovery_key_reentry_outstanding
+                || inner.migration_shutdown_requested
+            {
+                return false;
+            }
+            let Some(control) = inner.migration_control.clone() else {
+                return false;
+            };
+            inner.recovery_key_reentry_outstanding = true;
+            control
+        };
+        if control
+            .send(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry)
+            .is_ok()
+        {
+            true
+        } else {
+            self.lock().recovery_key_reentry_outstanding = false;
+            false
+        }
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn request_first_recovery_set_verifier_close_retry(&self) -> bool {
+        self.request_migration_verification_retry(
+            MigrationPreparationState::FirstRecoverySetVerifierCloseRetryRequired,
+            MigrationWorkerCommand::RetryFirstRecoverySetVerifierClose,
+        )
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn request_first_complete_recovery_set_verification_retry(&self) -> bool {
+        self.request_migration_verification_retry(
+            MigrationPreparationState::FirstCompleteRecoverySetVerificationRetryRequired,
+            MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification,
+        )
+    }
+
+    #[cfg(windows)]
+    fn request_migration_verification_retry(
+        &self,
+        expected: MigrationPreparationState,
+        command: MigrationWorkerCommand,
+    ) -> bool {
+        let control = {
+            let mut inner = self.lock();
+            if inner.migration_preparation != expected
+                || inner.migration_verification_retry_outstanding
+                || inner.migration_shutdown_requested
+            {
+                return false;
+            }
+            let Some(control) = inner.migration_control.clone() else {
+                return false;
+            };
+            inner.migration_verification_retry_outstanding = true;
+            control
+        };
+        if control.send(command).is_ok() {
+            true
+        } else {
+            self.lock().migration_verification_retry_outstanding = false;
             false
         }
     }
@@ -1623,7 +1805,11 @@ impl ApplicationLifecycle {
                 Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
                 | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
                 | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
-                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_)) => {
+                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_))
+                | Ok(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry)
+                | Ok(MigrationWorkerCommand::FirstRecoveryKeyReentryCompleted(_))
+                | Ok(MigrationWorkerCommand::RetryFirstRecoverySetVerifierClose)
+                | Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification) => {
                     std::process::abort()
                 }
                 Err(_) => std::process::abort(),
@@ -1763,7 +1949,11 @@ impl ApplicationLifecycle {
                 Ok(MigrationWorkerCommand::CustodyCompleted(_))
                 | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
                 | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
-                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_)) => {
+                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_))
+                | Ok(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry)
+                | Ok(MigrationWorkerCommand::FirstRecoveryKeyReentryCompleted(_))
+                | Ok(MigrationWorkerCommand::RetryFirstRecoverySetVerifierClose)
+                | Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification) => {
                     std::process::abort()
                 }
                 Err(_) => std::process::abort(),
@@ -2010,8 +2200,177 @@ impl ApplicationLifecycle {
                 Ok(MigrationWorkerCommand::CustodyCompleted(_))
                 | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
                 | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
-                | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume) => std::process::abort(),
+                | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
+                | Ok(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry)
+                | Ok(MigrationWorkerCommand::FirstRecoveryKeyReentryCompleted(_))
+                | Ok(MigrationWorkerCommand::RetryFirstRecoverySetVerifierClose)
+                | Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification) => {
+                    std::process::abort()
+                }
                 Err(_) => std::process::abort(),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn run_first_recovery_key_reentry_dispatch(
+        self: &Arc<Self>,
+        owner: MigrationWorkerParkedOwnership,
+        control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+        exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
+        app: &AppHandle,
+    ) {
+        if !matches!(
+            owner,
+            MigrationWorkerParkedOwnership::FirstRecoverySetManifestPublished(_)
+                | MigrationWorkerParkedOwnership::FirstRecoverySetAwaitingFreshRecoveryRecord(_)
+        ) {
+            std::process::abort();
+        }
+        let dispatch = {
+            let _boundary = self
+                .custody_dispatch_boundary
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let inner = self.lock();
+            if inner.migration_shutdown_requested {
+                drop(inner);
+                self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
+                return;
+            }
+            if !inner.recovery_key_reentry_outstanding {
+                std::process::abort();
+            }
+            Arc::new(Mutex::new(RecoveryKeyReentryDispatchEscrow::Pending))
+        };
+
+        let main_dispatch = Arc::clone(&dispatch);
+        let main_app = app.clone();
+        let lifecycle = Arc::clone(self);
+        let scheduled = catch_unwind(AssertUnwindSafe(|| {
+            app.run_on_main_thread(move || {
+                if !lifecycle.take_armed_recovery_key_reentry_dispatch_for_main(&main_dispatch) {
+                    return;
+                }
+                let outcome = run_main_thread_recovery_key_reentry(
+                    || {
+                        main_app
+                            .get_webview_window("main")
+                            .and_then(|window| window.hwnd().ok())
+                    },
+                    |hwnd| request_native_recovery_key_reentry(hwnd.0),
+                );
+                let sender = lifecycle.lock().migration_control.clone();
+                let Some(sender) = sender else {
+                    std::process::abort();
+                };
+                if let Err(error) = sender.send(
+                    MigrationWorkerCommand::FirstRecoveryKeyReentryCompleted(outcome),
+                ) {
+                    let _retained_record = error.0;
+                    std::process::abort();
+                }
+            })
+        }))
+        .map_err(|_| ())
+        .and_then(|result| result.map_err(|_| ()));
+
+        if scheduled.is_err() && cancel_armed_recovery_key_reentry_dispatch(&dispatch) {
+            self.lock().recovery_key_reentry_outstanding = false;
+            self.park_migration_worker(owner, control, exclusivity, app);
+            return;
+        }
+
+        let mut shutdown_requested = false;
+        loop {
+            match control.recv() {
+                Ok(MigrationWorkerCommand::Shutdown) => {
+                    if cancel_armed_recovery_key_reentry_dispatch(&dispatch) {
+                        self.lock().recovery_key_reentry_outstanding = false;
+                        self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
+                        return;
+                    }
+                    shutdown_requested = true;
+                }
+                Ok(MigrationWorkerCommand::FirstRecoveryKeyReentryCompleted(outcome)) => {
+                    self.lock().recovery_key_reentry_outstanding = false;
+                    if shutdown_requested || self.lock().migration_shutdown_requested {
+                        drop(outcome);
+                        self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
+                        return;
+                    }
+                    let owner = match outcome {
+                        NativeRecoveryKeyReentryOutcome::Cancelled
+                        | NativeRecoveryKeyReentryOutcome::Unavailable => owner,
+                        NativeRecoveryKeyReentryOutcome::Submitted(entered_record) => {
+                            let outcome = match owner {
+                                MigrationWorkerParkedOwnership::FirstRecoverySetManifestPublished(
+                                    published,
+                                ) => verify_first_recovery_set_with_reentered_recovery_key(
+                                    published,
+                                    entered_record,
+                                ),
+                                MigrationWorkerParkedOwnership::FirstRecoverySetAwaitingFreshRecoveryRecord(
+                                    failure,
+                                ) => failure.retry_with_fresh_record(entered_record),
+                                _ => std::process::abort(),
+                            };
+                            self.continue_first_recovery_set_verification(outcome)
+                        }
+                    };
+                    if self.lock().migration_shutdown_requested {
+                        self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
+                    } else {
+                        self.park_migration_worker(owner, control, exclusivity, app);
+                    }
+                    return;
+                }
+                Ok(_) => std::process::abort(),
+                Err(_) => std::process::abort(),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn continue_first_recovery_set_verification(
+        &self,
+        outcome: FirstRecoverySetRecoveredKeyVerificationOutcome,
+    ) -> MigrationWorkerParkedOwnership {
+        match outcome {
+            FirstRecoverySetRecoveredKeyVerificationOutcome::Failed(failure) => {
+                classify_first_recovery_set_verification_failure(failure)
+            }
+            FirstRecoverySetRecoveredKeyVerificationOutcome::VerifierCloseFailed(failure) => {
+                MigrationWorkerParkedOwnership::FirstRecoverySetVerifierCloseFailure(failure)
+            }
+            FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) => {
+                if self.lock().migration_shutdown_requested {
+                    return MigrationWorkerParkedOwnership::FirstRecoverySetRecoveredKeyVerified(
+                        verified,
+                    );
+                }
+                classify_first_complete_recovery_set_verification(
+                    verify_first_complete_recovery_set(verified),
+                )
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn finish_or_park_migration_shutdown(
+        self: &Arc<Self>,
+        owner: MigrationWorkerParkedOwnership,
+        control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+        exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
+        app: &AppHandle,
+    ) {
+        match retry_migration_worker_ownership(owner, self) {
+            MigrationWorkerRetryOutcome::Resolved => {
+                drop(exclusivity);
+                self.finish_migration_preparation_worker(Some(app));
+            }
+            MigrationWorkerRetryOutcome::Retained(owner) => {
+                self.park_migration_worker(owner, control, exclusivity, app)
             }
         }
     }
@@ -2058,6 +2417,24 @@ impl ApplicationLifecycle {
             MigrationWorkerParkedOwnership::FirstRecoverySetManifestPublished(_) => {
                 MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification
             }
+            MigrationWorkerParkedOwnership::FirstRecoverySetAwaitingFreshRecoveryRecord(_) => {
+                MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification
+            }
+            MigrationWorkerParkedOwnership::FirstRecoverySetVerificationFailed(_) => {
+                MigrationPreparationState::FirstRecoverySetVerificationFailed
+            }
+            MigrationWorkerParkedOwnership::FirstRecoverySetVerifierCloseFailure(_) => {
+                MigrationPreparationState::FirstRecoverySetVerifierCloseRetryRequired
+            }
+            MigrationWorkerParkedOwnership::FirstRecoverySetRecoveredKeyVerified(_) => {
+                MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification
+            }
+            MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerificationFailure(_) => {
+                MigrationPreparationState::FirstCompleteRecoverySetVerificationRetryRequired
+            }
+            MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerified(_) => {
+                MigrationPreparationState::FirstCompleteRecoverySetVerifiedAwaitingSecondPublication
+            }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
             }
@@ -2095,9 +2472,48 @@ impl ApplicationLifecycle {
                     );
                     return;
                 }
+                Ok(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry) => {
+                    self.run_first_recovery_key_reentry_dispatch(owner, control, exclusivity, app);
+                    return;
+                }
+                Ok(MigrationWorkerCommand::RetryFirstRecoverySetVerifierClose) => {
+                    self.lock().migration_verification_retry_outstanding = false;
+                    let MigrationWorkerParkedOwnership::FirstRecoverySetVerifierCloseFailure(
+                        failure,
+                    ) = owner
+                    else {
+                        std::process::abort()
+                    };
+                    owner = self.continue_first_recovery_set_verification(failure.retry_close());
+                    if self.lock().migration_shutdown_requested {
+                        self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
+                        return;
+                    }
+                    self.lock().migration_preparation =
+                        migration_verification_preparation_state(&owner);
+                    continue;
+                }
+                Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification) => {
+                    self.lock().migration_verification_retry_outstanding = false;
+                    let MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerificationFailure(
+                        failure,
+                    ) = owner
+                    else {
+                        std::process::abort()
+                    };
+                    owner = classify_first_complete_recovery_set_verification(failure.retry());
+                    if self.lock().migration_shutdown_requested {
+                        self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
+                        return;
+                    }
+                    self.lock().migration_preparation =
+                        migration_verification_preparation_state(&owner);
+                    continue;
+                }
                 Ok(MigrationWorkerCommand::CustodyCompleted(_))
                 | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
-                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_)) => {
+                | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_))
+                | Ok(MigrationWorkerCommand::FirstRecoveryKeyReentryCompleted(_)) => {
                     std::process::abort()
                 }
                 Err(_) => std::process::abort(),
@@ -2120,6 +2536,8 @@ impl ApplicationLifecycle {
             inner.migration_preparation = MigrationPreparationState::Inactive;
             inner.first_recovery_volume_selection_outstanding = false;
             inner.second_recovery_volume_selection_outstanding = false;
+            inner.recovery_key_reentry_outstanding = false;
+            inner.migration_verification_retry_outstanding = false;
             inner.migration_work_resolved = true;
             inner.migration_control = None;
             if matches!(inner.state, LifecycleState::Stopping) {
@@ -2591,6 +3009,86 @@ fn publish_first_recovery_manifest(
 }
 
 #[cfg(windows)]
+fn classify_first_recovery_set_verification_failure(
+    failure: FirstRecoverySetRecoveredKeyVerificationFailure,
+) -> MigrationWorkerParkedOwnership {
+    match failure.category() {
+        FirstRecoverySetRecoveredKeyVerificationError::CustodyRecordMalformedOrInvalid
+        | FirstRecoverySetRecoveredKeyVerificationError::CustodyRecordAssociationMismatch
+        | FirstRecoverySetRecoveredKeyVerificationError::EnvelopeVerificationFailed => {
+            MigrationWorkerParkedOwnership::FirstRecoverySetAwaitingFreshRecoveryRecord(failure)
+        }
+        FirstRecoverySetRecoveredKeyVerificationError::SourceUnavailableOrChanged
+        | FirstRecoverySetRecoveredKeyVerificationError::DestinationChangedOrInconsistent
+        | FirstRecoverySetRecoveredKeyVerificationError::PriorArtifactChangedOrInvalid
+        | FirstRecoverySetRecoveredKeyVerificationError::DatabaseCorrespondenceFailed
+        | FirstRecoverySetRecoveredKeyVerificationError::RecoveredKeyDatabaseVerificationFailed
+        | FirstRecoverySetRecoveredKeyVerificationError::VerifierCloseFailed => {
+            MigrationWorkerParkedOwnership::FirstRecoverySetVerificationFailed(failure)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn classify_first_complete_recovery_set_verification(
+    outcome: FirstCompleteRecoverySetVerificationOutcome,
+) -> MigrationWorkerParkedOwnership {
+    match outcome {
+        FirstCompleteRecoverySetVerificationOutcome::Verified(verified) => {
+            MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerified(verified)
+        }
+        FirstCompleteRecoverySetVerificationOutcome::Failed(failure) => {
+            MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerificationFailure(failure)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn migration_verification_preparation_state(
+    owner: &MigrationWorkerParkedOwnership,
+) -> MigrationPreparationState {
+    match owner {
+        MigrationWorkerParkedOwnership::FirstRecoverySetAwaitingFreshRecoveryRecord(_) => {
+            MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification
+        }
+        MigrationWorkerParkedOwnership::FirstRecoverySetVerificationFailed(_) => {
+            MigrationPreparationState::FirstRecoverySetVerificationFailed
+        }
+        MigrationWorkerParkedOwnership::FirstRecoverySetVerifierCloseFailure(_) => {
+            MigrationPreparationState::FirstRecoverySetVerifierCloseRetryRequired
+        }
+        MigrationWorkerParkedOwnership::FirstRecoverySetRecoveredKeyVerified(_) => {
+            MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification
+        }
+        MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerificationFailure(_) => {
+            MigrationPreparationState::FirstCompleteRecoverySetVerificationRetryRequired
+        }
+        MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerified(_) => {
+            MigrationPreparationState::FirstCompleteRecoverySetVerifiedAwaitingSecondPublication
+        }
+        _ => std::process::abort(),
+    }
+}
+
+#[cfg(windows)]
+fn shutdown_recovery_source(
+    source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+) -> MigrationWorkerRetryOutcome {
+    let shutdown = source.abort_for_shutdown();
+    match shutdown.retry_source_close() {
+        UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(shutdown) => {
+            drop(shutdown);
+            MigrationWorkerRetryOutcome::Resolved
+        }
+        UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(shutdown) => {
+            MigrationWorkerRetryOutcome::Retained(MigrationWorkerParkedOwnership::PreparedShutdown(
+                shutdown,
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
 fn retry_migration_worker_ownership(
     owner: MigrationWorkerParkedOwnership,
     lifecycle: &ApplicationLifecycle,
@@ -2798,21 +3296,39 @@ fn retry_migration_worker_ownership(
             }
         }
         MigrationWorkerParkedOwnership::FirstRecoverySetManifestPublished(published) => {
-            let source = published.abandon_published_destination_and_retain_source();
-            let shutdown = source.abort_for_shutdown();
-            match shutdown.retry_source_close() {
-                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
-                    shutdown,
-                ) => {
-                    drop(shutdown);
-                    MigrationWorkerRetryOutcome::Resolved
+            shutdown_recovery_source(published.abandon_published_destination_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::FirstRecoverySetAwaitingFreshRecoveryRecord(failure)
+        | MigrationWorkerParkedOwnership::FirstRecoverySetVerificationFailed(failure) => {
+            shutdown_recovery_source(failure.abandon_published_destination_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::FirstRecoverySetVerifierCloseFailure(failure) => {
+            match failure.retry_close() {
+                FirstRecoverySetRecoveredKeyVerificationOutcome::VerifierCloseFailed(failure) => {
+                    MigrationWorkerRetryOutcome::Retained(
+                        MigrationWorkerParkedOwnership::FirstRecoverySetVerifierCloseFailure(
+                            failure,
+                        ),
+                    )
                 }
-                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
-                    shutdown,
-                ) => MigrationWorkerRetryOutcome::Retained(
-                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
-                ),
+                FirstRecoverySetRecoveredKeyVerificationOutcome::Failed(failure) => {
+                    shutdown_recovery_source(
+                        failure.abandon_published_destination_and_retain_source(),
+                    )
+                }
+                FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(_) => {
+                    std::process::abort()
+                }
             }
+        }
+        MigrationWorkerParkedOwnership::FirstRecoverySetRecoveredKeyVerified(verified) => {
+            shutdown_recovery_source(verified.abandon_published_destination_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerificationFailure(failure) => {
+            shutdown_recovery_source(failure.abandon_published_destination_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerified(verified) => {
+            shutdown_recovery_source(verified.abandon_published_destination_and_retain_source())
         }
         MigrationWorkerParkedOwnership::TerminalFailure(failure) => {
             match failure.retry_source_close() {
@@ -7661,7 +8177,7 @@ mod tests {
             .split_once("fn publish_first_recovery_manifest")
             .unwrap()
             .1
-            .split_once("fn retry_migration_worker_ownership")
+            .split_once("fn classify_first_recovery_set_verification_failure")
             .unwrap()
             .0;
         assert!(
@@ -7745,10 +8261,21 @@ mod tests {
         let abandon = published
             .find("abandon_published_destination_and_retain_source()")
             .unwrap();
-        let abort = published.find("source.abort_for_shutdown()").unwrap();
-        let close = published.find("shutdown.retry_source_close()").unwrap();
-        assert!(abandon < abort && abort < close);
-        assert!(published.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
+        let shutdown = published.find("shutdown_recovery_source(").unwrap();
+        assert!(shutdown < abandon);
+        let shutdown_chain = SOURCE
+            .split_once("fn shutdown_recovery_source")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .0;
+        let abort = shutdown_chain.find("source.abort_for_shutdown()").unwrap();
+        let close = shutdown_chain
+            .find("shutdown.retry_source_close()")
+            .unwrap();
+        assert!(abort < close);
+        assert!(shutdown_chain.contains("MigrationWorkerParkedOwnership::PreparedShutdown("));
         for forbidden in [
             "remove_",
             "delete",
@@ -7759,5 +8286,334 @@ mod tests {
         ] {
             assert!(!published.contains(forbidden));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_recovery_key_reentry_is_private_explicit_and_one_shot() {
+        const LIB: &str = include_str!("lib.rs");
+        let lifecycle = ApplicationLifecycle::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_preparation =
+                MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification;
+            inner.migration_control = Some(sender);
+            inner.migration_work_resolved = false;
+        }
+
+        assert!(lifecycle.request_first_recovery_key_reentry());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry)
+        ));
+        assert!(!lifecycle.request_first_recovery_key_reentry());
+        assert!(!lifecycle.lock().migration_work_resolved);
+        assert!(!LIB.contains("request_first_recovery_key_reentry"));
+        assert!(!LIB.contains("NativeRecoveryKeyReentryOutcome"));
+        assert!(!LIB.contains("ReenteredMigrationRecoveryKeyCustodyV1"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_key_reentry_main_thread_seam_uses_resolved_parent_and_opaque_outcome() {
+        let mut observed = None;
+        let outcome = run_main_thread_recovery_key_reentry(
+            || Some(71_u32),
+            |parent| {
+                observed = Some(parent);
+                NativeRecoveryKeyReentryOutcome::Cancelled
+            },
+        );
+        assert!(matches!(
+            outcome,
+            NativeRecoveryKeyReentryOutcome::Cancelled
+        ));
+        assert_eq!(observed, Some(71));
+
+        let unavailable = run_main_thread_recovery_key_reentry(
+            || None::<u32>,
+            |_| panic!("native re-entry must not run without the main-window parent"),
+        );
+        assert!(matches!(
+            unavailable,
+            NativeRecoveryKeyReentryOutcome::Unavailable
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_key_reentry_dispatch_uses_real_main_hwnd_and_shutdown_escrow() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_first_recovery_key_reentry_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn continue_first_recovery_set_verification")
+            .unwrap()
+            .0;
+        assert!(dispatch.contains("app.run_on_main_thread"));
+        assert!(dispatch.contains("get_webview_window(\"main\")"));
+        assert!(dispatch.contains("window.hwnd().ok()"));
+        assert!(dispatch.contains("request_native_recovery_key_reentry(hwnd.0)"));
+        assert!(dispatch.contains("take_armed_recovery_key_reentry_dispatch_for_main"));
+        assert!(dispatch.contains("cancel_armed_recovery_key_reentry_dispatch"));
+        let shutdown = dispatch.find("migration_shutdown_requested").unwrap();
+        let native = dispatch
+            .find("request_native_recovery_key_reentry(hwnd.0)")
+            .unwrap();
+        assert!(shutdown < native);
+        assert_eq!(
+            dispatch
+                .matches("request_native_recovery_key_reentry(")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelled_and_unavailable_reentry_retain_exact_owner_without_redisplay() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_first_recovery_key_reentry_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn continue_first_recovery_set_verification")
+            .unwrap()
+            .0;
+        assert!(dispatch.contains("NativeRecoveryKeyReentryOutcome::Cancelled"));
+        assert!(dispatch.contains("NativeRecoveryKeyReentryOutcome::Unavailable => owner"));
+        assert!(dispatch.contains("self.park_migration_worker(owner, control, exclusivity, app)"));
+        assert_eq!(dispatch.matches("app.run_on_main_thread").count(), 1);
+        assert!(!dispatch.contains("migration_work_resolved = true"));
+        assert!(!dispatch.contains("drop(exclusivity)"));
+        assert!(!dispatch.contains("remove_"));
+        assert!(!dispatch.contains("delete"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn submitted_and_fresh_records_use_only_canonical_recovered_key_verifier_paths() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_first_recovery_key_reentry_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn continue_first_recovery_set_verification")
+            .unwrap()
+            .0;
+        assert!(dispatch.contains("NativeRecoveryKeyReentryOutcome::Submitted(entered_record)"));
+        assert!(dispatch.contains(
+            "verify_first_recovery_set_with_reentered_recovery_key(\n                                    published,\n                                    entered_record,"
+        ));
+        assert!(dispatch.contains("failure.retry_with_fresh_record(entered_record)"));
+        assert!(!dispatch.contains("from_bounded_entry"));
+        assert!(!dispatch.contains("decode"));
+        assert!(!dispatch.contains("open_migration_recovery_envelope"));
+        assert!(!dispatch.contains("FirstRecoverySetArtifactsPublished {"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wrong_record_categories_are_retryable_but_structural_failures_are_not() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let policy = SOURCE
+            .split_once("fn classify_first_recovery_set_verification_failure")
+            .unwrap()
+            .1
+            .split_once("fn classify_first_complete_recovery_set_verification")
+            .unwrap()
+            .0;
+        for retryable in [
+            "CustodyRecordMalformedOrInvalid",
+            "CustodyRecordAssociationMismatch",
+            "EnvelopeVerificationFailed",
+        ] {
+            assert!(policy.contains(retryable));
+        }
+        assert!(policy.contains("FirstRecoverySetAwaitingFreshRecoveryRecord(failure)"));
+        for structural in [
+            "SourceUnavailableOrChanged",
+            "DestinationChangedOrInconsistent",
+            "PriorArtifactChangedOrInvalid",
+            "DatabaseCorrespondenceFailed",
+            "RecoveredKeyDatabaseVerificationFailed",
+            "VerifierCloseFailed",
+        ] {
+            assert!(policy.contains(structural));
+        }
+        assert!(policy.contains("FirstRecoverySetVerificationFailed(failure)"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verifier_close_failure_is_exact_close_only_ownership() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let owner = SOURCE
+            .split_once("enum MigrationWorkerParkedOwnership")
+            .unwrap()
+            .1
+            .split_once("enum MigrationWorkerRetryOutcome")
+            .unwrap()
+            .0;
+        assert!(owner.contains("FirstRecoverySetVerifierCloseFailure"));
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let retry = parking
+            .split_once("Ok(MigrationWorkerCommand::RetryFirstRecoverySetVerifierClose)")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification")
+            .unwrap()
+            .0;
+        assert!(retry.contains("failure.retry_close()"));
+        assert!(retry.contains("continue_first_recovery_set_verification"));
+        assert!(!retry.contains("retry_with_fresh_record"));
+        let shutdown = SOURCE
+            .split_once(
+                "MigrationWorkerParkedOwnership::FirstRecoverySetVerifierCloseFailure(failure) =>",
+            )
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::FirstRecoverySetRecoveredKeyVerified")
+            .unwrap()
+            .0;
+        assert!(shutdown.contains("failure.retry_close()"));
+        assert!(shutdown.contains("VerifierCloseFailed(failure)"));
+        assert!(shutdown.contains("abandon_published_destination_and_retain_source()"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovered_key_success_immediately_uses_canonical_complete_set_verifier() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let continuation = SOURCE
+            .split_once("fn continue_first_recovery_set_verification")
+            .unwrap()
+            .1
+            .split_once("fn finish_or_park_migration_shutdown")
+            .unwrap()
+            .0;
+        assert!(continuation.contains("FirstRecoverySetRecoveredKeyVerificationOutcome::Verified"));
+        assert!(continuation.contains("migration_shutdown_requested"));
+        assert!(continuation.contains("verify_first_complete_recovery_set(verified)"));
+        assert_eq!(
+            continuation
+                .matches("verify_first_complete_recovery_set(")
+                .count(),
+            1
+        );
+        for forbidden in ["std::fs", "Sha256", "manifest.encode", "open_"] {
+            assert!(!continuation.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn complete_set_failure_retry_and_success_park_exact_canonical_owners() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let classification = SOURCE
+            .split_once("fn classify_first_complete_recovery_set_verification")
+            .unwrap()
+            .1
+            .split_once("fn migration_verification_preparation_state")
+            .unwrap()
+            .0;
+        assert!(classification.contains("FirstCompleteRecoverySetVerificationOutcome::Verified"));
+        assert!(classification.contains("FirstCompleteRecoverySetVerified(verified)"));
+        assert!(classification.contains("FirstCompleteRecoverySetVerificationOutcome::Failed"));
+        assert!(classification.contains("FirstCompleteRecoverySetVerificationFailure(failure)"));
+
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let retry = parking
+            .split_once("Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification)")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerCommand::CustodyCompleted(_)")
+            .unwrap()
+            .0;
+        assert!(retry.contains("failure.retry()"));
+        assert!(!retry.contains("verify_first_complete_recovery_set("));
+
+        let states = SOURCE
+            .split_once("fn migration_verification_preparation_state")
+            .unwrap()
+            .1
+            .split_once("fn shutdown_recovery_source")
+            .unwrap()
+            .0;
+        assert!(states.contains("FirstCompleteRecoverySetVerificationRetryRequired"));
+        assert!(states.contains("FirstCompleteRecoverySetVerifiedAwaitingSecondPublication"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verification_shutdowns_are_source_only_and_stop_before_set_two() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let retry = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_preparation_failure")
+            .unwrap()
+            .0;
+        for owner in [
+            "FirstRecoverySetAwaitingFreshRecoveryRecord",
+            "FirstRecoverySetVerificationFailed",
+            "FirstRecoverySetRecoveredKeyVerified",
+            "FirstCompleteRecoverySetVerificationFailure",
+            "FirstCompleteRecoverySetVerified",
+        ] {
+            assert!(retry.contains(owner));
+        }
+        assert!(retry.contains("abandon_published_destination_and_retain_source()"));
+        assert!(retry.contains("shutdown_recovery_source("));
+        assert!(!retry.contains("publish_second_recovery_database_artifact"));
+        assert!(!retry.contains("execute_migration"));
+        for forbidden in ["remove_", "delete", "cleanup", "rename", "overwrite"] {
+            assert!(!retry.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_inner_and_coarse_state_remain_secret_free() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let inner = SOURCE
+            .split_once("struct LifecycleInner")
+            .unwrap()
+            .1
+            .split_once("pub(crate) struct ApplicationLifecycle")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "ReenteredMigrationRecoveryKeyCustodyV1",
+            "NativeRecoveryKeyReentryOutcome",
+            "sqlcipher",
+            "secret",
+        ] {
+            assert!(!inner.contains(forbidden));
+        }
+        let state = SOURCE
+            .split_once("enum MigrationPreparationState")
+            .unwrap()
+            .1
+            .split_once("enum MigrationWorkerCommand")
+            .unwrap()
+            .0;
+        assert!(state.contains("FirstCompleteRecoverySetVerifiedAwaitingSecondPublication"));
+        assert!(!state.contains("ReenteredMigrationRecoveryKeyCustodyV1"));
     }
 }
