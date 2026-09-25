@@ -54,6 +54,10 @@ pub(crate) use native_windows_selection::{
     NativeRecoveryVolumeSelectionOutcome, select_native_recovery_volume_root,
 };
 
+pub(crate) struct TwoRetainedRecoverySetDirectories {
+    _directories: retained_recovery_set_directories::TwoRetainedRecoverySetDirectories,
+}
+
 const MAXIMUM_FINAL_PATH_UNITS: usize = 32_767;
 const VOLUME_GUID_ROOT_UNITS: usize = 49;
 const FILESYSTEM_NAME_CAPACITY: usize = 32;
@@ -804,6 +808,18 @@ pub(crate) fn validate_recovery_volume_capacities_for_lifecycle<SourceSizeError>
     validate_two_recovery_volume_root_capacities(required, roots).map_err(|_| ())
 }
 
+pub(crate) fn create_recovery_set_directories_for_lifecycle(
+    roots: TwoCapacityValidatedRecoveryVolumeRoots,
+) -> Result<TwoRetainedRecoverySetDirectories, ()> {
+    retained_recovery_set_directories::create_and_retain_recovery_set_directories(roots)
+        .map(|directories| TwoRetainedRecoverySetDirectories {
+            _directories: directories,
+        })
+        .map_err(|failure| {
+            drop(failure);
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,6 +842,40 @@ mod tests {
         ascii_units(r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\")
             .try_into()
             .unwrap()
+    }
+
+    #[test]
+    fn directory_lifecycle_facade_only_delegates_and_discards_failure_ownership() {
+        const SOURCE: &str = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
+        let facade = SOURCE
+            .split_once("pub(crate) fn create_recovery_set_directories_for_lifecycle")
+            .unwrap()
+            .1
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        assert!(facade.contains("roots: TwoCapacityValidatedRecoveryVolumeRoots"));
+        assert!(facade.contains("Result<TwoRetainedRecoverySetDirectories, ()>"));
+        assert!(facade.contains(
+            "retained_recovery_set_directories::create_and_retain_recovery_set_directories(roots)"
+        ));
+        assert!(facade.contains("drop(failure)"));
+        for forbidden in [
+            "church-app-recovery-set",
+            "CreateDirectoryW",
+            "remove_",
+            "delete",
+            "cleanup",
+            "retry",
+            "path(",
+            "handle(",
+            "identity(",
+        ] {
+            assert!(
+                !facade.contains(forbidden),
+                "forbidden facade authority: {forbidden}"
+            );
+        }
     }
 
     fn valid_facts() -> RootFacts {

@@ -106,9 +106,10 @@ use crate::{
     windows_retained_volume_topology::{
         NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
         RetainAndSeparateSecondRecoveryVolumeError, TwoCapacityValidatedRecoveryVolumeRoots,
-        TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
-        retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
-        select_native_recovery_volume_root, validate_recovery_volume_capacities_for_lifecycle,
+        TwoRecoveryVolumeRootsSeparatedFromProductionStorage, TwoRetainedRecoverySetDirectories,
+        create_recovery_set_directories_for_lifecycle, retain_and_separate_first_recovery_volume,
+        retain_and_separate_second_recovery_volume, select_native_recovery_volume_root,
+        validate_recovery_volume_capacities_for_lifecycle,
     },
 };
 
@@ -376,6 +377,7 @@ enum MigrationPreparationState {
     FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication,
     TwoRecoveryVolumesRetainedAndSeparatedAwaitingCapacity,
     RecoveryVolumesCapacityValidatedAwaitingDirectories,
+    RecoverySetDirectoriesRetainedAwaitingFirstPublication,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -552,6 +554,10 @@ enum MigrationWorkerParkedOwnership {
     CapacityValidatedRecoveryVolumes {
         source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
         roots: TwoCapacityValidatedRecoveryVolumeRoots,
+    },
+    RecoverySetDirectoriesPrepared {
+        source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+        directories: TwoRetainedRecoverySetDirectories,
     },
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
@@ -1917,7 +1923,39 @@ impl ApplicationLifecycle {
                                     }
                                     return;
                                 }
-                                prepare_recovery_volume_capacities(source, roots)
+                                let owner = prepare_recovery_volume_capacities(source, roots);
+                                match owner {
+                                    MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes {
+                                        source,
+                                        roots,
+                                    } => {
+                                        if self.lock().migration_shutdown_requested {
+                                            match retry_migration_worker_ownership(
+                                                MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes {
+                                                    source,
+                                                    roots,
+                                                },
+                                                self,
+                                            ) {
+                                                MigrationWorkerRetryOutcome::Resolved => {
+                                                    drop(exclusivity);
+                                                    self.finish_migration_preparation_worker(Some(app));
+                                                }
+                                                MigrationWorkerRetryOutcome::Retained(owner) => {
+                                                    self.park_migration_worker(
+                                                        owner,
+                                                        control,
+                                                        exclusivity,
+                                                        app,
+                                                    )
+                                                }
+                                            }
+                                            return;
+                                        }
+                                        prepare_recovery_set_directories(source, roots)
+                                    }
+                                    owner => owner,
+                                }
                             }
                             owner => owner,
                         };
@@ -1963,6 +2001,9 @@ impl ApplicationLifecycle {
             }
             MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes { .. } => {
                 MigrationPreparationState::RecoveryVolumesCapacityValidatedAwaitingDirectories
+            }
+            MigrationWorkerParkedOwnership::RecoverySetDirectoriesPrepared { .. } => {
+                MigrationPreparationState::RecoverySetDirectoriesRetainedAwaitingFirstPublication
             }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
@@ -2440,6 +2481,20 @@ fn prepare_recovery_volume_capacities(
 }
 
 #[cfg(windows)]
+fn prepare_recovery_set_directories(
+    source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    roots: TwoCapacityValidatedRecoveryVolumeRoots,
+) -> MigrationWorkerParkedOwnership {
+    match create_recovery_set_directories_for_lifecycle(roots) {
+        Ok(directories) => MigrationWorkerParkedOwnership::RecoverySetDirectoriesPrepared {
+            source,
+            directories,
+        },
+        Err(()) => MigrationWorkerParkedOwnership::Verified(source),
+    }
+}
+
+#[cfg(windows)]
 fn retry_migration_worker_ownership(
     owner: MigrationWorkerParkedOwnership,
     lifecycle: &ApplicationLifecycle,
@@ -2577,6 +2632,26 @@ fn retry_migration_worker_ownership(
         }
         MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes { source, roots } => {
             drop(roots);
+            let shutdown = source.abort_for_shutdown();
+            match shutdown.retry_source_close() {
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
+                    shutdown,
+                ) => {
+                    drop(shutdown);
+                    MigrationWorkerRetryOutcome::Resolved
+                }
+                UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Failed(
+                    shutdown,
+                ) => MigrationWorkerRetryOutcome::Retained(
+                    MigrationWorkerParkedOwnership::PreparedShutdown(shutdown),
+                ),
+            }
+        }
+        MigrationWorkerParkedOwnership::RecoverySetDirectoriesPrepared {
+            source,
+            directories,
+        } => {
+            drop(directories);
             let shutdown = source.abort_for_shutdown();
             match shutdown.retry_source_close() {
                 UndisclosedMigrationRecoveryKeyCustodyShutdownCloseRetryOutcome::Closed(
@@ -7088,6 +7163,169 @@ mod tests {
         assert!(validated.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
         for forbidden in ["remove_", "delete", "cleanup", "publish", "create_"] {
             assert!(!validated.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_lifecycle_composition_consumes_only_capacity_validated_roots() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let composition = SOURCE
+            .split_once("fn prepare_recovery_set_directories")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .0;
+
+        assert!(
+            composition
+                .contains("source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup")
+        );
+        assert!(composition.contains("roots: TwoCapacityValidatedRecoveryVolumeRoots"));
+        assert!(composition.contains("create_recovery_set_directories_for_lifecycle(roots)"));
+        assert!(
+            composition.contains("MigrationWorkerParkedOwnership::RecoverySetDirectoriesPrepared")
+        );
+        assert!(
+            composition.contains("Err(()) => MigrationWorkerParkedOwnership::Verified(source)")
+        );
+        for forbidden in [
+            "church-app-recovery-set",
+            "create_and_retain_recovery_set_directories",
+            "publish_first_recovery_database_artifact",
+            "envelope",
+            "manifest",
+            "custody_record",
+            "complete_set",
+            "remove_",
+            "delete",
+            "cleanup",
+            "retry",
+        ] {
+            assert!(
+                !composition.contains(forbidden),
+                "forbidden policy duplication: {forbidden}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capacity_success_checks_shutdown_then_immediately_creates_directories_on_worker() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_second_recovery_volume_selection_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        let capacity_owner = dispatch
+            .find("MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes")
+            .unwrap();
+        let shutdown = dispatch[capacity_owner..]
+            .find("migration_shutdown_requested")
+            .unwrap()
+            + capacity_owner;
+        let creation = dispatch
+            .find("prepare_recovery_set_directories(source, roots)")
+            .unwrap();
+        assert!(capacity_owner < shutdown && shutdown < creation);
+        assert!(!dispatch[capacity_owner..creation].contains("run_on_main_thread"));
+        assert!(!dispatch[capacity_owner..creation].contains("select_native_recovery_volume_root"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_success_is_worker_only_unpublished_and_keeps_migration_unresolved() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        const LIB: &str = include_str!("lib.rs");
+        let owner = SOURCE
+            .split_once("enum MigrationWorkerParkedOwnership")
+            .unwrap()
+            .1
+            .split_once("enum MigrationWorkerRetryOutcome")
+            .unwrap()
+            .0;
+        assert!(owner.contains("RecoverySetDirectoriesPrepared"));
+        assert!(
+            owner.contains("source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup")
+        );
+        assert!(owner.contains("directories: TwoRetainedRecoverySetDirectories"));
+
+        let dispatch = SOURCE
+            .split_once("fn run_second_recovery_volume_selection_dispatch")
+            .unwrap()
+            .1
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .0;
+        let directory_creation = dispatch
+            .find("prepare_recovery_set_directories(source, roots)")
+            .unwrap();
+        const PARK_CALL: &str = "self.park_migration_worker(owner, control, exclusivity, app)";
+        let park = dispatch[directory_creation..].find(PARK_CALL).unwrap() + directory_creation;
+        let directory_success = &dispatch[directory_creation..park + PARK_CALL.len()];
+        assert!(directory_success.contains(PARK_CALL));
+        assert!(!directory_success.contains("drop(exclusivity)"));
+        for forbidden in [
+            "publish",
+            "execute",
+            "restore",
+            "finish_migration_preparation_worker",
+        ] {
+            assert!(!directory_success.contains(forbidden));
+        }
+
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let directory_state = parking
+            .split_once(
+                "MigrationWorkerParkedOwnership::RecoverySetDirectoriesPrepared { .. } => {",
+            )
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        assert!(directory_state.contains("RecoverySetDirectoriesRetainedAwaitingFirstPublication"));
+        assert!(!directory_state.contains("migration_work_resolved = true"));
+        assert!(!directory_state.contains("drop(exclusivity)"));
+        assert!(!LIB.contains("RecoverySetDirectoriesRetainedAwaitingFirstPublication"));
+        assert!(!LIB.contains("RecoverySetDirectoriesPrepared"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_success_shutdown_drops_directories_then_uses_canonical_source_close_chain() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let retry = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("fn retry_migration_preparation_failure")
+            .unwrap()
+            .0;
+        let prepared = retry
+            .split_once("MigrationWorkerParkedOwnership::RecoverySetDirectoriesPrepared")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        let drop_directories = prepared.find("drop(directories)").unwrap();
+        let abort = prepared.find("source.abort_for_shutdown()").unwrap();
+        let close = prepared.find("shutdown.retry_source_close()").unwrap();
+        assert!(drop_directories < abort && abort < close);
+        assert!(prepared.contains("MigrationWorkerParkedOwnership::PreparedShutdown(shutdown)"));
+        for forbidden in ["remove_", "delete", "cleanup", "publish", "create_"] {
+            assert!(!prepared.contains(forbidden));
         }
     }
 }
