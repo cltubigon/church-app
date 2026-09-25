@@ -1089,10 +1089,26 @@ mod tests {
     #[test]
     fn capacity_transition_has_no_getters_or_mutation_publication_surface() {
         let source = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
-        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let capacity = production
+            .split_once("pub(super) fn validate_two_recovery_volume_root_capacities")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn validate_recovery_volume_capacities_for_lifecycle")
+            .unwrap()
+            .0;
+        let facade = production
+            .split_once("pub(crate) fn validate_recovery_volume_capacities_for_lifecycle")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn create_recovery_set_directories_for_lifecycle")
+            .unwrap()
+            .0;
         let lifecycle = include_str!("application_lifecycle.rs");
         let crate_root = include_str!("lib.rs");
-        assert!(!production.contains("application_lifecycle"));
+        assert!(!capacity.contains("application_lifecycle"));
+        assert!(!facade.contains("application_lifecycle"));
+        assert!(facade.contains("validate_two_recovery_volume_root_capacities(required, roots)"));
         assert!(production.contains(
             "use crate::production_database_migration_recovery_envelope::RecoverySetRequiredBytes;"
         ));
@@ -1119,7 +1135,7 @@ mod tests {
             "fn custody_owner(",
         ] {
             assert!(
-                !production.contains(forbidden),
+                !capacity.contains(forbidden) && !facade.contains(forbidden),
                 "unexpected surface: {forbidden}"
             );
         }
@@ -1650,7 +1666,14 @@ mod tests {
     #[test]
     fn source_boundary_is_private_non_serializable_and_reuses_existing_proofs() {
         let source = include_str!("windows_retained_eligible_ntfs_recovery_volume_root.rs");
-        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let primitive = production
+            .split_once("pub(super) struct RetainedEligibleNtfsRecoveryVolumeRoot")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn retain_and_separate_first_recovery_volume")
+            .unwrap()
+            .0;
         let eligibility = include_str!("windows_external_recovery_device_eligibility.rs");
         let topology = include_str!("windows_retained_volume_topology.rs");
 
@@ -1668,7 +1691,6 @@ mod tests {
                 .contains("#[path = \"windows_retained_eligible_ntfs_recovery_volume_root.rs\"]")
         );
         for forbidden in [
-            "pub(crate)",
             "pub fn ",
             "Serialize",
             "Deserialize",
@@ -1683,7 +1705,7 @@ mod tests {
             "PhysicalDrive",
         ] {
             assert!(
-                !production.contains(forbidden),
+                !primitive.contains(forbidden),
                 "unexpected production surface: {forbidden}"
             );
         }
@@ -1701,5 +1723,21 @@ mod tests {
         assert!(!production.contains("IOCTL_STORAGE_GET_DEVICE_NUMBER"));
         assert!(!production.contains("IOCTL_STORAGE_QUERY_PROPERTY"));
         assert!(!production.contains("IOCTL_STORAGE_GET_HOTPLUG_INFO"));
+        for approved in [
+            "pub(crate) struct NativeSelectedRecoveryVolumeRoot",
+            "pub(crate) struct RecoveryVolumeRootSeparatedFromProductionStorage",
+            "pub(crate) struct TwoRecoveryVolumeRootsSeparatedFromProductionStorage",
+            "pub(crate) struct TwoCapacityValidatedRecoveryVolumeRoots",
+            "pub(crate) fn retain_and_separate_first_recovery_volume",
+            "pub(crate) fn retain_and_separate_second_recovery_volume",
+            "pub(crate) fn validate_recovery_volume_capacities_for_lifecycle",
+            "pub(crate) fn create_recovery_set_directories_for_lifecycle",
+            "pub(crate) fn publish_first_recovery_database_artifact",
+        ] {
+            assert!(
+                production.contains(approved),
+                "missing approved facade: {approved}"
+            );
+        }
     }
 }

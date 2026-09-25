@@ -1537,13 +1537,62 @@ mod ownership_tests {
             1,
             "only the private lifecycle worker reservation may begin revalidation"
         );
-        assert!(!production_lifecycle.contains("validate_full_integrity("));
-        assert!(
-            !production_lifecycle.contains("prepare_production_database_migration_full_integrity")
+        assert_eq!(
+            production_lifecycle
+                .matches("prepare_authorized_production_database_migration(&app, authorized)")
+                .count(),
+            1
         );
-        assert!(
-            !production_lifecycle.contains("stage_encrypted_production_database_migration_backup")
-        );
+        for approved_layer_d_transition in [
+            "prepare_first_recovery_volume(source, outcome)",
+            "prepare_second_recovery_volume(source, first_root, outcome)",
+            "prepare_recovery_volume_capacities(source, roots)",
+            "prepare_recovery_set_directories(source, roots)",
+            "publish_first_recovery_database(",
+            "publish_first_recovery_envelope(published)",
+            "publish_first_recovery_manifest(published)",
+        ] {
+            assert!(
+                production_lifecycle.contains(approved_layer_d_transition),
+                "missing approved lifecycle transition: {approved_layer_d_transition}"
+            );
+        }
+        let preparation = production
+            .split_once("pub(super) fn prepare_authorized_production_database_migration")
+            .unwrap()
+            .1
+            .split_once("impl FullIntegrityValidatedProductionDatabaseMigrationHandoff")
+            .unwrap()
+            .0;
+        for approved_preparation in [
+            "authorized.validate_full_integrity()",
+            "prepare_production_database_migration_backup_stage(app)",
+            "stage_encrypted_production_database_migration_backup(",
+            "verify_production_database_migration_recovery_envelope(encrypted_stage)",
+            "prepare_migration_recovery_key_custody(",
+        ] {
+            assert!(
+                preparation.contains(approved_preparation),
+                "missing approved preparation: {approved_preparation}"
+            );
+        }
+        for forbidden in [
+            "execute_production_database_migration",
+            "restore_production_database",
+            "resume_migration",
+            "repair_migration",
+            "cleanup_migration",
+            "delete_migration",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "forbidden current behavior: {forbidden}"
+            );
+            assert!(
+                !production_lifecycle.contains(forbidden),
+                "forbidden lifecycle behavior: {forbidden}"
+            );
+        }
 
         let bridge = production
             .split_once("impl AuthorizedProductionDatabaseMigrationHandoff {")

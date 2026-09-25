@@ -763,7 +763,7 @@ mod tests {
         >());
         assert!(needs_drop::<SecondRecoveryManifestArtifactPublicationFailure>());
         let source = include_str!("second_recovery_manifest_artifact.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         assert!(production.contains(
             "mut prior: FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,"
         ));
@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn publication_uses_original_source_second_destination_and_not_first_manifest() {
         let source = include_str!("second_recovery_manifest_artifact.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         for required in [
             "prepare_recovery_set_manifest_v1",
             "observe_recovery_database_source",
@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn publication_order_and_terminal_close_policy_are_locked() {
         let source = include_str!("second_recovery_manifest_artifact.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         let publication = production
             .split_once("pub(crate) fn publish_second_recovery_manifest_artifact")
             .unwrap()

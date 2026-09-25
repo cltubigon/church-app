@@ -731,15 +731,16 @@ mod tests {
     #[test]
     fn source_surface_is_private_non_authorizing_and_uses_no_physical_drive_open() {
         let source = include_str!("windows_retained_volume_topology.rs");
-        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let primitive = production.split_once("const FINAL_PATH_FLAGS").unwrap().1;
         assert!(production.contains("trusted_retained_source: &File"));
         assert!(
             production.contains("#[path = \"windows_external_recovery_device_eligibility.rs\"]")
         );
         assert!(production.contains("mod windows_external_recovery_device_eligibility;"));
-        assert!(!production.contains("pub fn "));
-        assert!(!production.contains("fn retained_volume("));
-        let proof_impl = production
+        assert!(!primitive.contains("pub fn "));
+        assert!(!primitive.contains("fn retained_volume("));
+        let proof_impl = primitive
             .split_once("impl RetainedVolumeSinglePhysicalDeviceObservation {")
             .unwrap()
             .1;
@@ -753,9 +754,9 @@ mod tests {
         assert!(!proof_impl.contains("FnOnce"));
         assert!(!proof_impl.contains("FnMut"));
         assert!(!proof_impl.contains("Fn("));
-        assert!(!production.contains("serde"));
-        assert!(!production.contains("tauri"));
-        assert!(!production.contains("PhysicalDrive"));
+        assert!(!primitive.contains("serde"));
+        assert!(!primitive.contains("tauri"));
+        assert!(!primitive.contains("PhysicalDrive"));
         assert!(!production.contains("std::path::Path"));
         for forbidden in [
             "removable",
@@ -764,7 +765,7 @@ mod tests {
             "migration",
             "restore",
         ] {
-            assert!(!production.to_ascii_lowercase().contains(forbidden));
+            assert!(!primitive.to_ascii_lowercase().contains(forbidden));
         }
     }
 

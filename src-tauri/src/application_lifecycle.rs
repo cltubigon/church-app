@@ -4433,7 +4433,7 @@ mod tests {
         );
 
         const SOURCE: &str = include_str!("application_lifecycle.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production = SOURCE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
         let debug_helper = production
             .split_once(
                 "#[cfg(all(windows, debug_assertions))]\nfn setup_worker_result_for_terminal_failure",
@@ -4473,7 +4473,7 @@ mod tests {
     #[test]
     fn release_setup_path_has_no_terminal_failure_diagnostic_emission() {
         const SOURCE: &str = include_str!("application_lifecycle.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production = SOURCE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
         let release_helper = production
             .split_once(
                 "#[cfg(all(windows, not(debug_assertions)))]\nfn setup_worker_result_for_terminal_failure",
@@ -6710,7 +6710,7 @@ mod tests {
     #[test]
     fn setup_root_selection_is_debug_only_and_reuses_the_startup_selector() {
         const SOURCE: &str = include_str!("application_lifecycle.rs");
-        let production_source = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production_source = SOURCE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
         let debug_selection = production_source
             .split_once("#[cfg(all(windows, debug_assertions))]\nfn select_setup_root")
             .unwrap()
@@ -6893,7 +6893,7 @@ mod tests {
             .split_once("fn prepare_first_recovery_volume")
             .unwrap()
             .1
-            .split_once("fn retry_migration_worker_ownership")
+            .split_once("fn prepare_second_recovery_volume")
             .unwrap()
             .0;
         assert!(preparation.contains("NativeRecoveryVolumeSelectionOutcome::Cancelled"));
@@ -6939,7 +6939,7 @@ mod tests {
             .split_once("MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared")
             .unwrap()
             .1
-            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .split_once("MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared")
             .unwrap()
             .0;
         let drop_root = prepared.find("drop(first_root)").unwrap();
@@ -7026,26 +7026,30 @@ mod tests {
             .split_once("fn park_migration_worker")
             .unwrap()
             .0;
+        let scheduling = dispatch
+            .split_once("let mut shutdown_requested = false;")
+            .unwrap()
+            .0;
         for required in [
             "app.run_on_main_thread",
             "get_webview_window(\"main\")",
             "window.hwnd()",
             "select_native_recovery_volume_root",
-            "MigrationWorkerCommand::Shutdown",
-            "drop(outcome)",
             "FirstRecoveryVolumePrepared",
             "source",
             "first_root",
             "exclusivity",
         ] {
             assert!(
-                dispatch.contains(required),
+                scheduling.contains(required),
                 "missing dispatch contract: {required}"
             );
         }
+        assert!(dispatch.contains("MigrationWorkerCommand::Shutdown"));
+        assert!(dispatch.contains("drop(outcome)"));
         for forbidden in ["from_test_path", "PathBuf", "cleanup", "delete", "publish"] {
             assert!(
-                !dispatch.contains(forbidden),
+                !scheduling.contains(forbidden),
                 "unexpected dispatch behavior: {forbidden}"
             );
         }
@@ -7054,7 +7058,7 @@ mod tests {
             .split_once("fn prepare_second_recovery_volume")
             .unwrap()
             .1
-            .split_once("fn retry_migration_worker_ownership")
+            .split_once("fn prepare_recovery_volume_capacities")
             .unwrap()
             .0;
         for required in [
@@ -7158,7 +7162,7 @@ mod tests {
             .split_once("MigrationWorkerParkedOwnership::TwoRecoveryVolumesPrepared")
             .unwrap()
             .1
-            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .split_once("MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes")
             .unwrap()
             .0;
         let drop_roots = prepared.find("drop(roots)").unwrap();
@@ -7179,7 +7183,7 @@ mod tests {
             .split_once("fn prepare_recovery_volume_capacities")
             .unwrap()
             .1
-            .split_once("fn retry_migration_worker_ownership")
+            .split_once("fn prepare_recovery_set_directories")
             .unwrap()
             .0;
 
@@ -7221,7 +7225,7 @@ mod tests {
             .split_once("fn prepare_recovery_volume_capacities")
             .unwrap()
             .1
-            .split_once("fn retry_migration_worker_ownership")
+            .split_once("fn prepare_recovery_set_directories")
             .unwrap()
             .0;
         let source_failure = composition
@@ -7300,7 +7304,7 @@ mod tests {
             .split_once("MigrationWorkerParkedOwnership::CapacityValidatedRecoveryVolumes")
             .unwrap()
             .1
-            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .split_once("MigrationWorkerParkedOwnership::RecoverySetDirectoriesPrepared")
             .unwrap()
             .0;
         let drop_roots = validated.find("drop(roots)").unwrap();

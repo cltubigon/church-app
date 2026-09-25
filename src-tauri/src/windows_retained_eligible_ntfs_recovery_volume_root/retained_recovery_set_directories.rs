@@ -1194,6 +1194,10 @@ mod tests {
             .split_once("#[cfg(test)]\npub(crate) fn retained_recovery_set_directories_for_test")
             .unwrap()
             .0;
+        let primitive = production
+            .split_once("pub(super) struct RetainedRecoverySetDirectory")
+            .unwrap()
+            .1;
         for required in [
             "CreateDirectoryW",
             "FindFirstFileW",
@@ -1204,13 +1208,9 @@ mod tests {
             "FILE_ID_INFO",
             ".roots\n                .revalidate()",
         ] {
-            assert!(
-                production.contains(required),
-                "missing boundary: {required}"
-            );
+            assert!(primitive.contains(required), "missing boundary: {required}");
         }
         for forbidden in [
-            "pub(crate)",
             "pub fn ",
             "Serialize",
             "Deserialize",
@@ -1233,11 +1233,14 @@ mod tests {
             "fn child(",
         ] {
             assert!(
-                !production.contains(forbidden),
+                !primitive.contains(forbidden),
                 "forbidden surface: {forbidden}"
             );
         }
-        assert_eq!(production.matches("CreateDirectoryW(").count(), 1);
-        assert!(production.contains("fixed_child_path(&initial_parent.normalized_root)"));
+        assert_eq!(primitive.matches("CreateDirectoryW(").count(), 1);
+        assert!(primitive.contains("fixed_child_path(&initial_parent.normalized_root)"));
+        assert_eq!(production.matches("pub(crate)").count(), 2);
+        assert!(production.contains("pub(crate) use first_recovery_database_artifact::"));
+        assert!(production.contains("pub(crate) enum FirstRecoveryDatabasePublicationOutcome"));
     }
 }

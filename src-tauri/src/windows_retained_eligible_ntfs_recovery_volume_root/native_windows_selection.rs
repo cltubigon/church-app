@@ -348,7 +348,7 @@ mod tests {
         );
 
         let parent = include_str!("../windows_retained_eligible_ntfs_recovery_volume_root.rs");
-        let production = parent.split_once("#[cfg(test)]").unwrap().0;
+        let production = parent.split_once("#[cfg(test)]\nmod tests").unwrap().0;
         let constructor = production
             .split_once("fn from_native_volume_guid_root(")
             .unwrap()
@@ -368,7 +368,7 @@ mod tests {
         }
         assert!(!production.contains("from_test_path"));
         let owner_declaration = production
-            .split_once("pub(super) struct NativeSelectedRecoveryVolumeRoot")
+            .split_once("pub(crate) struct NativeSelectedRecoveryVolumeRoot")
             .unwrap()
             .0
             .lines()
@@ -382,10 +382,27 @@ mod tests {
         );
         assert!(
             parent
-                .split_once("#[cfg(test)]")
+                .split_once("#[cfg(test)]\nmod tests")
                 .unwrap()
                 .1
                 .contains("from_test_path(selected: PathBuf)")
         );
+        let owner = production
+            .split_once("pub(crate) struct NativeSelectedRecoveryVolumeRoot {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(owner.contains("selected: PathBuf"));
+        for forbidden in [
+            "pub selected",
+            "fn path(",
+            "fn raw_handle(",
+            "Serialize",
+            "Deserialize",
+        ] {
+            assert!(!production.contains(forbidden));
+        }
     }
 }

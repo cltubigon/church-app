@@ -674,7 +674,7 @@ mod tests {
         >());
         assert!(needs_drop::<SecondRecoveryEnvelopeArtifactPublicationFailure>());
         let source = include_str!("second_recovery_envelope_artifact.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         assert!(
             production
                 .contains("mut prior: FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,")
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn publication_uses_original_source_second_destination_and_shared_hardening() {
         let source = include_str!("second_recovery_envelope_artifact.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         for required in [
             "with_verified_recovery_envelope_bytes",
             ".second.initial_child",
@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn second_writer_uses_shared_terminal_close_without_fabricating_retry_ownership() {
         let source = include_str!("second_recovery_envelope_artifact.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         let close_transition = production
             .split_once("envelope_publication::close_writer(writer)")
             .unwrap()

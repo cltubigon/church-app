@@ -516,7 +516,7 @@ mod tests {
         >());
         assert!(needs_drop::<SecondRecoveryDatabaseArtifactPublicationFailure>());
         let source = include_str!("second_recovery_database_artifact.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         assert!(production.contains("mut first_complete_set: FirstCompleteRecoverySetVerified,"));
         assert!(production.contains("first_complete_set: FirstCompleteRecoverySetVerified"));
         assert!(production.contains("second_database: RetainedSecondRecoveryDatabaseArtifact"));
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn transition_uses_original_source_second_destination_and_shared_hardening() {
         let source = include_str!("second_recovery_database_artifact.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         for required in [
             ".source\n        .observe_recovery_database_source()",
             ".source\n        .stream_recovery_database_source",

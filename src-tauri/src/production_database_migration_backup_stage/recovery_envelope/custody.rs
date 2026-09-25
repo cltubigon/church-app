@@ -1047,7 +1047,7 @@ mod tests {
         let transition = declaration_region(
             production,
             "pub(crate) fn abort_before_exposure_for_shutdown",
-            "#[cfg(test)]\n    fn encoded_for_test",
+            "    #[cfg(test)]",
         );
         assert!(transition.contains("drop(encoded)"));
         assert!(transition.contains("drop(recovery_key_material)"));
