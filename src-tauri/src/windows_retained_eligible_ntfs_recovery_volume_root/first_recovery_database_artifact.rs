@@ -82,7 +82,7 @@ impl RetainedFirstRecoveryDatabaseArtifact {
     }
 }
 
-pub(super) struct FirstRecoveryDatabaseArtifactPublished {
+pub(crate) struct FirstRecoveryDatabaseArtifactPublished {
     source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     destinations: TwoRetainedRecoverySetDirectories,
     first_database: RetainedFirstRecoveryDatabaseArtifact,
@@ -94,6 +94,17 @@ enum FirstRecoveryDatabaseArtifactRevalidationError {
 }
 
 impl FirstRecoveryDatabaseArtifactPublished {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+        let Self {
+            source,
+            destinations: _destinations,
+            first_database: _first_database,
+        } = self;
+        source
+    }
+
     fn revalidate_for_envelope_publication(
         &mut self,
         expected_length: u64,
@@ -1245,6 +1256,97 @@ mod tests {
         fs::rename(&second, &moved_second).unwrap();
 
         let retained_source = accepts_fresh_destination_selection_source(retained_source);
+        let shutdown = retained_source.abort_for_shutdown();
+        let _source_close_outcome = shutdown.retry_source_close();
+        drop(source_root);
+    }
+
+    #[test]
+    fn success_abandonment_is_consuming_source_only_and_filesystem_inert() {
+        const SOURCE: &str = include_str!("first_recovery_database_artifact.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
+        let abandonment = production
+            .split_once("pub(crate) fn abandon_published_destination_and_retain_source")
+            .unwrap()
+            .1
+            .split_once("fn revalidate_for_envelope_publication")
+            .unwrap()
+            .0;
+        for required in [
+            "self",
+            "source,",
+            "destinations: _destinations",
+            "first_database: _first_database",
+        ] {
+            assert!(abandonment.contains(required));
+        }
+        for forbidden in [
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "set_len",
+            "truncate",
+            "write",
+            "create",
+            "open",
+            "verify",
+            "publish_first_recovery_envelope_artifact",
+            "retry",
+        ] {
+            assert!(
+                !abandonment.contains(forbidden),
+                "unexpected operation: {forbidden}"
+            );
+        }
+        assert!(abandonment.trim_end().ends_with("source\n    }"));
+        assert!(!abandonment.contains("Result<"));
+        assert!(!abandonment.contains("Option<"));
+        assert!(!abandonment.contains("TwoRetainedRecoverySetDirectories"));
+        assert!(!abandonment.contains("RetainedFirstRecoveryDatabaseArtifact"));
+    }
+
+    #[test]
+    fn successful_publication_abandonment_returns_source_and_leaves_bytes_untouched() {
+        let (source_root, _stage_root, source) = custody_verified_source();
+        let original_observation = source.observe_recovery_database_source().unwrap();
+        let destination_root = TestRoot::create("published-abandonment");
+        let first = destination_root.path().join("first");
+        let second = destination_root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let destinations =
+            super::super::retained_recovery_set_directories_for_test(&first, &second);
+
+        let published = publish_first_recovery_database_artifact(source, destinations).unwrap();
+        let published_path = first.join(PRODUCTION_DATABASE_FILENAME);
+        let published_bytes = fs::read(&published_path).unwrap();
+        assert_eq!(
+            published_bytes.len() as u64,
+            original_observation.database_byte_length
+        );
+        assert_eq!(
+            <[u8; 32]>::from(Sha256::digest(&published_bytes)),
+            original_observation.database_sha256
+        );
+        assert_eq!(fs::read_dir(&second).unwrap().count(), 0);
+
+        let retained_source = published.abandon_published_destination_and_retain_source();
+        assert!(
+            retained_source.observe_recovery_database_source().unwrap() == original_observation
+        );
+        assert_eq!(fs::read(&published_path).unwrap(), published_bytes);
+
+        let moved_published = first.join("published-database-moved-by-test.db");
+        fs::rename(&published_path, &moved_published).unwrap();
+        let moved_first = destination_root.path().join("first-moved-by-test");
+        fs::rename(&first, &moved_first).unwrap();
+        let moved_second = destination_root.path().join("second-moved-by-test");
+        fs::rename(&second, &moved_second).unwrap();
+        assert_eq!(
+            fs::read(moved_first.join("published-database-moved-by-test.db")).unwrap(),
+            published_bytes
+        );
+
         let shutdown = retained_source.abort_for_shutdown();
         let _source_close_outcome = shutdown.retry_source_close();
         drop(source_root);

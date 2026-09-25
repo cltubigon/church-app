@@ -3,6 +3,31 @@
 #[path = "first_recovery_database_artifact.rs"]
 mod first_recovery_database_artifact;
 
+pub(crate) use first_recovery_database_artifact::FirstRecoveryDatabaseArtifactPublished;
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum FirstRecoveryDatabasePublicationOutcome {
+    Published(FirstRecoveryDatabaseArtifactPublished),
+    Source(
+        crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    ),
+}
+
+pub(super) fn publish_first_recovery_database_artifact(
+    source: crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    destinations: TwoRetainedRecoverySetDirectories,
+) -> FirstRecoveryDatabasePublicationOutcome {
+    match first_recovery_database_artifact::publish_first_recovery_database_artifact(
+        source,
+        destinations,
+    ) {
+        Ok(published) => FirstRecoveryDatabasePublicationOutcome::Published(published),
+        Err(failure) => FirstRecoveryDatabasePublicationOutcome::Source(
+            failure.abandon_partial_destination_and_retain_source(),
+        ),
+    }
+}
+
 use std::{
     ffi::c_void,
     fmt,

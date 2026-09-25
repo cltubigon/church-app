@@ -53,6 +53,9 @@ mod retained_recovery_set_directories;
 pub(crate) use native_windows_selection::{
     NativeRecoveryVolumeSelectionOutcome, select_native_recovery_volume_root,
 };
+pub(crate) use retained_recovery_set_directories::{
+    FirstRecoveryDatabaseArtifactPublished, FirstRecoveryDatabasePublicationOutcome,
+};
 
 pub(crate) struct TwoRetainedRecoverySetDirectories {
     _directories: retained_recovery_set_directories::TwoRetainedRecoverySetDirectories,
@@ -818,6 +821,16 @@ pub(crate) fn create_recovery_set_directories_for_lifecycle(
         .map_err(|failure| {
             drop(failure);
         })
+}
+
+pub(crate) fn publish_first_recovery_database_artifact(
+    source: crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
+    destinations: TwoRetainedRecoverySetDirectories,
+) -> FirstRecoveryDatabasePublicationOutcome {
+    retained_recovery_set_directories::publish_first_recovery_database_artifact(
+        source,
+        destinations._directories,
+    )
 }
 
 #[cfg(test)]
