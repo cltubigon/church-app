@@ -718,6 +718,14 @@ impl SecondCompleteRecoverySetVerificationFailure {
     ) -> SecondCompleteRecoverySetVerificationOutcome {
         verify_second_complete_recovery_set(self.published, entered_record)
     }
+
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.published
+            .abandon_published_destination_and_retain_source()
+    }
 }
 
 impl SecondCompleteRecoverySetVerificationVerifierCloseFailure {
@@ -743,6 +751,16 @@ impl SecondCompleteRecoverySetVerificationVerifierCloseFailure {
                 },
             ),
         }
+    }
+}
+
+impl SecondCompleteRecoverySetVerified {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.published
+            .abandon_published_destination_and_retain_source()
     }
 }
 
@@ -842,5 +860,35 @@ mod tests {
         assert!(!production.contains("FindFirstFileW"));
         assert!(!production.contains("FindNextFileW"));
         assert!(!production.contains("FindClose"));
+    }
+
+    #[test]
+    fn failure_and_success_abandonment_are_consuming_source_only_and_filesystem_inert() {
+        let source = include_str!("second_complete_recovery_set_verification.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let failure = production
+            .split_once("impl SecondCompleteRecoverySetVerificationFailure")
+            .unwrap()
+            .1
+            .split_once("impl SecondCompleteRecoverySetVerificationVerifierCloseFailure")
+            .unwrap()
+            .0;
+        let success = production
+            .split_once("impl SecondCompleteRecoverySetVerified")
+            .unwrap()
+            .1;
+        for abandonment in [failure, success] {
+            assert!(abandonment.contains("abandon_published_destination_and_retain_source"));
+            assert!(abandonment.contains("self.published"));
+            for forbidden in [
+                "remove_file",
+                "remove_dir",
+                "rename",
+                "aggregate",
+                "verify_final",
+            ] {
+                assert!(!abandonment.contains(forbidden));
+            }
+        }
     }
 }

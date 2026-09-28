@@ -42,6 +42,8 @@ pub(crate) use windows_retained_eligible_ntfs_recovery_volume_root::{
     FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
     FirstRecoverySetRecoveredKeyVerified, NativeRecoveryVolumeSelectionOutcome,
     RecoveryVolumeRootSeparatedFromProductionStorage, RetainAndSeparateSecondRecoveryVolumeError,
+    SecondCompleteRecoverySetVerificationFailure, SecondCompleteRecoverySetVerificationOutcome,
+    SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
     TwoCapacityValidatedRecoveryVolumeRoots, TwoRecoveryVolumeRootsSeparatedFromProductionStorage,
     TwoRetainedRecoverySetDirectories, create_recovery_set_directories_for_lifecycle,
     publish_first_recovery_database_artifact, publish_first_recovery_envelope_artifact,
@@ -50,6 +52,7 @@ pub(crate) use windows_retained_eligible_ntfs_recovery_volume_root::{
     retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
     select_native_recovery_volume_root, validate_recovery_volume_capacities_for_lifecycle,
     verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
+    verify_second_complete_recovery_set,
 };
 
 const FINAL_PATH_FLAGS: GETFINALPATHNAMEBYHANDLE_FLAGS = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;
