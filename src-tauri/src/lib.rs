@@ -15,6 +15,7 @@ mod database_key_protected_payload;
 mod database_metadata_contract;
 mod database_metadata_correspondence;
 mod database_metadata_decoding;
+mod database_schema_v2_contract;
 #[allow(dead_code)]
 #[cfg(windows)]
 mod first_time_setup_exclusivity;
