@@ -686,6 +686,34 @@ impl SecondRecoveryManifestArtifactPublicationFailure {
     pub(crate) fn category(&self) -> SecondRecoveryManifestArtifactPublicationError {
         self.error
     }
+
+    pub(crate) fn abandon_partial_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            prior,
+            partial_second_manifest,
+            ..
+        } = self;
+        drop(partial_second_manifest);
+        prior.abandon_published_destination_and_retain_source()
+    }
+}
+
+impl FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            prior,
+            second_manifest,
+            ..
+        } = self;
+        drop(second_manifest);
+        prior.abandon_published_destination_and_retain_source()
+    }
 }
 
 #[cfg(test)]
@@ -898,6 +926,40 @@ mod tests {
             .0;
         assert!(!close_transition.contains("partial.file = Some(writer)"));
         assert!(!production.contains("File::from_raw_handle"));
+    }
+
+    #[test]
+    fn failure_and_success_abandonment_are_source_only_and_filesystem_inert() {
+        let source = include_str!("second_recovery_manifest_artifact.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let failure = production
+            .split_once("pub(crate) fn abandon_partial_destination_and_retain_source")
+            .unwrap()
+            .1
+            .split_once("impl FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished")
+            .unwrap()
+            .0;
+        let success = production
+            .split_once("impl FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished")
+            .unwrap()
+            .1;
+        for abandonment in [failure, success] {
+            assert!(abandonment.contains("abandon_published_destination_and_retain_source()"));
+            assert!(abandonment.contains("drop("));
+            for forbidden in [
+                "remove_file",
+                "remove_dir",
+                "rename",
+                "copy(",
+                "create_new_manifest",
+                "verify_second_complete_recovery_set",
+            ] {
+                assert!(
+                    !abandonment.contains(forbidden),
+                    "abandonment mutates or advances publication: {forbidden}"
+                );
+            }
+        }
     }
 
     #[test]
