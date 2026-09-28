@@ -54,6 +54,7 @@ pub(crate) use native_windows_selection::{
     NativeRecoveryVolumeSelectionOutcome, select_native_recovery_volume_root,
 };
 pub(crate) use retained_recovery_set_directories::{
+    FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
     FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
     FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
     FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
@@ -68,10 +69,12 @@ pub(crate) use retained_recovery_set_directories::{
     FirstRecoverySetRecoveredKeyVerified, SecondCompleteRecoverySetVerificationFailure,
     SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
+    TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     publish_first_recovery_envelope_artifact, publish_first_recovery_manifest_artifact,
     publish_second_recovery_database_artifact, publish_second_recovery_envelope_artifact,
-    publish_second_recovery_manifest_artifact, verify_first_complete_recovery_set,
-    verify_first_recovery_set_with_reentered_recovery_key, verify_second_complete_recovery_set,
+    publish_second_recovery_manifest_artifact, verify_final_two_recovery_sets,
+    verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
+    verify_second_complete_recovery_set,
 };
 
 pub(crate) struct TwoRetainedRecoverySetDirectories {

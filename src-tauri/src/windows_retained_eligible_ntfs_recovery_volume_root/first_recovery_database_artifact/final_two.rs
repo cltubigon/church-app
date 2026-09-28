@@ -312,6 +312,24 @@ impl FinalTwoSetVerificationFailure {
     pub(crate) fn retry(self) -> FinalTwoSetVerificationOutcome {
         verify_final_two_recovery_sets(self.second_complete_set)
     }
+
+    pub(crate) fn abandon_published_destinations_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.second_complete_set
+            .abandon_published_destination_and_retain_source()
+    }
+}
+
+impl TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn abandon_published_destinations_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.second_complete_set
+            .abandon_published_destination_and_retain_source()
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +375,30 @@ mod tests {
         }
         assert!(production.contains("FinalTwoSetVerificationFailure([REDACTED])"));
         assert!(production.contains("retry(self)"));
+    }
+
+    #[test]
+    fn failure_and_success_abandonment_are_consuming_source_only_and_filesystem_inert() {
+        let source = include_str!("final_two.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        for owner in [
+            "impl FinalTwoSetVerificationFailure",
+            "impl TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup",
+        ] {
+            let abandonment = production.split_once(owner).unwrap().1;
+            assert!(abandonment.contains("abandon_published_destinations_and_retain_source"));
+            assert!(abandonment.contains("self.second_complete_set"));
+            assert!(abandonment.contains("abandon_published_destination_and_retain_source"));
+        }
+        for forbidden in [
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "truncate",
+            "overwrite",
+        ] {
+            assert!(!production.contains(forbidden));
+        }
     }
 
     #[test]

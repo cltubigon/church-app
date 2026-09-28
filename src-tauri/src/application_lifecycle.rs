@@ -107,6 +107,7 @@ use crate::{
         installation_evidence_persistence_paths, production_database_path,
     },
     windows_retained_volume_topology::{
+        FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
         FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
         FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
         FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
@@ -124,14 +125,16 @@ use crate::{
         SecondCompleteRecoverySetVerificationOutcome,
         SecondCompleteRecoverySetVerificationVerifierCloseFailure,
         SecondCompleteRecoverySetVerified, TwoCapacityValidatedRecoveryVolumeRoots,
+        TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
         TwoRecoveryVolumeRootsSeparatedFromProductionStorage, TwoRetainedRecoverySetDirectories,
         create_recovery_set_directories_for_lifecycle, publish_first_recovery_database_artifact,
         publish_first_recovery_envelope_artifact, publish_first_recovery_manifest_artifact,
         publish_second_recovery_database_artifact, publish_second_recovery_envelope_artifact,
         publish_second_recovery_manifest_artifact, retain_and_separate_first_recovery_volume,
         retain_and_separate_second_recovery_volume, select_native_recovery_volume_root,
-        validate_recovery_volume_capacities_for_lifecycle, verify_first_complete_recovery_set,
-        verify_first_recovery_set_with_reentered_recovery_key, verify_second_complete_recovery_set,
+        validate_recovery_volume_capacities_for_lifecycle, verify_final_two_recovery_sets,
+        verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
+        verify_second_complete_recovery_set,
     },
 };
 
@@ -412,6 +415,8 @@ enum MigrationPreparationState {
     SecondRecoveryManifestPublishedAwaitingVerification,
     SecondRecoverySetVerifierCloseRetryRequired,
     SecondCompleteRecoverySetVerifiedAwaitingAggregateVerification,
+    FinalTwoSetVerificationRetryRequired,
+    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -432,6 +437,7 @@ enum MigrationWorkerCommand {
     RequestSecondRecoveryKeyReentry,
     SecondRecoveryKeyReentryCompleted(NativeRecoveryKeyReentryOutcome),
     RetrySecondRecoverySetVerifierClose,
+    RetryFinalTwoSetVerification,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -563,7 +569,8 @@ fn observe_pre_custody_dispatch_control(
         | Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification)
         | Ok(MigrationWorkerCommand::RequestSecondRecoveryKeyReentry)
         | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
-        | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose) => {
+        | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose)
+        | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => {
             PreCustodyDispatchControl::ImpossibleCustodyCompleted
         }
         Err(std::sync::mpsc::TryRecvError::Empty) => PreCustodyDispatchControl::NoCommand,
@@ -672,6 +679,10 @@ enum MigrationWorkerParkedOwnership {
         SecondCompleteRecoverySetVerificationVerifierCloseFailure,
     ),
     SecondCompleteRecoverySetVerified(SecondCompleteRecoverySetVerified),
+    FinalTwoSetVerificationFailure(FinalTwoSetVerificationFailure),
+    TwoCompleteRecoverySetsVerified(
+        TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    ),
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
 }
@@ -1123,6 +1134,15 @@ impl ApplicationLifecycle {
         self.request_migration_verification_retry(
             MigrationPreparationState::SecondRecoverySetVerifierCloseRetryRequired,
             MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose,
+        )
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn request_final_two_set_verification_retry(&self) -> bool {
+        self.request_migration_verification_retry(
+            MigrationPreparationState::FinalTwoSetVerificationRetryRequired,
+            MigrationWorkerCommand::RetryFinalTwoSetVerification,
         )
     }
 
@@ -1884,9 +1904,8 @@ impl ApplicationLifecycle {
                 | Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification)
                 | Ok(MigrationWorkerCommand::RequestSecondRecoveryKeyReentry)
                 | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
-                | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose) => {
-                    std::process::abort()
-                }
+                | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose)
+                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => std::process::abort(),
                 Err(_) => std::process::abort(),
             }
         }
@@ -2031,9 +2050,8 @@ impl ApplicationLifecycle {
                 | Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification)
                 | Ok(MigrationWorkerCommand::RequestSecondRecoveryKeyReentry)
                 | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
-                | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose) => {
-                    std::process::abort()
-                }
+                | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose)
+                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => std::process::abort(),
                 Err(_) => std::process::abort(),
             }
         }
@@ -2285,9 +2303,8 @@ impl ApplicationLifecycle {
                 | Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification)
                 | Ok(MigrationWorkerCommand::RequestSecondRecoveryKeyReentry)
                 | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
-                | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose) => {
-                    std::process::abort()
-                }
+                | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose)
+                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => std::process::abort(),
                 Err(_) => std::process::abort(),
             }
         }
@@ -2540,7 +2557,7 @@ impl ApplicationLifecycle {
                                 ) => failure.retry_with_fresh_record(entered_record),
                                 _ => std::process::abort(),
                             };
-                            continue_second_complete_recovery_set_verification(outcome)
+                            self.continue_second_complete_recovery_set_verification(outcome)
                         }
                     };
                     if self.lock().migration_shutdown_requested {
@@ -2586,6 +2603,23 @@ impl ApplicationLifecycle {
                     }
                     owner => owner,
                 }
+            }
+            owner => owner,
+        }
+    }
+
+    #[cfg(windows)]
+    fn continue_second_complete_recovery_set_verification(
+        &self,
+        outcome: SecondCompleteRecoverySetVerificationOutcome,
+    ) -> MigrationWorkerParkedOwnership {
+        let owner = classify_second_complete_recovery_set_verification(outcome);
+        if self.lock().migration_shutdown_requested {
+            return owner;
+        }
+        match owner {
+            MigrationWorkerParkedOwnership::SecondCompleteRecoverySetVerified(verified) => {
+                continue_final_two_set_verification(verify_final_two_recovery_sets(verified))
             }
             owner => owner,
         }
@@ -2688,6 +2722,12 @@ impl ApplicationLifecycle {
             MigrationWorkerParkedOwnership::SecondCompleteRecoverySetVerified(_) => {
                 MigrationPreparationState::SecondCompleteRecoverySetVerifiedAwaitingAggregateVerification
             }
+            MigrationWorkerParkedOwnership::FinalTwoSetVerificationFailure(_) => {
+                MigrationPreparationState::FinalTwoSetVerificationRetryRequired
+            }
+            MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(_) => {
+                MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
+            }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
             }
@@ -2775,8 +2815,28 @@ impl ApplicationLifecycle {
                     else {
                         std::process::abort()
                     };
-                    owner =
-                        continue_second_complete_recovery_set_verification(failure.retry_close());
+                    owner = self
+                        .continue_second_complete_recovery_set_verification(failure.retry_close());
+                    if self.lock().migration_shutdown_requested {
+                        self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
+                        return;
+                    }
+                    self.lock().migration_preparation =
+                        migration_verification_preparation_state(&owner);
+                    continue;
+                }
+                Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => {
+                    self.lock().migration_verification_retry_outstanding = false;
+                    if self.lock().migration_shutdown_requested {
+                        self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
+                        return;
+                    }
+                    let MigrationWorkerParkedOwnership::FinalTwoSetVerificationFailure(failure) =
+                        owner
+                    else {
+                        std::process::abort()
+                    };
+                    owner = continue_final_two_set_verification(failure.retry());
                     if self.lock().migration_shutdown_requested {
                         self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
                         return;
@@ -3360,7 +3420,7 @@ fn classify_first_complete_recovery_set_verification(
 }
 
 #[cfg(windows)]
-fn continue_second_complete_recovery_set_verification(
+fn classify_second_complete_recovery_set_verification(
     outcome: SecondCompleteRecoverySetVerificationOutcome,
 ) -> MigrationWorkerParkedOwnership {
     match outcome {
@@ -3372,6 +3432,20 @@ fn continue_second_complete_recovery_set_verification(
         }
         SecondCompleteRecoverySetVerificationOutcome::VerifierCloseFailed(failure) => {
             MigrationWorkerParkedOwnership::SecondRecoverySetVerifierCloseFailure(failure)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn continue_final_two_set_verification(
+    outcome: FinalTwoSetVerificationOutcome,
+) -> MigrationWorkerParkedOwnership {
+    match outcome {
+        FinalTwoSetVerificationOutcome::Verified(verified) => {
+            MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(verified)
+        }
+        FinalTwoSetVerificationOutcome::Failed(failure) => {
+            MigrationWorkerParkedOwnership::FinalTwoSetVerificationFailure(failure)
         }
     }
 }
@@ -3416,6 +3490,12 @@ fn migration_verification_preparation_state(
         }
         MigrationWorkerParkedOwnership::SecondCompleteRecoverySetVerified(_) => {
             MigrationPreparationState::SecondCompleteRecoverySetVerifiedAwaitingAggregateVerification
+        }
+        MigrationWorkerParkedOwnership::FinalTwoSetVerificationFailure(_) => {
+            MigrationPreparationState::FinalTwoSetVerificationRetryRequired
+        }
+        MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(_) => {
+            MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
         }
         _ => std::process::abort(),
     }
@@ -3712,6 +3792,12 @@ fn retry_migration_worker_ownership(
         }
         MigrationWorkerParkedOwnership::SecondCompleteRecoverySetVerified(verified) => {
             shutdown_recovery_source(verified.abandon_published_destination_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::FinalTwoSetVerificationFailure(failure) => {
+            shutdown_recovery_source(failure.abandon_published_destinations_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(verified) => {
+            shutdown_recovery_source(verified.abandon_published_destinations_and_retain_source())
         }
         MigrationWorkerParkedOwnership::TerminalFailure(failure) => {
             match failure.retry_source_close() {
@@ -9275,24 +9361,115 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn second_set_success_remains_the_unconsumed_aggregate_predecessor() {
+    fn second_set_success_is_consumed_only_by_the_canonical_final_aggregate_verifier() {
         const SOURCE: &str = include_str!("application_lifecycle.rs");
         const FINAL_TWO: &str = include_str!(
             "windows_retained_eligible_ntfs_recovery_volume_root/first_recovery_database_artifact/final_two.rs"
         );
         let composition = SOURCE
-            .split_once("fn continue_second_complete_recovery_set_verification")
+            .split_once("fn continue_second_complete_recovery_set_verification(")
             .unwrap()
             .1
-            .split_once("fn migration_verification_preparation_state")
+            .split_once("fn finish_or_park_migration_shutdown")
             .unwrap()
             .0;
         assert!(
-            composition
-                .contains("SecondCompleteRecoverySetVerificationOutcome::Verified(verified)")
+            composition.contains("classify_second_complete_recovery_set_verification(outcome)")
         );
         assert!(composition.contains("SecondCompleteRecoverySetVerified(verified)"));
-        assert!(!composition.contains("verify_final_two_recovery_sets"));
+        assert!(composition.contains("migration_shutdown_requested"));
+        assert!(composition.contains("verify_final_two_recovery_sets(verified)"));
+        assert_eq!(
+            composition
+                .matches("verify_final_two_recovery_sets(")
+                .count(),
+            1
+        );
         assert!(FINAL_TWO.contains("mut second_complete_set: SecondCompleteRecoverySetVerified"));
+        for forbidden in [
+            "ReenteredMigrationRecoveryKeyCustodyV1",
+            "request_native_recovery_key_reentry",
+            "execute_migration",
+        ] {
+            assert!(!composition.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aggregate_failure_retry_and_success_are_parked_unresolved_and_exclusive() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let owners = SOURCE
+            .split_once("enum MigrationWorkerParkedOwnership")
+            .unwrap()
+            .1
+            .split_once("enum MigrationWorkerRetryOutcome")
+            .unwrap()
+            .0;
+        assert!(owners.contains("FinalTwoSetVerificationFailure(FinalTwoSetVerificationFailure)"));
+        assert!(owners.contains("TwoCompleteRecoverySetsVerified("));
+
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let parked_state = parking.split_once("loop {").unwrap().0;
+        assert!(parked_state.contains("FinalTwoSetVerificationRetryRequired"));
+        assert!(parked_state.contains("TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"));
+        assert!(!parked_state.contains("migration_work_resolved = true"));
+        assert!(!parked_state.contains("drop(exclusivity)"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aggregate_retry_is_explicit_canonical_and_not_a_busy_loop() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let retry = parking
+            .split_once("Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification)")
+            .unwrap()
+            .1
+            .split_once("Ok(MigrationWorkerCommand::CustodyCompleted(_))")
+            .unwrap()
+            .0;
+        assert!(retry.contains("migration_shutdown_requested"));
+        assert!(retry.contains("FinalTwoSetVerificationFailure(failure)"));
+        assert!(retry.contains("failure.retry()"));
+        assert!(!retry.contains("verify_final_two_recovery_sets"));
+        assert_eq!(retry.matches("failure.retry()").count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aggregate_shutdown_is_source_only_and_never_starts_migration_or_cleanup() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let shutdown = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        for owner in [
+            "SecondCompleteRecoverySetVerified(verified)",
+            "FinalTwoSetVerificationFailure(failure)",
+            "TwoCompleteRecoverySetsVerified(verified)",
+        ] {
+            assert!(shutdown.contains(owner));
+        }
+        assert!(shutdown.contains("abandon_published_destinations_and_retain_source()"));
+        assert!(shutdown.contains("shutdown_recovery_source("));
+        for forbidden in ["remove_", "delete", "cleanup", "execute_migration"] {
+            assert!(!shutdown.contains(forbidden));
+        }
     }
 }
