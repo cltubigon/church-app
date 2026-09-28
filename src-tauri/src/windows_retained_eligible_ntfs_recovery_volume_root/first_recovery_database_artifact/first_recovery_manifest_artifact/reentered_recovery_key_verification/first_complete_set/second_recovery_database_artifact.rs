@@ -461,6 +461,34 @@ impl SecondRecoveryDatabaseArtifactPublicationFailure {
     pub(crate) fn category(&self) -> SecondRecoveryDatabaseArtifactPublicationError {
         self.error
     }
+
+    pub(crate) fn abandon_partial_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            first_complete_set,
+            partial_second_database,
+            ..
+        } = self;
+        drop(partial_second_database);
+        first_complete_set.abandon_published_destination_and_retain_source()
+    }
+}
+
+impl FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            first_complete_set,
+            second_database,
+            ..
+        } = self;
+        drop(second_database);
+        first_complete_set.abandon_published_destination_and_retain_source()
+    }
 }
 
 #[cfg(test)]
@@ -598,6 +626,40 @@ mod tests {
                 production.contains(required),
                 "missing shared primitive: {required}"
             );
+        }
+    }
+
+    #[test]
+    fn abandonment_is_consuming_source_only_and_filesystem_inert() {
+        let source = include_str!("second_recovery_database_artifact.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let failure = production
+            .split_once("pub(crate) fn abandon_partial_destination_and_retain_source")
+            .unwrap()
+            .1
+            .split_once("impl FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished")
+            .unwrap()
+            .0;
+        let success = production
+            .split_once("impl FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished")
+            .unwrap()
+            .1;
+        for abandonment in [failure, success] {
+            assert!(abandonment.contains("abandon_published_destination_and_retain_source()"));
+            assert!(abandonment.contains("drop("));
+            for forbidden in [
+                "remove_file",
+                "remove_dir",
+                "rename",
+                "copy(",
+                "create_new_database",
+                "publish_second_recovery_envelope_artifact",
+            ] {
+                assert!(
+                    !abandonment.contains(forbidden),
+                    "abandonment mutates or advances publication: {forbidden}"
+                );
+            }
         }
     }
 }

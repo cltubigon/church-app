@@ -6,6 +6,7 @@ mod first_complete_recovery_set_verification;
 #[allow(unused_imports)]
 pub(crate) use first_complete_recovery_set_verification::{
     FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
+    FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
     FirstCompleteRecoverySetAndSecondRecoverySetArtifactsPublished,
     FirstCompleteRecoverySetVerificationError, FirstCompleteRecoverySetVerificationFailure,
     FirstCompleteRecoverySetVerificationOutcome, FirstCompleteRecoverySetVerified,
@@ -13,8 +14,8 @@ pub(crate) use first_complete_recovery_set_verification::{
     SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
-    verify_final_two_recovery_sets, verify_first_complete_recovery_set,
-    verify_second_complete_recovery_set,
+    publish_second_recovery_database_artifact, verify_final_two_recovery_sets,
+    verify_first_complete_recovery_set, verify_second_complete_recovery_set,
 };
 
 use std::{
@@ -998,6 +999,89 @@ mod tests {
             super::super::super::super::FirstRecoveryDatabaseArtifactPublicationError::ArtifactConflict
         );
         drop(published);
+    }
+
+    #[test]
+    fn second_database_success_abandons_to_original_source_without_mutation() {
+        use crate::storage_foundation::PRODUCTION_DATABASE_FILENAME;
+
+        let mut fixture = published_fixture();
+        let first_before = first_set_bytes(&fixture);
+        let second_database_path = fixture
+            ._destination_root
+            .path()
+            .join("second")
+            .join(PRODUCTION_DATABASE_FILENAME);
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("the recovered-key predecessor must verify");
+        };
+        let FirstCompleteRecoverySetVerificationOutcome::Verified(complete) =
+            verify_first_complete_recovery_set(verified)
+        else {
+            panic!("the first set must independently verify as complete");
+        };
+        let published =
+            first_complete_recovery_set_verification::publish_second_recovery_database_artifact(
+                complete,
+            )
+            .unwrap();
+        let second_before = fs::read(&second_database_path).unwrap();
+        let source = published.abandon_published_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&fixture), first_before);
+        assert_eq!(fs::read(&second_database_path).unwrap(), second_before);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
+    }
+
+    #[test]
+    fn second_database_failure_abandons_to_original_source_and_preserves_conflict() {
+        use crate::storage_foundation::PRODUCTION_DATABASE_FILENAME;
+
+        let mut fixture = published_fixture();
+        let first_before = first_set_bytes(&fixture);
+        let second_database_path = fixture
+            ._destination_root
+            .path()
+            .join("second")
+            .join(PRODUCTION_DATABASE_FILENAME);
+        let conflict = b"synthetic existing second database conflict";
+        fs::write(&second_database_path, conflict).unwrap();
+        let entered =
+            ReenteredMigrationRecoveryKeyCustodyV1::from_bounded_entry(&fixture.record).unwrap();
+        let FirstRecoverySetRecoveredKeyVerificationOutcome::Verified(verified) =
+            verify_first_recovery_set_with_reentered_recovery_key(
+                fixture.published.take().unwrap(),
+                entered,
+            )
+        else {
+            panic!("the recovered-key predecessor must verify");
+        };
+        let FirstCompleteRecoverySetVerificationOutcome::Verified(complete) =
+            verify_first_complete_recovery_set(verified)
+        else {
+            panic!("the first set must independently verify as complete");
+        };
+        let failure =
+            first_complete_recovery_set_verification::publish_second_recovery_database_artifact(
+                complete,
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.category(),
+            first_complete_recovery_set_verification::SecondRecoveryDatabaseArtifactPublicationError::ArtifactConflict
+        );
+        let source = failure.abandon_partial_destination_and_retain_source();
+        assert_eq!(first_set_bytes(&fixture), first_before);
+        assert_eq!(fs::read(&second_database_path).unwrap(), conflict);
+        let shutdown = source.abort_for_shutdown();
+        let _close_outcome = shutdown.retry_source_close();
     }
 
     #[test]

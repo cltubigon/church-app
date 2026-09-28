@@ -309,6 +309,12 @@ Publication is fail-closed, create-new, and no-replace, with no merge, overwrite
 
 Shutdown prevents new Layer D work, destroys secrets and closes owned handles as required, retains only necessary close-only ownership, and starts no cleanup, replacement, migration, or new destination work. A complete first set remains complete after later failure or cancellation; a partial set remains partial and is neither resumed nor automatically deleted. Success is impossible unless two complete sets were already independently verified. Process-local capability state is lost on restart, and existing disk artifacts require revalidation before any later adoption. The application-local encrypted source remains retained at every zero/one/two-set outcome; only Layer F may later own retention or deletion.
 
+## Current second recovery-database lifecycle boundary
+
+The migration worker now advances exact `FirstCompleteRecoverySetVerified` through only the canonical second-database publisher. That publisher streams the retained original encrypted migration-backup source into only the second retained recovery-set directory; set 1 is immutable evidence and is neither opened as the publication source nor copied. Success retains exact `FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished`, which is database-only and grants no second-envelope, manifest, complete-set, aggregate, migration, restore, or deletion authority.
+
+Shutdown before the call, ordinary publication failure, and shutdown after success all reduce safely representable ownership to only the original custody source through consuming abandonment. Destination and partial-artifact handles are released through RAII without filesystem mutation. The verified first set and any partial or complete second database remain in place. The shared explicit native-close boundary still aborts on ambiguous ownership; the lifecycle does not catch, translate, retry, or fabricate recoverable ownership from that terminal condition.
+
 ## Controlled-host harness safety boundary
 
 The Windows-test-only harness records no path, drive letter, volume GUID, device number, vendor/model/serial, username, SID, native code/text, environment-variable contents, or raw descriptor bytes. It never enumerates drives or sibling entries, formats or repartitions media, changes labels, reads unrelated content, retries with elevation, or converts a result into authority.

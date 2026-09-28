@@ -107,6 +107,7 @@ use crate::{
         installation_evidence_persistence_paths, production_database_path,
     },
     windows_retained_volume_topology::{
+        FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
         FirstCompleteRecoverySetVerificationFailure, FirstCompleteRecoverySetVerificationOutcome,
         FirstCompleteRecoverySetVerified, FirstRecoveryDatabaseAndEnvelopeArtifactsPublished,
         FirstRecoveryDatabaseArtifactPublished, FirstRecoveryDatabasePublicationOutcome,
@@ -121,9 +122,10 @@ use crate::{
         TwoRecoveryVolumeRootsSeparatedFromProductionStorage, TwoRetainedRecoverySetDirectories,
         create_recovery_set_directories_for_lifecycle, publish_first_recovery_database_artifact,
         publish_first_recovery_envelope_artifact, publish_first_recovery_manifest_artifact,
-        retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
-        select_native_recovery_volume_root, validate_recovery_volume_capacities_for_lifecycle,
-        verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
+        publish_second_recovery_database_artifact, retain_and_separate_first_recovery_volume,
+        retain_and_separate_second_recovery_volume, select_native_recovery_volume_root,
+        validate_recovery_volume_capacities_for_lifecycle, verify_first_complete_recovery_set,
+        verify_first_recovery_set_with_reentered_recovery_key,
     },
 };
 
@@ -399,6 +401,7 @@ enum MigrationPreparationState {
     FirstRecoverySetVerifierCloseRetryRequired,
     FirstCompleteRecoverySetVerificationRetryRequired,
     FirstCompleteRecoverySetVerifiedAwaitingSecondPublication,
+    SecondRecoveryDatabasePublishedAwaitingEnvelope,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -641,6 +644,7 @@ enum MigrationWorkerParkedOwnership {
     FirstRecoverySetRecoveredKeyVerified(FirstRecoverySetRecoveredKeyVerified),
     FirstCompleteRecoverySetVerificationFailure(FirstCompleteRecoverySetVerificationFailure),
     FirstCompleteRecoverySetVerified(FirstCompleteRecoverySetVerified),
+    SecondRecoveryDatabasePublished(FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished),
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
 }
@@ -2349,10 +2353,27 @@ impl ApplicationLifecycle {
                         verified,
                     );
                 }
-                classify_first_complete_recovery_set_verification(
+                self.continue_first_complete_recovery_set_verification(
                     verify_first_complete_recovery_set(verified),
                 )
             }
+        }
+    }
+
+    #[cfg(windows)]
+    fn continue_first_complete_recovery_set_verification(
+        &self,
+        outcome: FirstCompleteRecoverySetVerificationOutcome,
+    ) -> MigrationWorkerParkedOwnership {
+        let owner = classify_first_complete_recovery_set_verification(outcome);
+        if self.lock().migration_shutdown_requested {
+            return owner;
+        }
+        match owner {
+            MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerified(verified) => {
+                publish_second_recovery_database(verified)
+            }
+            owner => owner,
         }
     }
 
@@ -2435,6 +2456,9 @@ impl ApplicationLifecycle {
             MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerified(_) => {
                 MigrationPreparationState::FirstCompleteRecoverySetVerifiedAwaitingSecondPublication
             }
+            MigrationWorkerParkedOwnership::SecondRecoveryDatabasePublished(_) => {
+                MigrationPreparationState::SecondRecoveryDatabasePublishedAwaitingEnvelope
+            }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
             }
@@ -2501,7 +2525,7 @@ impl ApplicationLifecycle {
                     else {
                         std::process::abort()
                     };
-                    owner = classify_first_complete_recovery_set_verification(failure.retry());
+                    owner = self.continue_first_complete_recovery_set_verification(failure.retry());
                     if self.lock().migration_shutdown_requested {
                         self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
                         return;
@@ -3009,6 +3033,18 @@ fn publish_first_recovery_manifest(
 }
 
 #[cfg(windows)]
+fn publish_second_recovery_database(
+    verified: FirstCompleteRecoverySetVerified,
+) -> MigrationWorkerParkedOwnership {
+    match publish_second_recovery_database_artifact(verified) {
+        Ok(published) => MigrationWorkerParkedOwnership::SecondRecoveryDatabasePublished(published),
+        Err(failure) => MigrationWorkerParkedOwnership::Verified(
+            failure.abandon_partial_destination_and_retain_source(),
+        ),
+    }
+}
+
+#[cfg(windows)]
 fn classify_first_recovery_set_verification_failure(
     failure: FirstRecoverySetRecoveredKeyVerificationFailure,
 ) -> MigrationWorkerParkedOwnership {
@@ -3065,6 +3101,9 @@ fn migration_verification_preparation_state(
         }
         MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerified(_) => {
             MigrationPreparationState::FirstCompleteRecoverySetVerifiedAwaitingSecondPublication
+        }
+        MigrationWorkerParkedOwnership::SecondRecoveryDatabasePublished(_) => {
+            MigrationPreparationState::SecondRecoveryDatabasePublishedAwaitingEnvelope
         }
         _ => std::process::abort(),
     }
@@ -3329,6 +3368,9 @@ fn retry_migration_worker_ownership(
         }
         MigrationWorkerParkedOwnership::FirstCompleteRecoverySetVerified(verified) => {
             shutdown_recovery_source(verified.abandon_published_destination_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::SecondRecoveryDatabasePublished(published) => {
+            shutdown_recovery_source(published.abandon_published_destination_and_retain_source())
         }
         MigrationWorkerParkedOwnership::TerminalFailure(failure) => {
             match failure.retry_source_close() {
@@ -8516,7 +8558,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn complete_set_failure_retry_and_success_park_exact_canonical_owners() {
+    fn complete_set_failure_retry_and_success_continue_from_exact_canonical_owners() {
         const SOURCE: &str = include_str!("application_lifecycle.rs");
         let classification = SOURCE
             .split_once("fn classify_first_complete_recovery_set_verification")
@@ -8545,6 +8587,7 @@ mod tests {
             .unwrap()
             .0;
         assert!(retry.contains("failure.retry()"));
+        assert!(retry.contains("continue_first_complete_recovery_set_verification"));
         assert!(!retry.contains("verify_first_complete_recovery_set("));
 
         let states = SOURCE
@@ -8556,11 +8599,12 @@ mod tests {
             .0;
         assert!(states.contains("FirstCompleteRecoverySetVerificationRetryRequired"));
         assert!(states.contains("FirstCompleteRecoverySetVerifiedAwaitingSecondPublication"));
+        assert!(states.contains("SecondRecoveryDatabasePublishedAwaitingEnvelope"));
     }
 
     #[cfg(windows)]
     #[test]
-    fn verification_shutdowns_are_source_only_and_stop_before_set_two() {
+    fn verification_and_second_database_shutdowns_are_source_only() {
         const SOURCE: &str = include_str!("application_lifecycle.rs");
         let retry = SOURCE
             .split_once("fn retry_migration_worker_ownership")
@@ -8575,6 +8619,7 @@ mod tests {
             "FirstRecoverySetRecoveredKeyVerified",
             "FirstCompleteRecoverySetVerificationFailure",
             "FirstCompleteRecoverySetVerified",
+            "SecondRecoveryDatabasePublished",
         ] {
             assert!(retry.contains(owner));
         }
@@ -8585,6 +8630,81 @@ mod tests {
         for forbidden in ["remove_", "delete", "cleanup", "rename", "overwrite"] {
             assert!(!retry.contains(forbidden));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_database_lifecycle_uses_canonical_original_source_transition_only() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let continuation = SOURCE
+            .split_once("fn continue_first_complete_recovery_set_verification")
+            .unwrap()
+            .1
+            .split_once("fn finish_or_park_migration_shutdown")
+            .unwrap()
+            .0;
+        let publication = SOURCE
+            .split_once("fn publish_second_recovery_database(")
+            .unwrap()
+            .1
+            .split_once("fn classify_first_recovery_set_verification_failure")
+            .unwrap()
+            .0;
+        assert!(continuation.contains("FirstCompleteRecoverySetVerified(verified)"));
+        let shutdown = continuation.find("migration_shutdown_requested").unwrap();
+        let publish = continuation
+            .find("publish_second_recovery_database(verified)")
+            .unwrap();
+        assert!(shutdown < publish);
+        assert!(publication.contains("publish_second_recovery_database_artifact(verified)"));
+        assert!(publication.contains("SecondRecoveryDatabasePublished(published)"));
+        assert!(publication.contains("abandon_partial_destination_and_retain_source()"));
+        assert!(publication.contains("MigrationWorkerParkedOwnership::Verified("));
+        for forbidden in [
+            "fs::copy",
+            "std::fs",
+            "publish_second_recovery_envelope_artifact",
+            "publish_second_recovery_manifest_artifact",
+            "verify_second_complete_recovery_set",
+            "verify_final_two_recovery_sets",
+            "execute_migration",
+        ] {
+            assert!(!continuation.contains(forbidden));
+            assert!(!publication.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_database_success_is_parked_unresolved_and_exclusive() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let owner = SOURCE
+            .split_once("enum MigrationWorkerParkedOwnership")
+            .unwrap()
+            .1
+            .split_once("enum MigrationWorkerRetryOutcome")
+            .unwrap()
+            .0;
+        assert!(owner.contains(
+            "SecondRecoveryDatabasePublished(FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished)"
+        ));
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let state = parking
+            .split_once("MigrationWorkerParkedOwnership::SecondRecoveryDatabasePublished(_)")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        assert!(state.contains("SecondRecoveryDatabasePublishedAwaitingEnvelope"));
+        assert!(!state.contains("migration_work_resolved = true"));
+        assert!(!state.contains("drop(exclusivity)"));
     }
 
     #[cfg(windows)]
@@ -8614,6 +8734,7 @@ mod tests {
             .unwrap()
             .0;
         assert!(state.contains("FirstCompleteRecoverySetVerifiedAwaitingSecondPublication"));
+        assert!(state.contains("SecondRecoveryDatabasePublishedAwaitingEnvelope"));
         assert!(!state.contains("ReenteredMigrationRecoveryKeyCustodyV1"));
     }
 }
