@@ -15,6 +15,8 @@ mod database_key_protected_payload;
 mod database_metadata_contract;
 mod database_metadata_correspondence;
 mod database_metadata_decoding;
+#[cfg(windows)]
+mod database_restart_version_classification;
 mod database_schema_v2_contract;
 #[allow(dead_code)]
 #[cfg(windows)]

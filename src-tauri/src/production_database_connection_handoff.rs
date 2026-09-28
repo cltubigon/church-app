@@ -285,7 +285,7 @@ pub(crate) use full_integrity_validation::{
 pub(crate) use full_integrity_validation::prepare_production_database_migration_full_integrity_using_for_test;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const PRODUCTION_DATABASE_APPLICATION_ID: i32 = 0x4348_4150;
+pub(crate) const PRODUCTION_DATABASE_APPLICATION_ID: i32 = 0x4348_4150;
 const MAIN_DATABASE_NAME: &str = "main";
 const WIN32_VFS_NAME: &str = "win32";
 const GUARD_ACCESS: u32 = FILE_READ_ATTRIBUTES | FILE_READ_DATA;

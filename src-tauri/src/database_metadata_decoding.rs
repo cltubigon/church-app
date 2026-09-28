@@ -111,6 +111,13 @@ impl<'a> RawDatabaseMetadataRow<'a> {
             database_created_at: parse_u64(self.database_created_at)?,
         })
     }
+
+    pub(crate) fn observed_versions(self) -> Result<(u16, u16), MetadataParseError> {
+        Ok((
+            parse_u16(self.metadata_contract_version)?,
+            parse_u16(self.database_schema_version)?,
+        ))
+    }
 }
 
 impl fmt::Debug for RawDatabaseMetadataRow<'_> {
@@ -139,13 +146,39 @@ impl<'a> ParsedUntrustedDatabaseMetadataV1<'a> {
     pub(crate) fn validate_structure(
         self,
     ) -> Result<DatabaseMetadataContractV1, MetadataValidationError> {
+        let validated = self.validate_structure_for_schema_version(1)?;
+
+        Ok(DatabaseMetadataContractV1::new(
+            validated.permanent_application_identifier,
+            validated.parish_identifier,
+            validated.installation_identifier,
+            validated.installation_generation,
+            validated.recovery_replacement_generation,
+            validated.database_key_generation_identifier,
+            validated.setup_publication_identifier,
+            validated.database_created_at,
+        ))
+    }
+
+    pub(crate) fn validate_restart_structure(
+        self,
+        expected_database_schema_version: u16,
+    ) -> Result<(), MetadataValidationError> {
+        self.validate_structure_for_schema_version(expected_database_schema_version)
+            .map(|_| ())
+    }
+
+    fn validate_structure_for_schema_version(
+        self,
+        expected_database_schema_version: u16,
+    ) -> Result<ValidatedDatabaseMetadataFields, MetadataValidationError> {
         if self.singleton_id != 1 {
             return Err(MetadataValidationError::WrongSingleton);
         }
         if self.metadata_contract_version != 1 {
             return Err(MetadataValidationError::UnsupportedMetadataVersion);
         }
-        if self.database_schema_version != 1 {
+        if self.database_schema_version != expected_database_schema_version {
             return Err(MetadataValidationError::UnsupportedSchemaVersion);
         }
 
@@ -174,7 +207,7 @@ impl<'a> ParsedUntrustedDatabaseMetadataV1<'a> {
             SetupPublicationIdentifier::from_bytes(self.setup_publication_identifier)
                 .map_err(|_| MetadataValidationError::InvalidSetupPublicationIdentifier)?;
 
-        Ok(DatabaseMetadataContractV1::new(
+        Ok(ValidatedDatabaseMetadataFields {
             permanent_application_identifier,
             parish_identifier,
             installation_identifier,
@@ -182,9 +215,22 @@ impl<'a> ParsedUntrustedDatabaseMetadataV1<'a> {
             recovery_replacement_generation,
             database_key_generation_identifier,
             setup_publication_identifier,
-            DatabaseCreationTimestamp::from_unix_milliseconds(self.database_created_at),
-        ))
+            database_created_at: DatabaseCreationTimestamp::from_unix_milliseconds(
+                self.database_created_at,
+            ),
+        })
     }
+}
+
+struct ValidatedDatabaseMetadataFields {
+    permanent_application_identifier: PermanentApplicationIdentifier,
+    parish_identifier: ParishIdentifier,
+    installation_identifier: InstallationIdentifier,
+    installation_generation: InstallationGeneration,
+    recovery_replacement_generation: RecoveryOrReplacementGeneration,
+    database_key_generation_identifier: DatabaseKeyGenerationIdentifier,
+    setup_publication_identifier: SetupPublicationIdentifier,
+    database_created_at: DatabaseCreationTimestamp,
 }
 
 impl fmt::Debug for ParsedUntrustedDatabaseMetadataV1<'_> {
