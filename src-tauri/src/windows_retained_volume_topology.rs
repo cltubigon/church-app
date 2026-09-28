@@ -29,6 +29,7 @@ mod windows_external_recovery_device_eligibility;
 mod windows_retained_eligible_ntfs_recovery_volume_root;
 
 pub(crate) use windows_retained_eligible_ntfs_recovery_volume_root::{
+    FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
     FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
     FirstCompleteRecoverySetVerificationFailure, FirstCompleteRecoverySetVerificationOutcome,
     FirstCompleteRecoverySetVerified, FirstRecoveryDatabaseAndEnvelopeArtifactsPublished,
@@ -44,9 +45,10 @@ pub(crate) use windows_retained_eligible_ntfs_recovery_volume_root::{
     TwoRetainedRecoverySetDirectories, create_recovery_set_directories_for_lifecycle,
     publish_first_recovery_database_artifact, publish_first_recovery_envelope_artifact,
     publish_first_recovery_manifest_artifact, publish_second_recovery_database_artifact,
-    retain_and_separate_first_recovery_volume, retain_and_separate_second_recovery_volume,
-    select_native_recovery_volume_root, validate_recovery_volume_capacities_for_lifecycle,
-    verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
+    publish_second_recovery_envelope_artifact, retain_and_separate_first_recovery_volume,
+    retain_and_separate_second_recovery_volume, select_native_recovery_volume_root,
+    validate_recovery_volume_capacities_for_lifecycle, verify_first_complete_recovery_set,
+    verify_first_recovery_set_with_reentered_recovery_key,
 };
 
 const FINAL_PATH_FLAGS: GETFINALPATHNAMEBYHANDLE_FLAGS = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;

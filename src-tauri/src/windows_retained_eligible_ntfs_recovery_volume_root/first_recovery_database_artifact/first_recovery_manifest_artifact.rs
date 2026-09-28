@@ -5,6 +5,7 @@ mod reentered_recovery_key_verification;
 
 #[allow(unused_imports)]
 pub(crate) use reentered_recovery_key_verification::{
+    FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
     FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
     FirstCompleteRecoverySetVerificationError, FirstCompleteRecoverySetVerificationFailure,
     FirstCompleteRecoverySetVerificationOutcome, FirstCompleteRecoverySetVerified,
@@ -12,7 +13,8 @@ pub(crate) use reentered_recovery_key_verification::{
     FirstRecoverySetRecoveredKeyVerificationOutcome,
     FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
     FirstRecoverySetRecoveredKeyVerified, publish_second_recovery_database_artifact,
-    verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
+    publish_second_recovery_envelope_artifact, verify_first_complete_recovery_set,
+    verify_first_recovery_set_with_reentered_recovery_key,
 };
 
 use std::{

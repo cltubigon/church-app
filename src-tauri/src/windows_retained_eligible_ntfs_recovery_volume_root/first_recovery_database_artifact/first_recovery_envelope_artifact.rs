@@ -4,6 +4,7 @@
 mod first_recovery_manifest_artifact;
 
 pub(crate) use first_recovery_manifest_artifact::{
+    FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished,
     FirstCompleteRecoverySetAndSecondDatabaseArtifactPublished,
     FirstCompleteRecoverySetVerificationFailure, FirstCompleteRecoverySetVerificationOutcome,
     FirstCompleteRecoverySetVerified, FirstRecoverySetArtifactsPublished,
@@ -11,7 +12,8 @@ pub(crate) use first_recovery_manifest_artifact::{
     FirstRecoverySetRecoveredKeyVerificationOutcome,
     FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
     FirstRecoverySetRecoveredKeyVerified, publish_second_recovery_database_artifact,
-    verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
+    publish_second_recovery_envelope_artifact, verify_first_complete_recovery_set,
+    verify_first_recovery_set_with_reentered_recovery_key,
 };
 
 use std::{

@@ -613,6 +613,34 @@ impl SecondRecoveryEnvelopeArtifactPublicationFailure {
     pub(crate) fn category(&self) -> SecondRecoveryEnvelopeArtifactPublicationError {
         self.error
     }
+
+    pub(crate) fn abandon_partial_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            prior,
+            partial_second_envelope,
+            ..
+        } = self;
+        drop(partial_second_envelope);
+        prior.abandon_published_destination_and_retain_source()
+    }
+}
+
+impl FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished {
+    pub(crate) fn abandon_published_destination_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        let Self {
+            prior,
+            second_envelope,
+            ..
+        } = self;
+        drop(second_envelope);
+        prior.abandon_published_destination_and_retain_source()
+    }
 }
 
 #[cfg(test)]
@@ -748,6 +776,44 @@ mod tests {
         assert!(!production.contains("if let Err(writer) = envelope_publication::close_writer"));
         assert!(!production.contains("remove_file"));
         assert!(!production.contains("remove_dir"));
+    }
+
+    #[test]
+    fn abandonment_is_consuming_source_only_and_filesystem_inert() {
+        let source = include_str!("second_recovery_envelope_artifact.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let failure = production
+            .split_once("pub(crate) fn abandon_partial_destination_and_retain_source")
+            .unwrap()
+            .1
+            .split_once(
+                "impl FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished",
+            )
+            .unwrap()
+            .0;
+        let success = production
+            .split_once(
+                "impl FirstCompleteRecoverySetAndSecondDatabaseAndEnvelopeArtifactsPublished",
+            )
+            .unwrap()
+            .1;
+        for abandonment in [failure, success] {
+            assert!(abandonment.contains("abandon_published_destination_and_retain_source()"));
+            assert!(abandonment.contains("drop("));
+            for forbidden in [
+                "remove_file",
+                "remove_dir",
+                "rename",
+                "copy(",
+                "create_new_envelope",
+                "publish_second_recovery_manifest_artifact",
+            ] {
+                assert!(
+                    !abandonment.contains(forbidden),
+                    "abandonment mutates or advances publication: {forbidden}"
+                );
+            }
+        }
     }
 
     #[test]
