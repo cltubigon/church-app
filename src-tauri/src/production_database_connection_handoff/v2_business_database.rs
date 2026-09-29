@@ -9,12 +9,16 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, SyncSender, sync_channel},
+        mpsc::{Receiver, Sender, SyncSender, sync_channel},
     },
     thread::{self, JoinHandle},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OpenFlags, config::DbConfig};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, config::DbConfig,
+    params,
+};
 
 use crate::{
     database_key_active_wrapper_loader::load_active_database_key_wrapper,
@@ -54,6 +58,161 @@ pub(crate) enum V2BusinessDatabaseActivationError {
     DatabaseUnavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BusinessFailure {
+    InvalidInput,
+    NotFound,
+    InvalidState,
+    ScheduleConflict,
+    ConcurrentChange,
+    DatabaseUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ServiceRequestId(i64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ScheduleOccurrenceId(i64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServiceCategory {
+    Baptism,
+    Confirmation,
+    WeddingMarriage,
+    BurialFuneral,
+    FirstCommunion,
+}
+
+impl ServiceCategory {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Baptism => "baptism",
+            Self::Confirmation => "confirmation",
+            Self::WeddingMarriage => "wedding_marriage",
+            Self::BurialFuneral => "burial_funeral",
+            Self::FirstCommunion => "first_communion",
+        }
+    }
+
+    fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "baptism" => Some(Self::Baptism),
+            "confirmation" => Some(Self::Confirmation),
+            "wedding_marriage" => Some(Self::WeddingMarriage),
+            "burial_funeral" => Some(Self::BurialFuneral),
+            "first_communion" => Some(Self::FirstCommunion),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RequestStatus {
+    Pending,
+    Scheduled,
+    Completed,
+    Cancelled,
+}
+
+impl RequestStatus {
+    fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "pending" => Some(Self::Pending),
+            "scheduled" => Some(Self::Scheduled),
+            "completed" => Some(Self::Completed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OccurrenceKind {
+    Primary,
+    Funeral,
+    Burial,
+}
+
+impl OccurrenceKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Funeral => "funeral",
+            Self::Burial => "burial",
+        }
+    }
+
+    fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "primary" => Some(Self::Primary),
+            "funeral" => Some(Self::Funeral),
+            "burial" => Some(Self::Burial),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CreateServiceRequest {
+    pub(crate) service_category: ServiceCategory,
+    pub(crate) requester_full_name: String,
+    pub(crate) requester_phone: String,
+    pub(crate) requester_email: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RequesterSnapshot {
+    pub(crate) full_name: String,
+    pub(crate) phone: String,
+    pub(crate) email: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ServiceRequestSummary {
+    pub(crate) id: ServiceRequestId,
+    pub(crate) service_category: ServiceCategory,
+    pub(crate) status: RequestStatus,
+    pub(crate) requester: RequesterSnapshot,
+    pub(crate) created_at: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ScheduleOccurrence {
+    pub(crate) id: ScheduleOccurrenceId,
+    pub(crate) kind: OccurrenceKind,
+    pub(crate) local_date: String,
+    pub(crate) local_time: String,
+    pub(crate) location: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ServiceRequestDetail {
+    pub(crate) request: ServiceRequestSummary,
+    pub(crate) occurrences: Vec<ScheduleOccurrence>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OccurrenceInput {
+    pub(crate) kind: OccurrenceKind,
+    pub(crate) local_date: String,
+    pub(crate) local_time: String,
+    pub(crate) location: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RescheduleOccurrenceInput {
+    pub(crate) local_date: String,
+    pub(crate) local_time: String,
+    pub(crate) location: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ScheduleOccupancyItem {
+    pub(crate) request_id: ServiceRequestId,
+    pub(crate) service_category: ServiceCategory,
+    pub(crate) occurrence: ScheduleOccurrence,
+}
+
 #[must_use = "the V2 business database activation outcome must be handled"]
 pub(crate) enum V2BusinessDatabaseActivationOutcome {
     Ready(OperationalV2BusinessDatabase),
@@ -76,7 +235,48 @@ pub(crate) struct OperationalV2BusinessDatabase {
     worker: Option<JoinHandle<ProductionDatabaseConnectionCloseOutcome>>,
 }
 
+#[allow(dead_code)] // Rust-only service calls are intentionally not wired to IPC yet.
 enum BusinessDatabaseCommand {
+    CreateRequest {
+        input: CreateServiceRequest,
+        reply: Sender<Result<ServiceRequestSummary, BusinessFailure>>,
+    },
+    GetRequest {
+        request_id: ServiceRequestId,
+        reply: Sender<Result<ServiceRequestDetail, BusinessFailure>>,
+    },
+    ListRequests(Sender<Result<Vec<ServiceRequestSummary>, BusinessFailure>>),
+    CreatePendingOccurrence {
+        request_id: ServiceRequestId,
+        input: OccurrenceInput,
+        reply: Sender<Result<ScheduleOccurrence, BusinessFailure>>,
+    },
+    UpdatePendingOccurrence {
+        request_id: ServiceRequestId,
+        occurrence_id: ScheduleOccurrenceId,
+        input: OccurrenceInput,
+        reply: Sender<Result<ScheduleOccurrence, BusinessFailure>>,
+    },
+    DeletePendingOccurrence {
+        request_id: ServiceRequestId,
+        occurrence_id: ScheduleOccurrenceId,
+        reply: Sender<Result<(), BusinessFailure>>,
+    },
+    ScheduleRequest {
+        request_id: ServiceRequestId,
+        reply: Sender<Result<(), BusinessFailure>>,
+    },
+    RescheduleOccurrence {
+        request_id: ServiceRequestId,
+        occurrence_id: ScheduleOccurrenceId,
+        input: RescheduleOccurrenceInput,
+        reply: Sender<Result<ScheduleOccurrence, BusinessFailure>>,
+    },
+    CompleteRequest {
+        request_id: ServiceRequestId,
+        reply: Sender<Result<(), BusinessFailure>>,
+    },
+    ListScheduleOccupancy(Sender<Result<Vec<ScheduleOccupancyItem>, BusinessFailure>>),
     #[cfg(test)]
     Probe(std::sync::mpsc::Sender<Result<(), V2BusinessDatabaseActivationError>>),
     #[cfg(test)]
@@ -95,7 +295,122 @@ impl fmt::Debug for OperationalV2BusinessDatabase {
     }
 }
 
+#[allow(dead_code)] // The next IPC slice will consume this sealed crate-private surface.
 impl OperationalV2BusinessDatabase {
+    fn request<T>(
+        &self,
+        build: impl FnOnce(Sender<Result<T, BusinessFailure>>) -> BusinessDatabaseCommand,
+    ) -> Result<T, BusinessFailure> {
+        let (reply, response) = std::sync::mpsc::channel();
+        let control = self
+            .control
+            .lock()
+            .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+        if !control.accepting {
+            return Err(BusinessFailure::DatabaseUnavailable);
+        }
+        control
+            .sender
+            .as_ref()
+            .ok_or(BusinessFailure::DatabaseUnavailable)?
+            .try_send(build(reply))
+            .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+        drop(control);
+        response
+            .recv()
+            .unwrap_or(Err(BusinessFailure::DatabaseUnavailable))
+    }
+
+    pub(crate) fn create_request(
+        &self,
+        input: CreateServiceRequest,
+    ) -> Result<ServiceRequestSummary, BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::CreateRequest { input, reply })
+    }
+
+    pub(crate) fn get_request(
+        &self,
+        request_id: ServiceRequestId,
+    ) -> Result<ServiceRequestDetail, BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::GetRequest { request_id, reply })
+    }
+
+    pub(crate) fn list_requests(&self) -> Result<Vec<ServiceRequestSummary>, BusinessFailure> {
+        self.request(BusinessDatabaseCommand::ListRequests)
+    }
+
+    pub(crate) fn create_pending_occurrence(
+        &self,
+        request_id: ServiceRequestId,
+        input: OccurrenceInput,
+    ) -> Result<ScheduleOccurrence, BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::CreatePendingOccurrence {
+            request_id,
+            input,
+            reply,
+        })
+    }
+
+    pub(crate) fn update_pending_occurrence(
+        &self,
+        request_id: ServiceRequestId,
+        occurrence_id: ScheduleOccurrenceId,
+        input: OccurrenceInput,
+    ) -> Result<ScheduleOccurrence, BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::UpdatePendingOccurrence {
+            request_id,
+            occurrence_id,
+            input,
+            reply,
+        })
+    }
+
+    pub(crate) fn delete_pending_occurrence(
+        &self,
+        request_id: ServiceRequestId,
+        occurrence_id: ScheduleOccurrenceId,
+    ) -> Result<(), BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::DeletePendingOccurrence {
+            request_id,
+            occurrence_id,
+            reply,
+        })
+    }
+
+    pub(crate) fn schedule_request(
+        &self,
+        request_id: ServiceRequestId,
+    ) -> Result<(), BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::ScheduleRequest { request_id, reply })
+    }
+
+    pub(crate) fn reschedule_occurrence(
+        &self,
+        request_id: ServiceRequestId,
+        occurrence_id: ScheduleOccurrenceId,
+        input: RescheduleOccurrenceInput,
+    ) -> Result<ScheduleOccurrence, BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::RescheduleOccurrence {
+            request_id,
+            occurrence_id,
+            input,
+            reply,
+        })
+    }
+
+    pub(crate) fn complete_request(
+        &self,
+        request_id: ServiceRequestId,
+    ) -> Result<(), BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::CompleteRequest { request_id, reply })
+    }
+
+    pub(crate) fn list_schedule_occupancy(
+        &self,
+    ) -> Result<Vec<ScheduleOccupancyItem>, BusinessFailure> {
+        self.request(BusinessDatabaseCommand::ListScheduleOccupancy)
+    }
+
     pub(crate) fn shutdown(self) -> ProductionDatabaseConnectionCloseOutcome {
         self.begin_shutdown();
         self.finish_shutdown()
@@ -350,7 +665,7 @@ fn start_worker(owner: ConnectionLifetimeOwner) -> V2BusinessDatabaseActivationO
 }
 
 fn run_worker(
-    owner: ConnectionLifetimeOwner,
+    mut owner: ConnectionLifetimeOwner,
     receiver: Receiver<BusinessDatabaseCommand>,
     shutdown_requested: &AtomicBool,
     #[cfg(test)] inject_close_failure: &AtomicBool,
@@ -359,7 +674,7 @@ fn run_worker(
         if shutdown_requested.load(Ordering::Acquire) {
             reject_command(command);
         } else {
-            process_command(&owner.connection, command);
+            process_command(&mut owner.connection, command);
         }
     }
     #[cfg(test)]
@@ -372,26 +687,113 @@ fn run_worker(
 }
 
 fn reject_command(command: BusinessDatabaseCommand) {
-    #[cfg(test)]
     match command {
+        BusinessDatabaseCommand::CreateRequest { reply, .. } => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        BusinessDatabaseCommand::GetRequest { reply, .. } => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        BusinessDatabaseCommand::ListRequests(reply) => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        BusinessDatabaseCommand::CreatePendingOccurrence { reply, .. }
+        | BusinessDatabaseCommand::UpdatePendingOccurrence { reply, .. }
+        | BusinessDatabaseCommand::RescheduleOccurrence { reply, .. } => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        BusinessDatabaseCommand::DeletePendingOccurrence { reply, .. }
+        | BusinessDatabaseCommand::ScheduleRequest { reply, .. }
+        | BusinessDatabaseCommand::CompleteRequest { reply, .. } => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        BusinessDatabaseCommand::ListScheduleOccupancy(reply) => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        #[cfg(test)]
         BusinessDatabaseCommand::Probe(reply) => {
             let _ = reply.send(Err(V2BusinessDatabaseActivationError::DatabaseUnavailable));
         }
+        #[cfg(test)]
         BusinessDatabaseCommand::Block { .. } => {}
+        #[cfg(test)]
         BusinessDatabaseCommand::VerifyForeignKeyViolation(reply) => {
             let _ = reply.send(false);
         }
     }
-    #[cfg(not(test))]
-    match command {}
 }
 
-fn process_command(_connection: &Connection, command: BusinessDatabaseCommand) {
-    #[cfg(test)]
+fn process_command(connection: &mut Connection, command: BusinessDatabaseCommand) {
     match command {
+        BusinessDatabaseCommand::CreateRequest { input, reply } => {
+            let _ = reply.send(create_request_on_connection(connection, input));
+        }
+        BusinessDatabaseCommand::GetRequest { request_id, reply } => {
+            let _ = reply.send(get_request_on_connection(connection, request_id));
+        }
+        BusinessDatabaseCommand::ListRequests(reply) => {
+            let _ = reply.send(list_requests_on_connection(connection));
+        }
+        BusinessDatabaseCommand::CreatePendingOccurrence {
+            request_id,
+            input,
+            reply,
+        } => {
+            let _ = reply.send(create_pending_occurrence_on_connection(
+                connection, request_id, input,
+            ));
+        }
+        BusinessDatabaseCommand::UpdatePendingOccurrence {
+            request_id,
+            occurrence_id,
+            input,
+            reply,
+        } => {
+            let _ = reply.send(update_pending_occurrence_on_connection(
+                connection,
+                request_id,
+                occurrence_id,
+                input,
+            ));
+        }
+        BusinessDatabaseCommand::DeletePendingOccurrence {
+            request_id,
+            occurrence_id,
+            reply,
+        } => {
+            let _ = reply.send(delete_pending_occurrence_on_connection(
+                connection,
+                request_id,
+                occurrence_id,
+            ));
+        }
+        BusinessDatabaseCommand::ScheduleRequest { request_id, reply } => {
+            let _ = reply.send(schedule_request_on_connection(connection, request_id));
+        }
+        BusinessDatabaseCommand::RescheduleOccurrence {
+            request_id,
+            occurrence_id,
+            input,
+            reply,
+        } => {
+            let _ = reply.send(reschedule_occurrence_on_connection(
+                connection,
+                request_id,
+                occurrence_id,
+                input,
+            ));
+        }
+        BusinessDatabaseCommand::CompleteRequest { request_id, reply } => {
+            let _ = reply.send(complete_request_on_connection(connection, request_id));
+        }
+        BusinessDatabaseCommand::ListScheduleOccupancy(reply) => {
+            let _ = reply.send(list_schedule_occupancy_on_connection(connection));
+        }
+        #[cfg(test)]
         BusinessDatabaseCommand::Probe(reply) => {
             let _ = reply.send(Ok(()));
         }
+        #[cfg(test)]
         BusinessDatabaseCommand::Block {
             started,
             release,
@@ -401,8 +803,9 @@ fn process_command(_connection: &Connection, command: BusinessDatabaseCommand) {
             let _ = release.recv();
             let _ = completed.send(());
         }
+        #[cfg(test)]
         BusinessDatabaseCommand::VerifyForeignKeyViolation(reply) => {
-            let rejected = _connection
+            let rejected = connection
                 .execute(
                     "INSERT INTO request_schedule_occurrences(\
                         service_request_id, occurrence_kind, scheduled_local_date, scheduled_local_time\
@@ -413,8 +816,650 @@ fn process_command(_connection: &Connection, command: BusinessDatabaseCommand) {
             let _ = reply.send(rejected);
         }
     }
-    #[cfg(not(test))]
-    match command {}
+}
+
+fn trusted_created_at() -> Result<i64, BusinessFailure> {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .as_millis();
+    i64::try_from(milliseconds).map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn normalize_required(value: String, maximum: usize) -> Result<String, BusinessFailure> {
+    if value.chars().any(char::is_control) {
+        return Err(BusinessFailure::InvalidInput);
+    }
+    let normalized = value.trim().to_owned();
+    if normalized.is_empty() || normalized.chars().count() > maximum {
+        return Err(BusinessFailure::InvalidInput);
+    }
+    Ok(normalized)
+}
+
+fn normalize_optional(
+    value: Option<String>,
+    maximum: usize,
+) -> Result<Option<String>, BusinessFailure> {
+    value
+        .map(|value| normalize_required(value, maximum))
+        .transpose()
+}
+
+fn normalize_occurrence(input: OccurrenceInput) -> Result<OccurrenceInput, BusinessFailure> {
+    if !valid_local_date(&input.local_date) || !valid_local_time(&input.local_time) {
+        return Err(BusinessFailure::InvalidInput);
+    }
+    Ok(OccurrenceInput {
+        kind: input.kind,
+        local_date: input.local_date,
+        local_time: input.local_time,
+        location: normalize_optional(input.location, 256)?,
+    })
+}
+
+fn valid_local_date(value: &str) -> bool {
+    if value.len() != 10
+        || value.as_bytes()[4] != b'-'
+        || value.as_bytes()[7] != b'-'
+        || value
+            .bytes()
+            .enumerate()
+            .any(|(index, byte)| index != 4 && index != 7 && !byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let Ok(year) = value[0..4].parse::<u32>() else {
+        return false;
+    };
+    let Ok(month) = value[5..7].parse::<u32>() else {
+        return false;
+    };
+    let Ok(day) = value[8..10].parse::<u32>() else {
+        return false;
+    };
+    if year == 0 || !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let maximum = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=maximum).contains(&day)
+}
+
+fn valid_local_time(value: &str) -> bool {
+    value.len() == 5
+        && value.as_bytes()[2] == b':'
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 2 || byte.is_ascii_digit())
+        && value[0..2].parse::<u8>().is_ok_and(|hour| hour < 24)
+        && value[3..5].parse::<u8>().is_ok_and(|minute| minute < 60)
+}
+
+fn kind_is_compatible(service: ServiceCategory, kind: OccurrenceKind) -> bool {
+    match service {
+        ServiceCategory::BurialFuneral => {
+            matches!(kind, OccurrenceKind::Funeral | OccurrenceKind::Burial)
+        }
+        _ => kind == OccurrenceKind::Primary,
+    }
+}
+
+fn begin_immediate(connection: &mut Connection) -> Result<Transaction<'_>, BusinessFailure> {
+    connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn constraint_or_database_failure(error: rusqlite::Error) -> BusinessFailure {
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+        BusinessFailure::InvalidInput
+    } else {
+        BusinessFailure::DatabaseUnavailable
+    }
+}
+
+fn parent_state(
+    transaction: &Transaction<'_>,
+    request_id: ServiceRequestId,
+) -> Result<(ServiceCategory, RequestStatus), BusinessFailure> {
+    let row = transaction
+        .query_row(
+            "SELECT service_category, status FROM service_requests WHERE id = ?1",
+            [request_id.0],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .ok_or(BusinessFailure::NotFound)?;
+    Ok((
+        ServiceCategory::from_code(&row.0).ok_or(BusinessFailure::DatabaseUnavailable)?,
+        RequestStatus::from_code(&row.1).ok_or(BusinessFailure::DatabaseUnavailable)?,
+    ))
+}
+
+fn create_request_on_connection(
+    connection: &mut Connection,
+    input: CreateServiceRequest,
+) -> Result<ServiceRequestSummary, BusinessFailure> {
+    let requester = RequesterSnapshot {
+        full_name: normalize_required(input.requester_full_name, 200)?,
+        phone: normalize_required(input.requester_phone, 32)?,
+        email: normalize_optional(input.requester_email, 254)?,
+    };
+    let created_at = trusted_created_at()?;
+    let transaction = begin_immediate(connection)?;
+    transaction
+        .execute(
+            "INSERT INTO service_requests(\
+                service_category, status, requester_full_name, requester_phone, requester_email, created_at\
+             ) VALUES (?1, 'pending', ?2, ?3, ?4, ?5)",
+            params![
+                input.service_category.code(),
+                &requester.full_name,
+                &requester.phone,
+                &requester.email,
+                created_at
+            ],
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    let id = ServiceRequestId(transaction.last_insert_rowid());
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    Ok(ServiceRequestSummary {
+        id,
+        service_category: input.service_category,
+        status: RequestStatus::Pending,
+        requester,
+        created_at,
+    })
+}
+
+fn decode_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServiceRequestSummary> {
+    let service_code: String = row.get(1)?;
+    let status_code: String = row.get(2)?;
+    let Some(service_category) = ServiceCategory::from_code(&service_code) else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    let Some(status) = RequestStatus::from_code(&status_code) else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    Ok(ServiceRequestSummary {
+        id: ServiceRequestId(row.get(0)?),
+        service_category,
+        status,
+        requester: RequesterSnapshot {
+            full_name: row.get(3)?,
+            phone: row.get(4)?,
+            email: row.get(5)?,
+        },
+        created_at: row.get(6)?,
+    })
+}
+
+const REQUEST_COLUMNS: &str = "id, service_category, status, requester_full_name, requester_phone, requester_email, created_at";
+
+fn get_request_on_connection(
+    connection: &Connection,
+    request_id: ServiceRequestId,
+) -> Result<ServiceRequestDetail, BusinessFailure> {
+    let request = connection
+        .query_row(
+            &format!("SELECT {REQUEST_COLUMNS} FROM service_requests WHERE id = ?1"),
+            [request_id.0],
+            decode_summary,
+        )
+        .optional()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .ok_or(BusinessFailure::NotFound)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, occurrence_kind, scheduled_local_date, scheduled_local_time, location \
+             FROM request_schedule_occurrences WHERE service_request_id = ?1 ORDER BY id ASC",
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    let rows = statement
+        .query_map([request_id.0], decode_occurrence)
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    let occurrences = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    Ok(ServiceRequestDetail {
+        request,
+        occurrences,
+    })
+}
+
+fn list_requests_on_connection(
+    connection: &Connection,
+) -> Result<Vec<ServiceRequestSummary>, BusinessFailure> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM service_requests ORDER BY created_at DESC, id DESC"
+        ))
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    statement
+        .query_map([], decode_summary)
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn decode_occurrence(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleOccurrence> {
+    let kind_code: String = row.get(1)?;
+    let Some(kind) = OccurrenceKind::from_code(&kind_code) else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    Ok(ScheduleOccurrence {
+        id: ScheduleOccurrenceId(row.get(0)?),
+        kind,
+        local_date: row.get(2)?,
+        local_time: row.get(3)?,
+        location: row.get(4)?,
+    })
+}
+
+fn create_pending_occurrence_on_connection(
+    connection: &mut Connection,
+    request_id: ServiceRequestId,
+    input: OccurrenceInput,
+) -> Result<ScheduleOccurrence, BusinessFailure> {
+    let input = normalize_occurrence(input)?;
+    let transaction = begin_immediate(connection)?;
+    let (service, status) = parent_state(&transaction, request_id)?;
+    if status != RequestStatus::Pending {
+        return Err(BusinessFailure::InvalidState);
+    }
+    if !kind_is_compatible(service, input.kind) {
+        return Err(BusinessFailure::InvalidInput);
+    }
+    transaction
+        .execute(
+            "INSERT INTO request_schedule_occurrences(\
+            service_request_id, occurrence_kind, scheduled_local_date, scheduled_local_time, location\
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                request_id.0,
+                input.kind.code(),
+                &input.local_date,
+                &input.local_time,
+                &input.location
+            ],
+        )
+        .map_err(constraint_or_database_failure)?;
+    let occurrence = ScheduleOccurrence {
+        id: ScheduleOccurrenceId(transaction.last_insert_rowid()),
+        kind: input.kind,
+        local_date: input.local_date,
+        local_time: input.local_time,
+        location: input.location,
+    };
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    Ok(occurrence)
+}
+
+fn occurrence_exists_for_parent(
+    transaction: &Transaction<'_>,
+    request_id: ServiceRequestId,
+    occurrence_id: ScheduleOccurrenceId,
+) -> Result<bool, BusinessFailure> {
+    transaction
+        .query_row(
+            "SELECT 1 FROM request_schedule_occurrences WHERE id = ?1 AND service_request_id = ?2",
+            params![occurrence_id.0, request_id.0],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn update_pending_occurrence_on_connection(
+    connection: &mut Connection,
+    request_id: ServiceRequestId,
+    occurrence_id: ScheduleOccurrenceId,
+    input: OccurrenceInput,
+) -> Result<ScheduleOccurrence, BusinessFailure> {
+    let input = normalize_occurrence(input)?;
+    let transaction = begin_immediate(connection)?;
+    let (service, status) = parent_state(&transaction, request_id)?;
+    if status != RequestStatus::Pending {
+        return Err(BusinessFailure::InvalidState);
+    }
+    if !occurrence_exists_for_parent(&transaction, request_id, occurrence_id)? {
+        return Err(BusinessFailure::NotFound);
+    }
+    if !kind_is_compatible(service, input.kind) {
+        return Err(BusinessFailure::InvalidInput);
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE request_schedule_occurrences SET occurrence_kind = ?1,\
+                scheduled_local_date = ?2, scheduled_local_time = ?3, location = ?4 \
+             WHERE id = ?5 AND service_request_id = ?6",
+            params![
+                input.kind.code(),
+                &input.local_date,
+                &input.local_time,
+                &input.location,
+                occurrence_id.0,
+                request_id.0
+            ],
+        )
+        .map_err(constraint_or_database_failure)?;
+    if changed != 1 {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    Ok(ScheduleOccurrence {
+        id: occurrence_id,
+        kind: input.kind,
+        local_date: input.local_date,
+        local_time: input.local_time,
+        location: input.location,
+    })
+}
+
+fn delete_pending_occurrence_on_connection(
+    connection: &mut Connection,
+    request_id: ServiceRequestId,
+    occurrence_id: ScheduleOccurrenceId,
+) -> Result<(), BusinessFailure> {
+    let transaction = begin_immediate(connection)?;
+    let (_, status) = parent_state(&transaction, request_id)?;
+    if status != RequestStatus::Pending {
+        return Err(BusinessFailure::InvalidState);
+    }
+    if !occurrence_exists_for_parent(&transaction, request_id, occurrence_id)? {
+        return Err(BusinessFailure::NotFound);
+    }
+    let changed = transaction
+        .execute(
+            "DELETE FROM request_schedule_occurrences WHERE id = ?1 AND service_request_id = ?2",
+            params![occurrence_id.0, request_id.0],
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    if changed != 1 {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn occurrences_for_request(
+    transaction: &Transaction<'_>,
+    request_id: ServiceRequestId,
+) -> Result<Vec<ScheduleOccurrence>, BusinessFailure> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT id, occurrence_kind, scheduled_local_date, scheduled_local_time, location \
+             FROM request_schedule_occurrences WHERE service_request_id = ?1 ORDER BY id ASC",
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    statement
+        .query_map([request_id.0], decode_occurrence)
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn validate_schedule_shape(
+    service: ServiceCategory,
+    occurrences: &[ScheduleOccurrence],
+) -> Result<(), BusinessFailure> {
+    match service {
+        ServiceCategory::BurialFuneral => {
+            if occurrences.is_empty()
+                || occurrences.len() > 2
+                || occurrences.iter().any(|item| {
+                    !matches!(item.kind, OccurrenceKind::Funeral | OccurrenceKind::Burial)
+                })
+            {
+                return Err(BusinessFailure::InvalidInput);
+            }
+            if occurrences.len() == 2
+                && occurrences[0].local_date == occurrences[1].local_date
+                && occurrences[0].local_time == occurrences[1].local_time
+            {
+                return Err(BusinessFailure::ScheduleConflict);
+            }
+        }
+        _ => {
+            if occurrences.len() != 1 || occurrences[0].kind != OccurrenceKind::Primary {
+                return Err(BusinessFailure::InvalidInput);
+            }
+            if matches!(
+                service,
+                ServiceCategory::WeddingMarriage | ServiceCategory::FirstCommunion
+            ) && occurrences[0].location.is_none()
+            {
+                return Err(BusinessFailure::InvalidInput);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn external_slot_is_occupied(
+    transaction: &Transaction<'_>,
+    excluded_occurrence: Option<ScheduleOccurrenceId>,
+    date: &str,
+    time: &str,
+) -> Result<bool, BusinessFailure> {
+    let count: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM request_schedule_occurrences occurrence \
+             JOIN service_requests request ON request.id = occurrence.service_request_id \
+             WHERE request.status = 'scheduled' \
+               AND (?1 IS NULL OR occurrence.id <> ?1) \
+               AND occurrence.scheduled_local_date = ?2 \
+               AND occurrence.scheduled_local_time = ?3",
+            params![excluded_occurrence.map(|value| value.0), date, time],
+            |row| row.get(0),
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    Ok(count != 0)
+}
+
+fn schedule_request_on_connection(
+    connection: &mut Connection,
+    request_id: ServiceRequestId,
+) -> Result<(), BusinessFailure> {
+    let transaction = begin_immediate(connection)?;
+    let (service, status) = parent_state(&transaction, request_id)?;
+    if status != RequestStatus::Pending {
+        return Err(BusinessFailure::InvalidState);
+    }
+    let occurrences = occurrences_for_request(&transaction, request_id)?;
+    validate_schedule_shape(service, &occurrences)?;
+    for occurrence in &occurrences {
+        if external_slot_is_occupied(
+            &transaction,
+            None,
+            &occurrence.local_date,
+            &occurrence.local_time,
+        )? {
+            return Err(BusinessFailure::ScheduleConflict);
+        }
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE service_requests SET status = 'scheduled' WHERE id = ?1 AND status = 'pending'",
+            [request_id.0],
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    if changed != 1 {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn reschedule_occurrence_on_connection(
+    connection: &mut Connection,
+    request_id: ServiceRequestId,
+    occurrence_id: ScheduleOccurrenceId,
+    input: RescheduleOccurrenceInput,
+) -> Result<ScheduleOccurrence, BusinessFailure> {
+    let normalized = normalize_occurrence(OccurrenceInput {
+        kind: OccurrenceKind::Primary,
+        local_date: input.local_date,
+        local_time: input.local_time,
+        location: input.location,
+    })?;
+    let transaction = begin_immediate(connection)?;
+    let (service, status) = parent_state(&transaction, request_id)?;
+    if status != RequestStatus::Scheduled {
+        return Err(BusinessFailure::InvalidState);
+    }
+    let existing = transaction
+        .query_row(
+            "SELECT id, occurrence_kind, scheduled_local_date, scheduled_local_time, location \
+             FROM request_schedule_occurrences WHERE id = ?1 AND service_request_id = ?2",
+            params![occurrence_id.0, request_id.0],
+            decode_occurrence,
+        )
+        .optional()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .ok_or(BusinessFailure::NotFound)?;
+    if matches!(
+        service,
+        ServiceCategory::WeddingMarriage | ServiceCategory::FirstCommunion
+    ) && normalized.location.is_none()
+    {
+        return Err(BusinessFailure::InvalidInput);
+    }
+    if external_slot_is_occupied(
+        &transaction,
+        Some(occurrence_id),
+        &normalized.local_date,
+        &normalized.local_time,
+    )? {
+        return Err(BusinessFailure::ScheduleConflict);
+    }
+    if service == ServiceCategory::BurialFuneral {
+        let sibling_conflict: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM request_schedule_occurrences \
+                 WHERE service_request_id = ?1 AND id <> ?2 \
+                   AND scheduled_local_date = ?3 AND scheduled_local_time = ?4",
+                params![
+                    request_id.0,
+                    occurrence_id.0,
+                    &normalized.local_date,
+                    &normalized.local_time
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+        if sibling_conflict != 0 {
+            return Err(BusinessFailure::ScheduleConflict);
+        }
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE request_schedule_occurrences \
+             SET scheduled_local_date = ?1, scheduled_local_time = ?2, location = ?3 \
+             WHERE id = ?4 AND service_request_id = ?5",
+            params![
+                &normalized.local_date,
+                &normalized.local_time,
+                &normalized.location,
+                occurrence_id.0,
+                request_id.0
+            ],
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    if changed != 1 {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    Ok(ScheduleOccurrence {
+        id: occurrence_id,
+        kind: existing.kind,
+        local_date: normalized.local_date,
+        local_time: normalized.local_time,
+        location: normalized.location,
+    })
+}
+
+fn complete_request_on_connection(
+    connection: &mut Connection,
+    request_id: ServiceRequestId,
+) -> Result<(), BusinessFailure> {
+    let transaction = begin_immediate(connection)?;
+    let (_, status) = parent_state(&transaction, request_id)?;
+    if status != RequestStatus::Scheduled {
+        return Err(BusinessFailure::InvalidState);
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE service_requests SET status = 'completed' WHERE id = ?1 AND status = 'scheduled'",
+            [request_id.0],
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    if changed != 1 {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn list_schedule_occupancy_on_connection(
+    connection: &Connection,
+) -> Result<Vec<ScheduleOccupancyItem>, BusinessFailure> {
+    let mut statement = connection
+        .prepare(
+            "SELECT request.id, request.service_category, occurrence.id, occurrence.occurrence_kind, \
+                    occurrence.scheduled_local_date, occurrence.scheduled_local_time, occurrence.location \
+             FROM request_schedule_occurrences occurrence \
+             JOIN service_requests request ON request.id = occurrence.service_request_id \
+             WHERE request.status = 'scheduled' \
+             ORDER BY occurrence.scheduled_local_date ASC, occurrence.scheduled_local_time ASC, \
+                      occurrence.id ASC, request.id ASC",
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    let rows = statement
+        .query_map([], |row| {
+            let service_code: String = row.get(1)?;
+            let kind_code: String = row.get(3)?;
+            let Some(service_category) = ServiceCategory::from_code(&service_code) else {
+                return Err(rusqlite::Error::InvalidQuery);
+            };
+            let Some(kind) = OccurrenceKind::from_code(&kind_code) else {
+                return Err(rusqlite::Error::InvalidQuery);
+            };
+            Ok(ScheduleOccupancyItem {
+                request_id: ServiceRequestId(row.get(0)?),
+                service_category,
+                occurrence: ScheduleOccurrence {
+                    id: ScheduleOccurrenceId(row.get(2)?),
+                    kind,
+                    local_date: row.get(4)?,
+                    local_time: row.get(5)?,
+                    location: row.get(6)?,
+                },
+            })
+        })
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
 }
 
 #[cfg(test)]
@@ -713,6 +1758,71 @@ mod tests {
     }
 
     #[test]
+    fn sealed_business_surface_executes_end_to_end_on_the_single_worker() {
+        let fixture = ActivationFixture::create(FixtureSchema::ExactV2);
+        let V2BusinessDatabaseActivationOutcome::Ready(worker) =
+            activate_exact_v2_business_database(
+                fixture.closed_handoff(),
+                fixture.path.clone(),
+                &fixture.key_paths,
+            )
+        else {
+            panic!("canonical synthetic Exact V2 must activate the business worker");
+        };
+        let request = worker
+            .create_request(request_input(ServiceCategory::WeddingMarriage))
+            .unwrap();
+        let occurrence = worker
+            .create_pending_occurrence(
+                request.id,
+                occurrence_input(
+                    OccurrenceKind::Primary,
+                    "2037-09-10",
+                    "16:30",
+                    Some("Parish Church"),
+                ),
+            )
+            .unwrap();
+        let occurrence = worker
+            .update_pending_occurrence(
+                request.id,
+                occurrence.id,
+                occurrence_input(
+                    OccurrenceKind::Primary,
+                    "2037-09-10",
+                    "16:45",
+                    Some("Parish Church"),
+                ),
+            )
+            .unwrap();
+        worker.schedule_request(request.id).unwrap();
+        let occurrence = worker
+            .reschedule_occurrence(
+                request.id,
+                occurrence.id,
+                RescheduleOccurrenceInput {
+                    local_date: "2037-09-11".to_owned(),
+                    local_time: "17:00".to_owned(),
+                    location: Some("Parish Church".to_owned()),
+                },
+            )
+            .unwrap();
+        assert_eq!(worker.list_requests().unwrap().len(), 1);
+        assert_eq!(
+            worker.get_request(request.id).unwrap().occurrences[0],
+            occurrence
+        );
+        assert_eq!(worker.list_schedule_occupancy().unwrap().len(), 1);
+        worker.complete_request(request.id).unwrap();
+        assert!(worker.list_schedule_occupancy().unwrap().is_empty());
+        assert!(matches!(
+            worker.shutdown(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        fixture.assert_exact_cleanup();
+    }
+
+    #[test]
     fn wrong_key_v1_and_malformed_v2_fail_closed_before_worker_readiness() {
         let wrong_key = ActivationFixture::create(FixtureSchema::ExactV2);
         wrong_key.replace_active_key([0x91; 32]);
@@ -826,5 +1936,697 @@ mod tests {
             ProductionDatabaseConnectionCloseOutcome::Closed
         ));
         root.assert_exact_cleanup();
+    }
+
+    fn business_connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        for statement in V2_SCHEMA_DDL {
+            connection.execute_batch(statement).unwrap();
+        }
+        enable_and_verify_foreign_keys(&connection).unwrap();
+        connection
+    }
+
+    fn request_input(service_category: ServiceCategory) -> CreateServiceRequest {
+        CreateServiceRequest {
+            service_category,
+            requester_full_name: "  Synthetic Requester  ".to_owned(),
+            requester_phone: "  +63 900 000 0000  ".to_owned(),
+            requester_email: Some("  synthetic@example.test  ".to_owned()),
+        }
+    }
+
+    fn occurrence_input(
+        kind: OccurrenceKind,
+        date: &str,
+        time: &str,
+        location: Option<&str>,
+    ) -> OccurrenceInput {
+        OccurrenceInput {
+            kind,
+            local_date: date.to_owned(),
+            local_time: time.to_owned(),
+            location: location.map(str::to_owned),
+        }
+    }
+
+    fn create_request(
+        connection: &mut Connection,
+        service: ServiceCategory,
+    ) -> ServiceRequestSummary {
+        create_request_on_connection(connection, request_input(service)).unwrap()
+    }
+
+    fn create_occurrence(
+        connection: &mut Connection,
+        request_id: ServiceRequestId,
+        kind: OccurrenceKind,
+        date: &str,
+        time: &str,
+        location: Option<&str>,
+    ) -> ScheduleOccurrence {
+        create_pending_occurrence_on_connection(
+            connection,
+            request_id,
+            occurrence_input(kind, date, time, location),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn request_creation_owns_pending_status_timestamp_normalization_and_all_service_codes() {
+        let mut connection = business_connection();
+        let before = trusted_created_at().unwrap();
+        let services = [
+            ServiceCategory::Baptism,
+            ServiceCategory::Confirmation,
+            ServiceCategory::WeddingMarriage,
+            ServiceCategory::BurialFuneral,
+            ServiceCategory::FirstCommunion,
+        ];
+        for service in services {
+            let created = create_request(&mut connection, service);
+            assert_eq!(created.service_category, service);
+            assert_eq!(created.status, RequestStatus::Pending);
+            assert_eq!(created.requester.full_name, "Synthetic Requester");
+            assert_eq!(created.requester.phone, "+63 900 000 0000");
+            assert_eq!(
+                created.requester.email.as_deref(),
+                Some("synthetic@example.test")
+            );
+            assert!(created.created_at >= before);
+        }
+        let stored: Vec<(String, String)> = connection
+            .prepare("SELECT service_category, status FROM service_requests ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                ("baptism".to_owned(), "pending".to_owned()),
+                ("confirmation".to_owned(), "pending".to_owned()),
+                ("wedding_marriage".to_owned(), "pending".to_owned()),
+                ("burial_funeral".to_owned(), "pending".to_owned()),
+                ("first_communion".to_owned(), "pending".to_owned()),
+            ]
+        );
+        assert!(
+            !include_str!("v2_business_database.rs")
+                .split("struct CreateServiceRequest")
+                .nth(1)
+                .unwrap()
+                .split('}')
+                .next()
+                .unwrap()
+                .contains("status")
+        );
+    }
+
+    #[test]
+    fn requester_validation_enforces_required_optional_controls_and_schema_bounds() {
+        let mut connection = business_connection();
+        let mut absent_email = request_input(ServiceCategory::Baptism);
+        absent_email.requester_email = None;
+        let id = create_request_on_connection(&mut connection, absent_email)
+            .unwrap()
+            .id;
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT requester_email FROM service_requests WHERE id = ?1",
+                    [id.0],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap(),
+            None
+        );
+
+        for mutate in [
+            |input: &mut CreateServiceRequest| input.requester_full_name = "   ".to_owned(),
+            |input: &mut CreateServiceRequest| input.requester_phone = "".to_owned(),
+            |input: &mut CreateServiceRequest| input.requester_email = Some("  ".to_owned()),
+            |input: &mut CreateServiceRequest| input.requester_full_name = "Bad\0Name".to_owned(),
+            |input: &mut CreateServiceRequest| input.requester_phone = "Bad\nPhone".to_owned(),
+            |input: &mut CreateServiceRequest| input.requester_full_name = "x".repeat(201),
+            |input: &mut CreateServiceRequest| input.requester_phone = "x".repeat(33),
+            |input: &mut CreateServiceRequest| input.requester_email = Some("x".repeat(255)),
+        ] {
+            let mut input = request_input(ServiceCategory::Baptism);
+            mutate(&mut input);
+            assert_eq!(
+                create_request_on_connection(&mut connection, input),
+                Err(BusinessFailure::InvalidInput)
+            );
+        }
+        assert_eq!(list_requests_on_connection(&connection).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pending_drafts_validate_kind_calendar_time_uniqueness_and_mutate_in_place() {
+        let mut connection = business_connection();
+        let baptism = create_request(&mut connection, ServiceCategory::Baptism);
+        assert_eq!(
+            create_pending_occurrence_on_connection(
+                &mut connection,
+                baptism.id,
+                occurrence_input(OccurrenceKind::Funeral, "2026-02-28", "09:00", None),
+            ),
+            Err(BusinessFailure::InvalidInput)
+        );
+        for (date, time) in [
+            ("2026-02-30", "09:00"),
+            ("2025-02-29", "09:00"),
+            ("2026-13-01", "09:00"),
+            ("2026-01-01", "24:00"),
+            ("2026-01-01", "09:60"),
+            ("2026-1-01", "09:00"),
+            ("2026-01-01", "9:00"),
+        ] {
+            assert_eq!(
+                create_pending_occurrence_on_connection(
+                    &mut connection,
+                    baptism.id,
+                    occurrence_input(OccurrenceKind::Primary, date, time, None),
+                ),
+                Err(BusinessFailure::InvalidInput)
+            );
+        }
+        let draft = create_occurrence(
+            &mut connection,
+            baptism.id,
+            OccurrenceKind::Primary,
+            "2028-02-29",
+            "09:00",
+            None,
+        );
+        assert_eq!(
+            create_pending_occurrence_on_connection(
+                &mut connection,
+                baptism.id,
+                occurrence_input(OccurrenceKind::Primary, "2028-03-01", "10:00", None),
+            ),
+            Err(BusinessFailure::InvalidInput)
+        );
+        let updated = update_pending_occurrence_on_connection(
+            &mut connection,
+            baptism.id,
+            draft.id,
+            occurrence_input(
+                OccurrenceKind::Primary,
+                "2028-03-02",
+                "10:15",
+                Some("  Chapel  "),
+            ),
+        )
+        .unwrap();
+        assert_eq!(updated.id, draft.id);
+        assert_eq!(updated.location.as_deref(), Some("Chapel"));
+        delete_pending_occurrence_on_connection(&mut connection, baptism.id, draft.id).unwrap();
+        assert!(
+            get_request_on_connection(&connection, baptism.id)
+                .unwrap()
+                .occurrences
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn service_scheduling_cardinality_and_required_location_rules_are_enforced() {
+        let mut connection = business_connection();
+        for service in [
+            ServiceCategory::Baptism,
+            ServiceCategory::Confirmation,
+            ServiceCategory::WeddingMarriage,
+            ServiceCategory::FirstCommunion,
+        ] {
+            let request = create_request(&mut connection, service);
+            assert_eq!(
+                schedule_request_on_connection(&mut connection, request.id),
+                Err(BusinessFailure::InvalidInput)
+            );
+            create_occurrence(
+                &mut connection,
+                request.id,
+                OccurrenceKind::Primary,
+                "2030-01-01",
+                match service {
+                    ServiceCategory::Baptism => "08:00",
+                    ServiceCategory::Confirmation => "09:00",
+                    ServiceCategory::WeddingMarriage => "10:00",
+                    _ => "11:00",
+                },
+                None,
+            );
+            if matches!(
+                service,
+                ServiceCategory::WeddingMarriage | ServiceCategory::FirstCommunion
+            ) {
+                assert_eq!(
+                    schedule_request_on_connection(&mut connection, request.id),
+                    Err(BusinessFailure::InvalidInput)
+                );
+                let occurrence = get_request_on_connection(&connection, request.id)
+                    .unwrap()
+                    .occurrences[0]
+                    .clone();
+                update_pending_occurrence_on_connection(
+                    &mut connection,
+                    request.id,
+                    occurrence.id,
+                    occurrence_input(
+                        OccurrenceKind::Primary,
+                        &occurrence.local_date,
+                        &occurrence.local_time,
+                        Some("Parish Church"),
+                    ),
+                )
+                .unwrap();
+            }
+            schedule_request_on_connection(&mut connection, request.id).unwrap();
+            assert_eq!(
+                schedule_request_on_connection(&mut connection, request.id),
+                Err(BusinessFailure::InvalidState)
+            );
+        }
+    }
+
+    #[test]
+    fn burial_funeral_accepts_either_or_both_but_rejects_same_internal_slot() {
+        let mut connection = business_connection();
+        for (day, kinds) in [
+            vec![OccurrenceKind::Funeral],
+            vec![OccurrenceKind::Burial],
+            vec![OccurrenceKind::Funeral, OccurrenceKind::Burial],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = create_request(&mut connection, ServiceCategory::BurialFuneral);
+            for (offset, kind) in kinds.into_iter().enumerate() {
+                create_occurrence(
+                    &mut connection,
+                    request.id,
+                    kind,
+                    &format!("2031-02-{:02}", day + 3),
+                    if offset == 0 { "08:00" } else { "09:00" },
+                    None,
+                );
+            }
+            schedule_request_on_connection(&mut connection, request.id).unwrap();
+        }
+        let neither = create_request(&mut connection, ServiceCategory::BurialFuneral);
+        assert_eq!(
+            schedule_request_on_connection(&mut connection, neither.id),
+            Err(BusinessFailure::InvalidInput)
+        );
+        let conflict = create_request(&mut connection, ServiceCategory::BurialFuneral);
+        create_occurrence(
+            &mut connection,
+            conflict.id,
+            OccurrenceKind::Funeral,
+            "2031-03-04",
+            "12:00",
+            None,
+        );
+        create_occurrence(
+            &mut connection,
+            conflict.id,
+            OccurrenceKind::Burial,
+            "2031-03-04",
+            "12:00",
+            None,
+        );
+        assert_eq!(
+            schedule_request_on_connection(&mut connection, conflict.id),
+            Err(BusinessFailure::ScheduleConflict)
+        );
+    }
+
+    #[test]
+    fn exact_slot_conflicts_only_with_scheduled_parents_and_location_is_irrelevant() {
+        let mut connection = business_connection();
+        let active = create_request(&mut connection, ServiceCategory::Baptism);
+        create_occurrence(
+            &mut connection,
+            active.id,
+            OccurrenceKind::Primary,
+            "2032-04-05",
+            "13:30",
+            Some("Church"),
+        );
+        schedule_request_on_connection(&mut connection, active.id).unwrap();
+        assert_eq!(
+            create_pending_occurrence_on_connection(
+                &mut connection,
+                active.id,
+                occurrence_input(OccurrenceKind::Primary, "2032-04-07", "13:30", None),
+            ),
+            Err(BusinessFailure::InvalidState)
+        );
+
+        let pending = create_request(&mut connection, ServiceCategory::Confirmation);
+        create_occurrence(
+            &mut connection,
+            pending.id,
+            OccurrenceKind::Primary,
+            "2032-04-05",
+            "13:30",
+            Some("Hall"),
+        );
+        assert_eq!(
+            schedule_request_on_connection(&mut connection, pending.id),
+            Err(BusinessFailure::ScheduleConflict)
+        );
+        assert_eq!(
+            get_request_on_connection(&connection, pending.id)
+                .unwrap()
+                .request
+                .status,
+            RequestStatus::Pending
+        );
+
+        complete_request_on_connection(&mut connection, active.id).unwrap();
+        schedule_request_on_connection(&mut connection, pending.id).unwrap();
+
+        let cancelled = create_request(&mut connection, ServiceCategory::Baptism);
+        create_occurrence(
+            &mut connection,
+            cancelled.id,
+            OccurrenceKind::Primary,
+            "2032-04-10",
+            "10:00",
+            None,
+        );
+        connection
+            .execute(
+                "UPDATE service_requests SET status = 'cancelled' WHERE id = ?1",
+                [cancelled.id.0],
+            )
+            .unwrap();
+        let after_cancel = create_request(&mut connection, ServiceCategory::Baptism);
+        create_occurrence(
+            &mut connection,
+            after_cancel.id,
+            OccurrenceKind::Primary,
+            "2032-04-10",
+            "10:00",
+            None,
+        );
+        schedule_request_on_connection(&mut connection, after_cancel.id).unwrap();
+
+        for (date, time) in [("2032-04-05", "13:31"), ("2032-04-06", "13:30")] {
+            let request = create_request(&mut connection, ServiceCategory::Baptism);
+            create_occurrence(
+                &mut connection,
+                request.id,
+                OccurrenceKind::Primary,
+                date,
+                time,
+                None,
+            );
+            schedule_request_on_connection(&mut connection, request.id).unwrap();
+        }
+    }
+
+    #[test]
+    fn rescheduling_is_atomic_in_place_and_releases_the_old_slot() {
+        let mut connection = business_connection();
+        let first = create_request(&mut connection, ServiceCategory::WeddingMarriage);
+        let occurrence = create_occurrence(
+            &mut connection,
+            first.id,
+            OccurrenceKind::Primary,
+            "2033-05-01",
+            "09:00",
+            Some("Church"),
+        );
+        schedule_request_on_connection(&mut connection, first.id).unwrap();
+        let unchanged_self = reschedule_occurrence_on_connection(
+            &mut connection,
+            first.id,
+            occurrence.id,
+            RescheduleOccurrenceInput {
+                local_date: "2033-05-01".to_owned(),
+                local_time: "09:00".to_owned(),
+                location: Some("Church".to_owned()),
+            },
+        )
+        .unwrap();
+        assert_eq!(unchanged_self.id, occurrence.id);
+        let blocker = create_request(&mut connection, ServiceCategory::Baptism);
+        let blocker_occurrence = create_occurrence(
+            &mut connection,
+            blocker.id,
+            OccurrenceKind::Primary,
+            "2033-05-02",
+            "10:00",
+            None,
+        );
+        assert_eq!(
+            reschedule_occurrence_on_connection(
+                &mut connection,
+                blocker.id,
+                blocker_occurrence.id,
+                RescheduleOccurrenceInput {
+                    local_date: "2033-05-02".to_owned(),
+                    local_time: "10:30".to_owned(),
+                    location: None,
+                },
+            ),
+            Err(BusinessFailure::InvalidState)
+        );
+        schedule_request_on_connection(&mut connection, blocker.id).unwrap();
+
+        assert_eq!(
+            reschedule_occurrence_on_connection(
+                &mut connection,
+                first.id,
+                occurrence.id,
+                RescheduleOccurrenceInput {
+                    local_date: "2033-05-02".to_owned(),
+                    local_time: "10:00".to_owned(),
+                    location: Some("Other".to_owned()),
+                },
+            ),
+            Err(BusinessFailure::ScheduleConflict)
+        );
+        let unchanged = get_request_on_connection(&connection, first.id).unwrap();
+        assert_eq!(unchanged.occurrences[0].local_date, "2033-05-01");
+        assert_eq!(
+            reschedule_occurrence_on_connection(
+                &mut connection,
+                first.id,
+                occurrence.id,
+                RescheduleOccurrenceInput {
+                    local_date: "2033-05-03".to_owned(),
+                    local_time: "11:00".to_owned(),
+                    location: None,
+                },
+            ),
+            Err(BusinessFailure::InvalidInput)
+        );
+        let moved = reschedule_occurrence_on_connection(
+            &mut connection,
+            first.id,
+            occurrence.id,
+            RescheduleOccurrenceInput {
+                local_date: "2033-05-03".to_owned(),
+                local_time: "11:00".to_owned(),
+                location: Some("Church".to_owned()),
+            },
+        )
+        .unwrap();
+        assert_eq!(moved.id, occurrence.id);
+        assert_eq!(
+            get_request_on_connection(&connection, first.id)
+                .unwrap()
+                .request
+                .status,
+            RequestStatus::Scheduled
+        );
+
+        let old_slot = create_request(&mut connection, ServiceCategory::Baptism);
+        create_occurrence(
+            &mut connection,
+            old_slot.id,
+            OccurrenceKind::Primary,
+            "2033-05-01",
+            "09:00",
+            None,
+        );
+        schedule_request_on_connection(&mut connection, old_slot.id).unwrap();
+    }
+
+    #[test]
+    fn completion_retains_occurrences_and_removes_only_live_occupancy() {
+        let mut connection = business_connection();
+        let pending = create_request(&mut connection, ServiceCategory::Baptism);
+        assert_eq!(
+            complete_request_on_connection(&mut connection, pending.id),
+            Err(BusinessFailure::InvalidState)
+        );
+        let occurrence = create_occurrence(
+            &mut connection,
+            pending.id,
+            OccurrenceKind::Primary,
+            "2034-06-07",
+            "07:45",
+            None,
+        );
+        schedule_request_on_connection(&mut connection, pending.id).unwrap();
+        assert_eq!(
+            list_schedule_occupancy_on_connection(&connection)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            delete_pending_occurrence_on_connection(&mut connection, pending.id, occurrence.id),
+            Err(BusinessFailure::InvalidState)
+        );
+        complete_request_on_connection(&mut connection, pending.id).unwrap();
+        assert_eq!(
+            complete_request_on_connection(&mut connection, pending.id),
+            Err(BusinessFailure::InvalidState)
+        );
+        let detail = get_request_on_connection(&connection, pending.id).unwrap();
+        assert_eq!(detail.request.status, RequestStatus::Completed);
+        assert_eq!(detail.occurrences[0].id, occurrence.id);
+        assert!(
+            list_schedule_occupancy_on_connection(&connection)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            delete_pending_occurrence_on_connection(&mut connection, pending.id, occurrence.id),
+            Err(BusinessFailure::InvalidState)
+        );
+
+        let cancelled = create_request(&mut connection, ServiceCategory::Confirmation);
+        let cancelled_occurrence = create_occurrence(
+            &mut connection,
+            cancelled.id,
+            OccurrenceKind::Primary,
+            "2034-06-08",
+            "08:45",
+            None,
+        );
+        connection
+            .execute(
+                "UPDATE service_requests SET status = 'cancelled' WHERE id = ?1",
+                [cancelled.id.0],
+            )
+            .unwrap();
+        assert_eq!(
+            delete_pending_occurrence_on_connection(
+                &mut connection,
+                cancelled.id,
+                cancelled_occurrence.id,
+            ),
+            Err(BusinessFailure::InvalidState)
+        );
+    }
+
+    #[test]
+    fn reads_and_occupancy_have_stable_deterministic_ordering() {
+        let mut connection = business_connection();
+        let first = create_request(&mut connection, ServiceCategory::Baptism);
+        let second = create_request(&mut connection, ServiceCategory::Confirmation);
+        connection
+            .execute(
+                "UPDATE service_requests SET created_at = 42 WHERE id IN (?1, ?2)",
+                params![first.id.0, second.id.0],
+            )
+            .unwrap();
+        assert_eq!(
+            list_requests_on_connection(&connection)
+                .unwrap()
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![second.id, first.id]
+        );
+        create_occurrence(
+            &mut connection,
+            first.id,
+            OccurrenceKind::Primary,
+            "2035-07-08",
+            "12:00",
+            None,
+        );
+        create_occurrence(
+            &mut connection,
+            second.id,
+            OccurrenceKind::Primary,
+            "2035-07-08",
+            "11:00",
+            None,
+        );
+        schedule_request_on_connection(&mut connection, first.id).unwrap();
+        schedule_request_on_connection(&mut connection, second.id).unwrap();
+        let occupancy = list_schedule_occupancy_on_connection(&connection).unwrap();
+        assert_eq!(occupancy[0].request_id, second.id);
+        assert_eq!(occupancy[1].request_id, first.id);
+        let detail = get_request_on_connection(&connection, first.id).unwrap();
+        assert_eq!(detail.request.requester.full_name, "Synthetic Requester");
+        assert_eq!(detail.occurrences.len(), 1);
+    }
+
+    #[test]
+    fn invalid_operations_roll_back_and_foreign_keys_remain_enforced() {
+        let mut connection = business_connection();
+        let funeral = create_request(&mut connection, ServiceCategory::BurialFuneral);
+        let first = create_occurrence(
+            &mut connection,
+            funeral.id,
+            OccurrenceKind::Funeral,
+            "2036-08-09",
+            "14:00",
+            None,
+        );
+        let second = create_occurrence(
+            &mut connection,
+            funeral.id,
+            OccurrenceKind::Burial,
+            "2036-08-09",
+            "15:00",
+            None,
+        );
+        schedule_request_on_connection(&mut connection, funeral.id).unwrap();
+        assert_eq!(
+            reschedule_occurrence_on_connection(
+                &mut connection,
+                funeral.id,
+                second.id,
+                RescheduleOccurrenceInput {
+                    local_date: "2036-08-09".to_owned(),
+                    local_time: "14:00".to_owned(),
+                    location: None,
+                },
+            ),
+            Err(BusinessFailure::ScheduleConflict)
+        );
+        let detail = get_request_on_connection(&connection, funeral.id).unwrap();
+        assert_eq!(detail.occurrences[0].id, first.id);
+        assert_eq!(detail.occurrences[1].local_time, "15:00");
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO request_schedule_occurrences(\
+                    service_request_id, occurrence_kind, scheduled_local_date, scheduled_local_time\
+                 ) VALUES (999999, 'primary', '2036-01-01', '01:00')",
+                    [],
+                )
+                .is_err()
+        );
     }
 }
