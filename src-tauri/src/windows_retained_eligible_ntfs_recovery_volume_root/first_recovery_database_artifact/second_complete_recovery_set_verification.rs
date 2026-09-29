@@ -6,6 +6,7 @@ mod final_two_set_verification;
 #[allow(unused_imports)]
 pub(crate) use final_two_set_verification::{
     FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
+    MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     verify_final_two_recovery_sets,
 };

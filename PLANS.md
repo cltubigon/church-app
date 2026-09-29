@@ -560,7 +560,15 @@ This current-state update supersedes earlier lifecycle endpoint descriptions. Fr
 
 Second-set success remains the exact aggregate predecessor. The migration worker rechecks shutdown intent immediately before invoking only `verify_final_two_recovery_sets`. Aggregate success parks exact keyless `TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup` at `TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution`; migration work remains unresolved and cross-process exclusivity remains held. Aggregate failure retains its exact canonical retry owner, with no automatic retry. Every shutdown exit recovers only the original custody source, runs the canonical source abort/close-retry path, and leaves all six artifacts untouched. No migration executes and no source or recovery artifact is deleted.
 
-## 34. Links
+## 34. Reachable post-recovery migration execution confirmation
+
+The application shell now exposes one action only while the canonical coarse state is `TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution`. That action invokes the argument-free `request_post_recovery_migration_execution_confirmation` command. React supplies no confirmation decision, owner, token, path, version, key, migration parameter, or artifact identity; it refreshes only the coarse Rust-owned lifecycle status.
+
+The migration worker moves exact `TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup` through the existing owner-bearing main-thread dispatch escrow, resolves the real `main` window `HWND`, and runs a Rust-owned Win32 modal confirmation. `Confirmed` is adopted only if shutdown has not won and consumes the final Layer D owner into non-cloneable, non-serializable, process-local `MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup`. That owner retains the exact final recovery proof and parks at `MigrationExecutionConfirmedAwaitingWritablePreparation`. `Cancelled` and `Unavailable` preserve the final Layer D owner at the prior state, retain cross-process exclusivity, leave `migration_work_resolved = false`, and require another explicit request.
+
+Shutdown before main-thread take prevents the dialog and abandons through the existing source-only shutdown chain. Shutdown while the modal is active suppresses adoption of a confirmation result. Shutdown after confirmation consumes the confirmed owner back to only the original custody source, drops recovery proof authority through RAII, and uses canonical `abort_for_shutdown()` plus source-close retry. All six recovery artifacts remain untouched. No database key is recovered, no writable connection or transaction is created, no SQL or V1-to-V2 migration executes, and no metadata or `user_version` changes. Writable preparation, migration execution, post-commit validation, restart-required transition, operational V2 startup acceptance, restore, and retention remain unimplemented.
+
+## 35. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)

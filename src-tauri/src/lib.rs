@@ -3,6 +3,8 @@ use std::sync::Arc;
 use serde::Serialize;
 
 mod application_lifecycle;
+#[cfg(windows)]
+mod native_post_recovery_migration_execution_confirmation;
 #[allow(dead_code)]
 mod native_recovery_key_reentry;
 
@@ -117,7 +119,8 @@ pub fn run() {
     scoped_panic_output_suppression::install_before_worker_threads();
 
     use application_lifecycle::{
-        ApplicationLifecycle, lifecycle_from_app, request_first_time_setup, startup_status,
+        ApplicationLifecycle, lifecycle_from_app, request_first_time_setup,
+        request_post_recovery_migration_execution_confirmation, startup_status,
     };
 
     let lifecycle = ApplicationLifecycle::new();
@@ -130,7 +133,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health_check,
             startup_status,
-            request_first_time_setup
+            request_first_time_setup,
+            request_post_recovery_migration_execution_confirmation
         ])
         .build(tauri::generate_context!())
         .expect("the Church App foundation runtime could not start")

@@ -121,11 +121,24 @@ describe("application foundation", () => {
     ["setupRestartRequired", "First-time setup is complete. Restart the application to continue."],
     ["stopping", "The application is stopping."],
     ["shutdownIncomplete", "The application could not complete shutdown."],
+    [
+      "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
+      "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
+    ],
+    [
+      "migrationExecutionConfirmedAwaitingWritablePreparation",
+      "Migration execution is confirmed. Writable migration preparation has not begun.",
+    ],
   ])("does not offer first-time setup while startup status is %s", async (status, message) => {
     mockedInvoke.mockResolvedValue(status);
     renderApp();
     expect(await screen.findByText(message)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
+    if (status !== "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution") {
+      expect(
+        screen.queryByRole("button", { name: "Confirm migration authorization" }),
+      ).not.toBeInTheDocument();
+    }
     if (status === "ready") {
       expect(
         screen.getByRole("navigation", { name: "Staff area placeholders" }),
@@ -153,6 +166,60 @@ describe("application foundation", () => {
     ).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Set up Church App" })).toHaveLength(1);
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("offers migration confirmation only in the exact post-recovery awaiting state", async () => {
+    mockedInvoke.mockResolvedValue("twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution");
+    renderApp();
+
+    expect(
+      await screen.findByText(
+        "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm migration authorization" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("requests only the argument-free native confirmation command", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") {
+        return Promise.resolve("twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution");
+      }
+      if (command === "request_post_recovery_migration_execution_confirmation") {
+        return Promise.resolve("started");
+      }
+      return Promise.reject(new Error("unexpected command"));
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm migration authorization" }),
+    );
+
+    expect(
+      mockedInvoke.mock.calls.filter(
+        ([command]) => command === "request_post_recovery_migration_execution_confirmation",
+      ),
+    ).toEqual([["request_post_recovery_migration_execution_confirmation"]]);
+  });
+
+  it("renders confirmed-awaiting-preparation truthfully without claiming migration completion", async () => {
+    mockedInvoke.mockResolvedValue("migrationExecutionConfirmedAwaitingWritablePreparation");
+    renderApp();
+
+    expect(
+      await screen.findByText(
+        "Migration execution is confirmed. Writable migration preparation has not begun.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Confirm migration authorization" }),
+    ).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Migration is complete");
+    expect(document.body.textContent).not.toContain("Migration completed");
   });
 
   it("requests setup once without arguments and promptly re-checks startup status", async () => {

@@ -76,6 +76,10 @@ use crate::{
         recover_database_key_candidate_from_loaded_wrapper,
     },
     installation_state::{ExpectedStorageEvidence, InstallationEvidence},
+    native_post_recovery_migration_execution_confirmation::{
+        NativePostRecoveryMigrationExecutionConfirmationOutcome,
+        request_native_post_recovery_migration_execution_confirmation,
+    },
     native_recovery_key_reentry::{
         NativeRecoveryKeyReentryOutcome, request_native_recovery_key_reentry,
     },
@@ -119,8 +123,9 @@ use crate::{
         FirstRecoverySetRecoveredKeyVerificationFailure,
         FirstRecoverySetRecoveredKeyVerificationOutcome,
         FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
-        FirstRecoverySetRecoveredKeyVerified, NativeRecoveryVolumeSelectionOutcome,
-        RecoveryVolumeRootSeparatedFromProductionStorage,
+        FirstRecoverySetRecoveredKeyVerified,
+        MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+        NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
         RetainAndSeparateSecondRecoveryVolumeError, SecondCompleteRecoverySetVerificationFailure,
         SecondCompleteRecoverySetVerificationOutcome,
         SecondCompleteRecoverySetVerificationVerifierCloseFailure,
@@ -153,6 +158,8 @@ pub(crate) enum StartupStatus {
     SetupRestartRequired,
     Stopping,
     ShutdownIncomplete,
+    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
+    MigrationExecutionConfirmedAwaitingWritablePreparation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -417,6 +424,7 @@ enum MigrationPreparationState {
     SecondCompleteRecoverySetVerifiedAwaitingAggregateVerification,
     FinalTwoSetVerificationRetryRequired,
     TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
+    MigrationExecutionConfirmedAwaitingWritablePreparation,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -438,6 +446,10 @@ enum MigrationWorkerCommand {
     SecondRecoveryKeyReentryCompleted(NativeRecoveryKeyReentryOutcome),
     RetrySecondRecoverySetVerifierClose,
     RetryFinalTwoSetVerification,
+    RequestPostRecoveryMigrationExecutionConfirmation,
+    PostRecoveryMigrationExecutionConfirmationCompleted(
+        NativePostRecoveryMigrationExecutionConfirmationOutcome,
+    ),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -570,7 +582,9 @@ fn observe_pre_custody_dispatch_control(
         | Ok(MigrationWorkerCommand::RequestSecondRecoveryKeyReentry)
         | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
         | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose)
-        | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => {
+        | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification)
+        | Ok(MigrationWorkerCommand::RequestPostRecoveryMigrationExecutionConfirmation)
+        | Ok(MigrationWorkerCommand::PostRecoveryMigrationExecutionConfirmationCompleted(_)) => {
             PreCustodyDispatchControl::ImpossibleCustodyCompleted
         }
         Err(std::sync::mpsc::TryRecvError::Empty) => PreCustodyDispatchControl::NoCommand,
@@ -683,6 +697,9 @@ enum MigrationWorkerParkedOwnership {
     TwoCompleteRecoverySetsVerified(
         TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     ),
+    MigrationExecutionConfirmed(
+        MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    ),
     TerminalFailure(PossiblyExposedMigrationRecoveryKeyCustodyFailure),
     PreparedShutdown(UndisclosedMigrationRecoveryKeyCustodyShutdown),
 }
@@ -709,6 +726,14 @@ pub(crate) enum FirstTimeSetupRequestResult {
     StartupInProgress,
     NotAllowed,
     RestartRequired,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PostRecoveryMigrationExecutionConfirmationRequestResult {
+    Started,
+    NotAllowed,
     Unavailable,
 }
 
@@ -847,6 +872,7 @@ struct LifecycleInner {
     second_recovery_volume_selection_outstanding: bool,
     recovery_key_reentry_outstanding: bool,
     migration_verification_retry_outstanding: bool,
+    migration_execution_confirmation_outstanding: bool,
     migration_shutdown_requested: bool,
     startup_work_resolved: bool,
     close_work_resolved: bool,
@@ -877,6 +903,7 @@ impl ApplicationLifecycle {
                 second_recovery_volume_selection_outstanding: false,
                 recovery_key_reentry_outstanding: false,
                 migration_verification_retry_outstanding: false,
+                migration_execution_confirmation_outstanding: false,
                 migration_shutdown_requested: false,
                 startup_work_resolved: false,
                 close_work_resolved: true,
@@ -1174,12 +1201,52 @@ impl ApplicationLifecycle {
         }
     }
 
+    #[cfg(windows)]
+    fn request_post_recovery_migration_execution_confirmation(
+        &self,
+    ) -> PostRecoveryMigrationExecutionConfirmationRequestResult {
+        let control = {
+            let mut inner = self.lock();
+            if inner.migration_preparation
+                != MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
+                || inner.migration_execution_confirmation_outstanding
+                || inner.migration_shutdown_requested
+            {
+                return PostRecoveryMigrationExecutionConfirmationRequestResult::NotAllowed;
+            }
+            let Some(control) = inner.migration_control.clone() else {
+                return PostRecoveryMigrationExecutionConfirmationRequestResult::Unavailable;
+            };
+            inner.migration_execution_confirmation_outstanding = true;
+            control
+        };
+        if control
+            .send(MigrationWorkerCommand::RequestPostRecoveryMigrationExecutionConfirmation)
+            .is_ok()
+        {
+            PostRecoveryMigrationExecutionConfirmationRequestResult::Started
+        } else {
+            self.lock().migration_execution_confirmation_outstanding = false;
+            PostRecoveryMigrationExecutionConfirmationRequestResult::Unavailable
+        }
+    }
+
     pub(crate) fn status(&self) -> StartupStatus {
         let inner = self.lock();
         if inner.migration_confirmation.has_retained_close_failure() {
             StartupStatus::ShutdownIncomplete
-        } else {
+        } else if inner.migration_shutdown_requested {
             inner.state.status()
+        } else {
+            match inner.migration_preparation {
+                MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution => {
+                    StartupStatus::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
+                }
+                MigrationPreparationState::MigrationExecutionConfirmedAwaitingWritablePreparation => {
+                    StartupStatus::MigrationExecutionConfirmedAwaitingWritablePreparation
+                }
+                _ => inner.state.status(),
+            }
         }
     }
 
@@ -1905,7 +1972,11 @@ impl ApplicationLifecycle {
                 | Ok(MigrationWorkerCommand::RequestSecondRecoveryKeyReentry)
                 | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
                 | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose)
-                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => std::process::abort(),
+                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification)
+                | Ok(MigrationWorkerCommand::RequestPostRecoveryMigrationExecutionConfirmation)
+                | Ok(
+                    MigrationWorkerCommand::PostRecoveryMigrationExecutionConfirmationCompleted(_),
+                ) => std::process::abort(),
                 Err(_) => std::process::abort(),
             }
         }
@@ -2051,7 +2122,11 @@ impl ApplicationLifecycle {
                 | Ok(MigrationWorkerCommand::RequestSecondRecoveryKeyReentry)
                 | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
                 | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose)
-                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => std::process::abort(),
+                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification)
+                | Ok(MigrationWorkerCommand::RequestPostRecoveryMigrationExecutionConfirmation)
+                | Ok(
+                    MigrationWorkerCommand::PostRecoveryMigrationExecutionConfirmationCompleted(_),
+                ) => std::process::abort(),
                 Err(_) => std::process::abort(),
             }
         }
@@ -2304,7 +2379,11 @@ impl ApplicationLifecycle {
                 | Ok(MigrationWorkerCommand::RequestSecondRecoveryKeyReentry)
                 | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
                 | Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose)
-                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => std::process::abort(),
+                | Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification)
+                | Ok(MigrationWorkerCommand::RequestPostRecoveryMigrationExecutionConfirmation)
+                | Ok(
+                    MigrationWorkerCommand::PostRecoveryMigrationExecutionConfirmationCompleted(_),
+                ) => std::process::abort(),
                 Err(_) => std::process::abort(),
             }
         }
@@ -2728,6 +2807,9 @@ impl ApplicationLifecycle {
             MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(_) => {
                 MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
             }
+            MigrationWorkerParkedOwnership::MigrationExecutionConfirmed(_) => {
+                MigrationPreparationState::MigrationExecutionConfirmedAwaitingWritablePreparation
+            }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
                 MigrationPreparationState::CustodySourceCloseRetryRequired
             }
@@ -2845,13 +2927,28 @@ impl ApplicationLifecycle {
                         migration_verification_preparation_state(&owner);
                     continue;
                 }
+                Ok(MigrationWorkerCommand::RequestPostRecoveryMigrationExecutionConfirmation) => {
+                    let MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(owner) =
+                        owner
+                    else {
+                        std::process::abort()
+                    };
+                    self.run_post_recovery_migration_execution_confirmation_dispatch(
+                        owner,
+                        control,
+                        exclusivity,
+                        app,
+                    );
+                    return;
+                }
                 Ok(MigrationWorkerCommand::CustodyCompleted(_))
                 | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
                 | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_))
                 | Ok(MigrationWorkerCommand::FirstRecoveryKeyReentryCompleted(_))
-                | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_)) => {
-                    std::process::abort()
-                }
+                | Ok(MigrationWorkerCommand::SecondRecoveryKeyReentryCompleted(_))
+                | Ok(
+                    MigrationWorkerCommand::PostRecoveryMigrationExecutionConfirmationCompleted(_),
+                ) => std::process::abort(),
                 Err(_) => std::process::abort(),
             }
             match retry_migration_worker_ownership(owner, self) {
@@ -2866,6 +2963,133 @@ impl ApplicationLifecycle {
     }
 
     #[cfg(windows)]
+    fn run_post_recovery_migration_execution_confirmation_dispatch(
+        self: &Arc<Self>,
+        owner: TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+        control: std::sync::mpsc::Receiver<MigrationWorkerCommand>,
+        exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
+        app: &AppHandle,
+    ) {
+        let dispatch = {
+            let _boundary = self
+                .custody_dispatch_boundary
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let inner = self.lock();
+            if inner.migration_shutdown_requested {
+                drop(inner);
+                self.lock().migration_execution_confirmation_outstanding = false;
+                self.finish_or_park_migration_shutdown(
+                    MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(owner),
+                    control,
+                    exclusivity,
+                    app,
+                );
+                return;
+            }
+            if !inner.migration_execution_confirmation_outstanding {
+                std::process::abort();
+            }
+            Arc::new(Mutex::new(CustodyDispatchEscrow::Pending(owner)))
+        };
+
+        let main_dispatch = Arc::clone(&dispatch);
+        let main_app = app.clone();
+        let lifecycle = Arc::clone(self);
+        let scheduled = catch_unwind(AssertUnwindSafe(|| {
+            app.run_on_main_thread(move || {
+                let Some(owner) = lifecycle.take_armed_custody_dispatch_for_main(&main_dispatch)
+                else {
+                    return;
+                };
+                let outcome = run_main_thread_owned_custody(
+                    owner,
+                    || {
+                        main_app
+                            .get_webview_window("main")
+                            .and_then(|window| window.hwnd().ok())
+                    },
+                    |owner, hwnd| {
+                        request_native_post_recovery_migration_execution_confirmation(owner, hwnd.0)
+                    },
+                    NativePostRecoveryMigrationExecutionConfirmationOutcome::Unavailable,
+                );
+                let sender = lifecycle.lock().migration_control.clone();
+                let Some(sender) = sender else {
+                    std::process::abort();
+                };
+                if let Err(error) = sender.send(
+                    MigrationWorkerCommand::PostRecoveryMigrationExecutionConfirmationCompleted(
+                        outcome,
+                    ),
+                ) {
+                    let _retained_ownership = error.0;
+                    std::process::abort();
+                }
+            })
+        }))
+        .map_err(|_| ())
+        .and_then(|result| result.map_err(|_| ()));
+
+        if scheduled.is_err()
+            && let Some(owner) = cancel_armed_custody_dispatch(&dispatch)
+        {
+            self.lock().migration_execution_confirmation_outstanding = false;
+            self.park_migration_worker(
+                MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(owner),
+                control,
+                exclusivity,
+                app,
+            );
+            return;
+        }
+
+        let mut shutdown_requested = false;
+        loop {
+            match control.recv() {
+                Ok(MigrationWorkerCommand::Shutdown) => {
+                    if let Some(owner) = cancel_armed_custody_dispatch(&dispatch) {
+                        self.lock().migration_execution_confirmation_outstanding = false;
+                        self.finish_or_park_migration_shutdown(
+                            MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(owner),
+                            control,
+                            exclusivity,
+                            app,
+                        );
+                        return;
+                    }
+                    shutdown_requested = true;
+                }
+                Ok(
+                    MigrationWorkerCommand::PostRecoveryMigrationExecutionConfirmationCompleted(
+                        outcome,
+                    ),
+                ) => {
+                    self.lock().migration_execution_confirmation_outstanding = false;
+                    if shutdown_requested || self.lock().migration_shutdown_requested {
+                        self.finish_or_park_migration_shutdown(
+                            migration_execution_confirmation_outcome_ownership(outcome, false),
+                            control,
+                            exclusivity,
+                            app,
+                        );
+                    } else {
+                        self.park_migration_worker(
+                            migration_execution_confirmation_outcome_ownership(outcome, true),
+                            control,
+                            exclusivity,
+                            app,
+                        );
+                    }
+                    return;
+                }
+                Ok(_) => std::process::abort(),
+                Err(_) => std::process::abort(),
+            }
+        }
+    }
+
+    #[cfg(windows)]
     fn finish_migration_preparation_worker(&self, app: Option<&AppHandle>) {
         {
             let mut inner = self.lock();
@@ -2874,6 +3098,7 @@ impl ApplicationLifecycle {
             inner.second_recovery_volume_selection_outstanding = false;
             inner.recovery_key_reentry_outstanding = false;
             inner.migration_verification_retry_outstanding = false;
+            inner.migration_execution_confirmation_outstanding = false;
             inner.migration_work_resolved = true;
             inner.migration_control = None;
             if matches!(inner.state, LifecycleState::Stopping) {
@@ -3451,6 +3676,27 @@ fn continue_final_two_set_verification(
 }
 
 #[cfg(windows)]
+fn migration_execution_confirmation_outcome_ownership(
+    outcome: NativePostRecoveryMigrationExecutionConfirmationOutcome,
+    confirmation_may_be_adopted: bool,
+) -> MigrationWorkerParkedOwnership {
+    match outcome {
+        NativePostRecoveryMigrationExecutionConfirmationOutcome::Confirmed(owner)
+            if confirmation_may_be_adopted =>
+        {
+            MigrationWorkerParkedOwnership::MigrationExecutionConfirmed(
+                owner.confirm_migration_execution(),
+            )
+        }
+        NativePostRecoveryMigrationExecutionConfirmationOutcome::Confirmed(owner)
+        | NativePostRecoveryMigrationExecutionConfirmationOutcome::Cancelled(owner)
+        | NativePostRecoveryMigrationExecutionConfirmationOutcome::Unavailable(owner) => {
+            MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(owner)
+        }
+    }
+}
+
+#[cfg(windows)]
 fn migration_verification_preparation_state(
     owner: &MigrationWorkerParkedOwnership,
 ) -> MigrationPreparationState {
@@ -3496,6 +3742,9 @@ fn migration_verification_preparation_state(
         }
         MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(_) => {
             MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
+        }
+        MigrationWorkerParkedOwnership::MigrationExecutionConfirmed(_) => {
+            MigrationPreparationState::MigrationExecutionConfirmedAwaitingWritablePreparation
         }
         _ => std::process::abort(),
     }
@@ -3798,6 +4047,9 @@ fn retry_migration_worker_ownership(
         }
         MigrationWorkerParkedOwnership::TwoCompleteRecoverySetsVerified(verified) => {
             shutdown_recovery_source(verified.abandon_published_destinations_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::MigrationExecutionConfirmed(confirmed) => {
+            shutdown_recovery_source(confirmed.abandon_published_destinations_and_retain_source())
         }
         MigrationWorkerParkedOwnership::TerminalFailure(failure) => {
             match failure.retry_source_close() {
@@ -4545,6 +4797,20 @@ pub(crate) fn request_first_time_setup(app: AppHandle) -> FirstTimeSetupRequestR
     {
         let _ = app;
         FirstTimeSetupRequestResult::Unavailable
+    }
+}
+
+#[tauri::command]
+pub(crate) fn request_post_recovery_migration_execution_confirmation(
+    state: tauri::State<'_, Arc<ApplicationLifecycle>>,
+) -> PostRecoveryMigrationExecutionConfirmationRequestResult {
+    #[cfg(windows)]
+    return state.request_post_recovery_migration_execution_confirmation();
+
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        PostRecoveryMigrationExecutionConfirmationRequestResult::Unavailable
     }
 }
 
@@ -5486,7 +5752,7 @@ mod tests {
             .0;
         assert_eq!(
             startup_status,
-            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,"
+            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,"
         );
 
         let request_result = SOURCE
@@ -5673,7 +5939,7 @@ mod tests {
         assert!(!bootstrap.contains("run_first_time_setup"));
         assert!(
             bootstrap.contains(
-                ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup\n        ])"
+                ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup,\n            request_post_recovery_migration_execution_confirmation\n        ])"
             )
         );
 
@@ -7502,7 +7768,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_confirmation_has_no_ipc_frontend_or_startup_status_surface() {
+    fn earlier_migration_confirmation_has_no_ipc_frontend_or_startup_status_surface() {
         const LIFECYCLE: &str = include_str!("application_lifecycle.rs");
         const BOOTSTRAP: &str = include_str!("lib.rs");
         const FRONTEND: &str = include_str!("../../src/App.tsx");
@@ -7522,7 +7788,13 @@ mod tests {
             .split_once("\n}")
             .unwrap()
             .0;
-        assert!(!startup_status.contains("Migration"));
+        for forbidden in ["Pending", "Authorized", "Revoked", "Revalidation"] {
+            assert!(!startup_status.contains(forbidden));
+        }
+        assert!(
+            startup_status.contains("TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution")
+        );
+        assert!(startup_status.contains("MigrationExecutionConfirmedAwaitingWritablePreparation"));
     }
 
     #[test]
@@ -7596,7 +7868,7 @@ mod tests {
         let bootstrap = include_str!("lib.rs");
         assert!(
             bootstrap.contains(
-                ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup\n        ])"
+                ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup,\n            request_post_recovery_migration_execution_confirmation\n        ])"
             )
         );
         assert!(bootstrap.contains("lifecycle.start(app.handle().clone())"));
@@ -9471,5 +9743,153 @@ mod tests {
         for forbidden in ["remove_", "delete", "cleanup", "execute_migration"] {
             assert!(!shutdown.contains(forbidden));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_recovery_confirmation_request_is_exact_state_argument_free_and_single_outstanding() {
+        let lifecycle = ApplicationLifecycle::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_preparation =
+                MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution;
+            inner.migration_control = Some(sender);
+            inner.migration_work_resolved = false;
+        }
+
+        assert_eq!(
+            lifecycle.request_post_recovery_migration_execution_confirmation(),
+            PostRecoveryMigrationExecutionConfirmationRequestResult::Started
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            MigrationWorkerCommand::RequestPostRecoveryMigrationExecutionConfirmation
+        ));
+        assert_eq!(
+            lifecycle.request_post_recovery_migration_execution_confirmation(),
+            PostRecoveryMigrationExecutionConfirmationRequestResult::NotAllowed
+        );
+        assert!(!lifecycle.lock().migration_work_resolved);
+
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let command = SOURCE
+            .split_once(
+                "#[tauri::command]\npub(crate) fn request_post_recovery_migration_execution_confirmation(",
+            )
+            .unwrap()
+            .1
+            .split_once("#[cfg(all(windows, debug_assertions))]")
+            .unwrap()
+            .0;
+        for forbidden in ["bool", "Path", "schema", "DatabaseKey", "token", "artifact"] {
+            assert!(!command.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_recovery_confirmation_coarse_states_are_exact_and_unresolved() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_preparation =
+                MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution;
+            inner.migration_work_resolved = false;
+        }
+        assert_eq!(
+            lifecycle.status(),
+            StartupStatus::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
+        );
+
+        lifecycle.lock().migration_preparation =
+            MigrationPreparationState::MigrationExecutionConfirmedAwaitingWritablePreparation;
+        assert_eq!(
+            lifecycle.status(),
+            StartupStatus::MigrationExecutionConfirmedAwaitingWritablePreparation
+        );
+        assert!(!lifecycle.lock().migration_work_resolved);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_recovery_confirmation_dispatch_preserves_ownership_and_shutdown_arbitration() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_post_recovery_migration_execution_confirmation_dispatch(")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+
+        assert!(dispatch.contains("app.run_on_main_thread"));
+        assert!(dispatch.contains("get_webview_window(\"main\")"));
+        assert!(dispatch.contains("window.hwnd()"));
+        assert!(dispatch.contains("take_armed_custody_dispatch_for_main"));
+        assert!(dispatch.contains("cancel_armed_custody_dispatch"));
+        assert!(
+            dispatch.contains("shutdown_requested || self.lock().migration_shutdown_requested")
+        );
+        assert!(
+            dispatch.contains("migration_execution_confirmation_outcome_ownership(outcome, false)")
+        );
+        assert!(
+            dispatch.contains("migration_execution_confirmation_outcome_ownership(outcome, true)")
+        );
+        assert_eq!(
+            dispatch
+                .matches("request_native_post_recovery_migration_execution_confirmation(")
+                .count(),
+            1
+        );
+        for forbidden in [
+            "migration_confirmation.authorize",
+            "open_keyed",
+            "recover_database_key",
+            "rusqlite",
+            "execute_batch",
+            "BEGIN IMMEDIATE",
+            "user_version",
+            "remove_file",
+            "rename",
+        ] {
+            assert!(!dispatch.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fresh_native_confirmed_is_the_only_execution_authority_and_shutdown_is_source_only() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let classification = SOURCE
+            .split_once("fn migration_execution_confirmation_outcome_ownership(")
+            .unwrap()
+            .1
+            .split_once("fn migration_verification_preparation_state")
+            .unwrap()
+            .0;
+        assert!(
+            classification.contains(
+                "NativePostRecoveryMigrationExecutionConfirmationOutcome::Confirmed(owner)"
+            )
+        );
+        assert!(classification.contains("if confirmation_may_be_adopted"));
+        assert!(classification.contains("owner.confirm_migration_execution()"));
+        assert!(!classification.contains("ProductionDatabaseMigrationConfirmation"));
+
+        let shutdown = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1
+            .split_once("MigrationWorkerParkedOwnership::TerminalFailure")
+            .unwrap()
+            .0;
+        assert!(
+            shutdown
+                .contains("MigrationWorkerParkedOwnership::MigrationExecutionConfirmed(confirmed)")
+        );
+        assert!(shutdown.contains("confirmed.abandon_published_destinations_and_retain_source()"));
+        assert!(shutdown.contains("shutdown_recovery_source("));
     }
 }

@@ -7,7 +7,9 @@ export type StartupStatus =
   | "setupInProgress"
   | "setupRestartRequired"
   | "stopping"
-  | "shutdownIncomplete";
+  | "shutdownIncomplete"
+  | "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
+  | "migrationExecutionConfirmedAwaitingWritablePreparation";
 
 export type FirstTimeSetupRequestResult =
   | "started"
@@ -25,7 +27,21 @@ const startupStatuses = new Set<StartupStatus>([
   "setupRestartRequired",
   "stopping",
   "shutdownIncomplete",
+  "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
+  "migrationExecutionConfirmedAwaitingWritablePreparation",
 ]);
+
+export type PostRecoveryMigrationExecutionConfirmationRequestResult =
+  | "started"
+  | "notAllowed"
+  | "unavailable";
+
+const postRecoveryMigrationExecutionConfirmationRequestResults =
+  new Set<PostRecoveryMigrationExecutionConfirmationRequestResult>([
+    "started",
+    "notAllowed",
+    "unavailable",
+  ]);
 
 const firstTimeSetupRequestResults = new Set<FirstTimeSetupRequestResult>([
   "started",
@@ -53,6 +69,20 @@ export async function requestFirstTimeSetup(): Promise<FirstTimeSetupRequestResu
     return typeof result === "string" &&
       firstTimeSetupRequestResults.has(result as FirstTimeSetupRequestResult)
       ? (result as FirstTimeSetupRequestResult)
+      : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export async function requestPostRecoveryMigrationExecutionConfirmation(): Promise<PostRecoveryMigrationExecutionConfirmationRequestResult> {
+  try {
+    const result = await invoke<unknown>("request_post_recovery_migration_execution_confirmation");
+    return typeof result === "string" &&
+      postRecoveryMigrationExecutionConfirmationRequestResults.has(
+        result as PostRecoveryMigrationExecutionConfirmationRequestResult,
+      )
+      ? (result as PostRecoveryMigrationExecutionConfirmationRequestResult)
       : "unavailable";
   } catch {
     return "unavailable";

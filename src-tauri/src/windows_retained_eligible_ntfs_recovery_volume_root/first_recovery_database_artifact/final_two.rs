@@ -9,6 +9,12 @@ pub(crate) struct TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBack
     _final_layer_d_complete: (),
 }
 
+pub(crate) struct MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup
+{
+    final_recovery_proof: TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    _fresh_native_confirmation: (),
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum FinalTwoSetVerificationError {
     SourceUnavailableOrChanged,
@@ -33,6 +39,16 @@ impl fmt::Debug for TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBa
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(
             "TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup([REDACTED])",
+        )
+    }
+}
+
+impl fmt::Debug
+    for MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup([REDACTED])",
         )
     }
 }
@@ -323,12 +339,32 @@ impl FinalTwoSetVerificationFailure {
 }
 
 impl TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn confirm_migration_execution(
+        self,
+    ) -> MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup
+    {
+        MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup {
+            final_recovery_proof: self,
+            _fresh_native_confirmation: (),
+        }
+    }
+
     pub(crate) fn abandon_published_destinations_and_retain_source(
         self,
     ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
     {
         self.second_complete_set
             .abandon_published_destination_and_retain_source()
+    }
+}
+
+impl MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn abandon_published_destinations_and_retain_source(
+        self,
+    ) -> crate::application_lifecycle::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup
+    {
+        self.final_recovery_proof
+            .abandon_published_destinations_and_retain_source()
     }
 }
 
@@ -343,6 +379,9 @@ mod tests {
             TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
         >());
         assert!(needs_drop::<FinalTwoSetVerificationFailure>());
+        assert!(needs_drop::<
+            MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+        >());
         let source = include_str!("final_two.rs");
         let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         assert!(production.contains("mut second_complete_set: SecondCompleteRecoverySetVerified,"));
@@ -375,6 +414,35 @@ mod tests {
         }
         assert!(production.contains("FinalTwoSetVerificationFailure([REDACTED])"));
         assert!(production.contains("retry(self)"));
+    }
+
+    #[test]
+    fn execution_confirmation_owner_is_single_use_process_local_and_retains_final_proof() {
+        let source = include_str!("final_two.rs");
+        let owner = source
+            .split_once("pub(crate) struct MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup")
+            .unwrap()
+            .1
+            .split_once("}")
+            .unwrap()
+            .0;
+        assert!(owner.contains(
+            "final_recovery_proof: TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup"
+        ));
+        for forbidden in ["Clone", "Copy", "Serialize", "Connection", "DatabaseKey"] {
+            assert!(!owner.contains(forbidden));
+        }
+
+        let transition = source
+            .split_once("pub(crate) fn confirm_migration_execution(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn abandon_published_destinations_and_retain_source")
+            .unwrap()
+            .0;
+        assert!(transition.contains("final_recovery_proof: self"));
+        assert!(!transition.contains("clone"));
+        assert!(!transition.contains("serialize"));
     }
 
     #[test]

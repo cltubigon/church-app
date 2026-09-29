@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router";
 import styles from "./App.module.css";
 import { HealthPanel } from "./components/HealthPanel";
-import { getStartupStatus, requestFirstTimeSetup, type StartupStatus } from "./lib/startup";
+import {
+  getStartupStatus,
+  requestFirstTimeSetup,
+  requestPostRecoveryMigrationExecutionConfirmation,
+  type StartupStatus,
+} from "./lib/startup";
 
 const areas = [
   { label: "Requests", path: "/requests" },
@@ -50,6 +55,9 @@ function UnknownRoute() {
 }
 
 interface StartupBoundaryProps {
+  migrationConfirmationError: string | null;
+  migrationConfirmationPending: boolean;
+  onRequestMigrationConfirmation: () => void;
   onRequestSetup: () => void;
   setupError: string | null;
   setupRequestPending: boolean;
@@ -57,6 +65,9 @@ interface StartupBoundaryProps {
 }
 
 function StartupBoundary({
+  migrationConfirmationError,
+  migrationConfirmationPending,
+  onRequestMigrationConfirmation,
   onRequestSetup,
   setupError,
   setupRequestPending,
@@ -69,6 +80,10 @@ function StartupBoundary({
     setupRestartRequired: "First-time setup is complete. Restart the application to continue.",
     stopping: "The application is stopping.",
     shutdownIncomplete: "The application could not complete shutdown.",
+    twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution:
+      "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
+    migrationExecutionConfirmedAwaitingWritablePreparation:
+      "Migration execution is confirmed. Writable migration preparation has not begun.",
   }[status];
 
   return (
@@ -85,6 +100,23 @@ function StartupBoundary({
             {setupError !== null && <p role="alert">{setupError}</p>}
           </div>
         )}
+        {status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" && (
+          <div aria-busy={migrationConfirmationPending} className={styles.setupAction}>
+            <p>Review the trusted Windows confirmation before authorizing the future migration.</p>
+            <button
+              disabled={migrationConfirmationPending}
+              onClick={onRequestMigrationConfirmation}
+              type="button"
+            >
+              {migrationConfirmationPending
+                ? "Opening migration confirmation…"
+                : "Confirm migration authorization"}
+            </button>
+            {migrationConfirmationError !== null && (
+              <p role="alert">{migrationConfirmationError}</p>
+            )}
+          </div>
+        )}
       </section>
     </main>
   );
@@ -95,6 +127,8 @@ export function App() {
   const [statusRefreshKey, setStatusRefreshKey] = useState(0);
   const [setupRequestPending, setSetupRequestPending] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const [migrationConfirmationPending, setMigrationConfirmationPending] = useState(false);
+  const [migrationConfirmationError, setMigrationConfirmationError] = useState<string | null>(null);
 
   useEffect(() => {
     void statusRefreshKey;
@@ -109,6 +143,7 @@ export function App() {
         status === "starting" ||
         status === "ready" ||
         status === "setupInProgress" ||
+        status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" ||
         status === "stopping"
       ) {
         timer = setTimeout(refresh, 500);
@@ -124,6 +159,9 @@ export function App() {
 
   useEffect(() => {
     if (startupStatus !== "unavailable") setSetupError(null);
+    if (startupStatus !== "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution") {
+      setMigrationConfirmationError(null);
+    }
   }, [startupStatus]);
 
   async function requestSetup() {
@@ -139,9 +177,25 @@ export function App() {
     setSetupRequestPending(false);
   }
 
+  async function requestMigrationConfirmation() {
+    if (migrationConfirmationPending) return;
+
+    setMigrationConfirmationPending(true);
+    setMigrationConfirmationError(null);
+    const result = await requestPostRecoveryMigrationExecutionConfirmation();
+    if (result === "unavailable") {
+      setMigrationConfirmationError("Migration confirmation could not be opened.");
+    }
+    setStatusRefreshKey((key) => key + 1);
+    setMigrationConfirmationPending(false);
+  }
+
   if (startupStatus !== "ready") {
     return (
       <StartupBoundary
+        migrationConfirmationError={migrationConfirmationError}
+        migrationConfirmationPending={migrationConfirmationPending}
+        onRequestMigrationConfirmation={() => void requestMigrationConfirmation()}
         onRequestSetup={() => void requestSetup()}
         setupError={setupError}
         setupRequestPending={setupRequestPending}
