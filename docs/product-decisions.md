@@ -1,7 +1,7 @@
 # Product decisions
 
 - **Exact-V2 business database authority:** one dedicated Rust worker owns one long-lived writable SQLCipher connection after a consuming read-only-to-writable handoff. Only a freshly validated canonical Exact-V2 operational owner can enter it. The queue is bounded, operations are serial, foreign keys are mandatory and verified, and shutdown is joined and checked-close preserving.
-- **Current operation boundary:** the worker exposes sealed Rust-only commands for request creation/detail/list reads, Pending occurrence create/update/delete, scheduling, rescheduling, completion, and current schedule occupancy. Every mutation uses `BEGIN IMMEDIATE`; no arbitrary SQL/callback surface, IPC, or frontend access exists. Cancellation reviews, opaque frontend references, restore, and retention/deletion remain future work.
+- **Current operation boundary:** the worker exposes sealed commands for request creation/detail/list reads, Pending occurrence create/update/delete, scheduling, rescheduling, completion, current schedule occupancy, and cancellation reviews. Every mutation uses `BEGIN IMMEDIATE`. Typed Exact-V2-only IPC uses separate process-session Request, Occurrence, and Cancellation Review references; it exposes no arbitrary SQL/callback, database ID, status setter, timestamp authority, key, or path. Restore and retention/deletion remain future work.
 - **Locked deletion decision:** a draft occurrence may be deleted only while its parent request remains `Pending`. Deletion is prohibited after the parent becomes `Scheduled`, `Completed`, or `Cancelled`; rescheduling updates the retained row in place.
 
 ## Implemented foundation facts
@@ -303,7 +303,7 @@ This is the canonical record for the final approved product behavior and physica
 
 ### STILL UNIMPLEMENTED
 
-The V2 physical schema, gated migration creation, exact validation, fresh-startup adoption, and sealed Rust-only Requests/Scheduling/Cancellation Review persistence are implemented. No general writable connection policy, business IPC, form, or frontend workflow is introduced. The contract requires `database_schema_version = 2`, `metadata_contract_version = 1`, SQLite `user_version = 2`, unchanged `application_id = 0x43484150`, and unchanged `ApplicationDatabaseFormatIdentity`. The only compatibility direction is 1 -> 2; versions newer than 2 are unsupported and downgrade-refused. Opaque frontend references, Requests/Scheduling/Cancellation Review UI, restore/replacement, retention/deletion, and end-to-end manual business workflow validation remain unimplemented.
+The V2 physical schema, gated migration creation, exact validation, fresh-startup adoption, sealed persistence, typed business IPC, process-session opaque references, and Requests/Scheduling/Cancellation Review UI are implemented. No general writable connection policy or arbitrary database frontend is introduced. The contract requires `database_schema_version = 2`, `metadata_contract_version = 1`, SQLite `user_version = 2`, unchanged `application_id = 0x43484150`, and unchanged `ApplicationDatabaseFormatIdentity`. The only compatibility direction is 1 -> 2; versions newer than 2 are unsupported and downgrade-refused. Restore/replacement, retention/deletion, and end-to-end manual Windows business workflow validation remain unimplemented.
 
 ## Other locked future direction (not implemented)
 

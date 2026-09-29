@@ -1303,6 +1303,38 @@ impl ApplicationLifecycle {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn business_features_available(&self) -> bool {
+        matches!(
+            self.lock().state,
+            LifecycleState::Ready(OperationalProductionDatabase::ExactV2(_))
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn with_exact_v2_business<T>(
+        &self,
+        operation: impl FnOnce(
+            &OperationalV2BusinessDatabase,
+        ) -> Result<
+            T,
+            crate::production_database_connection_handoff::v2_business_database::BusinessFailure,
+        >,
+    ) -> Result<
+        T,
+        crate::production_database_connection_handoff::v2_business_database::BusinessFailure,
+    > {
+        let inner = self.lock();
+        match &inner.state {
+            LifecycleState::Ready(OperationalProductionDatabase::ExactV2(database)) => {
+                operation(database)
+            }
+            _ => Err(
+                crate::production_database_connection_handoff::v2_business_database::BusinessFailure::DatabaseUnavailable,
+            ),
+        }
+    }
+
     fn shutdown_pending(&self) -> bool {
         self.lock().state.shutdown_pending()
     }
@@ -6248,11 +6280,14 @@ mod tests {
     fn setup_integration_adds_no_startup_reentry() {
         let bootstrap = include_str!("lib.rs");
         assert!(!bootstrap.contains("run_first_time_setup"));
-        assert!(
-            bootstrap.contains(
-                ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup,\n            request_post_recovery_migration_execution_confirmation\n        ])"
-            )
-        );
+        for command in [
+            "health_check,",
+            "startup_status,",
+            "request_first_time_setup,",
+            "request_post_recovery_migration_execution_confirmation,",
+        ] {
+            assert!(bootstrap.contains(command));
+        }
 
         const SOURCE: &str = include_str!("application_lifecycle.rs");
         let setup_request = SOURCE
@@ -8221,11 +8256,14 @@ mod tests {
         }
 
         let bootstrap = include_str!("lib.rs");
-        assert!(
-            bootstrap.contains(
-                ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup,\n            request_post_recovery_migration_execution_confirmation\n        ])"
-            )
-        );
+        for command in [
+            "health_check,",
+            "startup_status,",
+            "request_first_time_setup,",
+            "request_post_recovery_migration_execution_confirmation,",
+        ] {
+            assert!(bootstrap.contains(command));
+        }
         assert!(bootstrap.contains("lifecycle.start(app.handle().clone())"));
         assert!(!bootstrap.contains("generate_handler![activate_production_database"));
         assert!(!bootstrap.contains("generate_handler![retry"));

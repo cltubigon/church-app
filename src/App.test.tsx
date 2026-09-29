@@ -20,7 +20,12 @@ function renderApp(path = "/") {
 describe("application foundation", () => {
   beforeEach(() => {
     mockedInvoke.mockReset();
-    mockedInvoke.mockResolvedValue("ready");
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(true);
+      if (command === "business_list_requests") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
   });
 
   it("renders an accessible unfinished shell with only approved area links", async () => {
@@ -29,15 +34,15 @@ describe("application foundation", () => {
     expect(screen.getByRole("heading", { level: 1, name: "Church App" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toBeInTheDocument();
     expect(screen.getByRole("contentinfo")).toBeInTheDocument();
-    expect(screen.getByText("Unfinished application foundation")).toBeInTheDocument();
-    const navigation = screen.getByRole("navigation", { name: "Staff area placeholders" });
-    for (const name of ["Requests", "Schedule", "Permanent Records", "Requirements"]) {
+    expect(screen.getByText("Parish request workflows")).toBeInTheDocument();
+    const navigation = screen.getByRole("navigation", { name: "Staff areas" });
+    for (const name of ["Requests", "Scheduling", "Cancellation Review"]) {
       expect(navigation).toContainElement(screen.getByRole("link", { name }));
     }
-    expect(navigation.querySelectorAll("a")).toHaveLength(4);
+    expect(navigation.querySelectorAll("a")).toHaveLength(3);
   });
 
-  it("supports keyboard placeholder navigation", async () => {
+  it("supports keyboard workflow navigation", async () => {
     const user = userEvent.setup();
     renderApp();
     await screen.findByRole("banner");
@@ -47,9 +52,7 @@ describe("application foundation", () => {
     expect(screen.getByRole("link", { name: "Requests" })).toHaveFocus();
     await user.keyboard("{Enter}");
     expect(screen.getByRole("heading", { level: 2, name: "Requests" })).toBeInTheDocument();
-    expect(
-      screen.getByText("Requests is unavailable and has not yet been implemented."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("No requests found.")).toBeInTheDocument();
   });
 
   it("renders a safe fallback for an unknown route", async () => {
@@ -63,6 +66,7 @@ describe("application foundation", () => {
   it("renders a successful typed health response", async () => {
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(true);
       return Promise.resolve({
         applicationName: "Church App Foundation",
         bootstrapStatus: "ready",
@@ -91,6 +95,7 @@ describe("application foundation", () => {
     });
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(true);
       return Promise.resolve({ code: "backend_debug", message: rawError });
     });
     const user = userEvent.setup();
@@ -116,7 +121,7 @@ describe("application foundation", () => {
 
   it.each([
     ["starting", "Preparing the application securely. This may take some time."],
-    ["ready", "Unfinished application foundation"],
+    ["ready", "Parish request workflows"],
     ["setupInProgress", "First-time setup is in progress."],
     ["setupRestartRequired", "First-time setup is complete. Restart the application to continue."],
     ["stopping", "The application is stopping."],
@@ -134,7 +139,9 @@ describe("application foundation", () => {
       "The writable V1 migration database is prepared and verified. The migration transaction has not begun.",
     ],
   ])("does not offer first-time setup while startup status is %s", async (status, message) => {
-    mockedInvoke.mockResolvedValue(status);
+    mockedInvoke.mockImplementation((command) =>
+      command === "business_features_available" ? Promise.resolve(true) : Promise.resolve(status),
+    );
     renderApp();
     expect(await screen.findByText(message)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
@@ -144,9 +151,7 @@ describe("application foundation", () => {
       ).not.toBeInTheDocument();
     }
     if (status === "ready") {
-      expect(
-        screen.getByRole("navigation", { name: "Staff area placeholders" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("navigation", { name: "Staff areas" })).toBeInTheDocument();
     } else {
       expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
     }
@@ -366,5 +371,141 @@ describe("application foundation", () => {
     expect(document.body.textContent).not.toContain("sensitive unexpected setup result");
     expect(document.body.textContent).not.toContain("setup-secret");
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("renders request summaries and Pending draft actions without a synthetic cancellation status", async () => {
+    const request = {
+      requestRef: "request_opaque",
+      serviceCategory: "baptism",
+      status: "pending",
+      requester: { fullName: "Synthetic Person", phone: "555-0100", email: null },
+      createdAt: 1_700_000_000_000,
+    };
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(true);
+      if (command === "business_list_requests") return Promise.resolve([request]);
+      if (command === "business_get_request") {
+        return Promise.resolve({
+          request,
+          occurrences: [
+            {
+              occurrenceRef: "occurrence_opaque",
+              kind: "primary",
+              localDate: "2028-04-12",
+              localTime: "09:30",
+              location: null,
+            },
+          ],
+          cancellationReviews: [],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    const user = userEvent.setup();
+    renderApp("/requests");
+    await user.click(await screen.findByRole("button", { name: /Synthetic Person/ }));
+    expect(await screen.findByRole("heading", { name: "Synthetic Person" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete draft" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Schedule" })).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Cancellation requested");
+  });
+
+  it("keeps Scheduled visible while a Pending review exists and keeps its occupied slot", async () => {
+    const request = {
+      requestRef: "request_scheduled",
+      serviceCategory: "weddingMarriage",
+      status: "scheduled",
+      requester: { fullName: "Synthetic Couple", phone: "555-0101", email: null },
+      createdAt: 1_700_000_000_000,
+    };
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(true);
+      if (command === "business_list_schedule_occupancy") {
+        return Promise.resolve([
+          {
+            requestRef: request.requestRef,
+            serviceCategory: request.serviceCategory,
+            occurrence: {
+              occurrenceRef: "occurrence_scheduled",
+              kind: "primary",
+              localDate: "2028-05-20",
+              localTime: "13:00",
+              location: "Parish Church",
+            },
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
+    renderApp("/scheduling");
+    expect(await screen.findByText("05/20/2028")).toBeInTheDocument();
+    expect(screen.getByText("1:00 PM")).toBeInTheDocument();
+    expect(screen.getByText("Parish Church")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Cancellation requested");
+  });
+
+  it("uses the dedicated pending-review query and refreshes the queue after approval", async () => {
+    let approved = false;
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(true);
+      if (command === "business_list_pending_cancellation_reviews") {
+        return Promise.resolve(
+          approved
+            ? []
+            : [
+                {
+                  cancellationReviewRef: "review_opaque",
+                  requestRef: "request_opaque",
+                  serviceCategory: "burialFuneral",
+                  requestStatus: "scheduled",
+                  requesterDisplayName: "Synthetic Family",
+                  requestedAt: 1_700_000_000_000,
+                },
+              ],
+        );
+      }
+      if (command === "business_approve_cancellation_review") {
+        approved = true;
+        return Promise.resolve(undefined);
+      }
+      return Promise.resolve(undefined);
+    });
+    const user = userEvent.setup();
+    renderApp("/cancellation-review");
+    expect(await screen.findByText("Synthetic Family")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+    expect(await screen.findByText("No pending cancellation reviews.")).toBeInTheDocument();
+    expect(mockedInvoke).toHaveBeenCalledWith("business_approve_cancellation_review", {
+      cancellationReviewRef: "review_opaque",
+    });
+  });
+
+  it("uses the dedicated pending-review filter without adding a row badge", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(true);
+      if (command === "business_list_requests") return Promise.resolve([]);
+      if (command === "business_list_requests_with_pending_cancellation_review") {
+        return Promise.resolve([
+          {
+            requestRef: "request_filtered",
+            serviceCategory: "confirmation",
+            status: "scheduled",
+            requester: { fullName: "Synthetic Candidate", phone: "555-0102", email: null },
+            createdAt: 1_700_000_000_000,
+          },
+        ]);
+      }
+      return Promise.resolve(undefined);
+    });
+    const user = userEvent.setup();
+    renderApp("/requests");
+    await user.click(await screen.findByRole("checkbox", { name: "Pending cancellation review" }));
+    expect(await screen.findByText("Synthetic Candidate")).toBeInTheDocument();
+    expect(screen.getByText("Scheduled")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Cancellation requested");
   });
 });

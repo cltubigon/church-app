@@ -883,8 +883,13 @@ mod tests {
         }
 
         assert_eq!(lifecycle_production.matches("#[tauri::command]").count(), 3);
-        assert!(BOOTSTRAP.contains(
-            ".invoke_handler(tauri::generate_handler![\n            health_check,\n            startup_status,\n            request_first_time_setup,\n            request_post_recovery_migration_execution_confirmation\n        ])"
-        ));
+        for command in [
+            "health_check,",
+            "startup_status,",
+            "request_first_time_setup,",
+            "request_post_recovery_migration_execution_confirmation,",
+        ] {
+            assert!(BOOTSTRAP.contains(command));
+        }
     }
 }

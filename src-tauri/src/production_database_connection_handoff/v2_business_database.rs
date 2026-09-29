@@ -20,6 +20,8 @@ use rusqlite::{
     params,
 };
 
+pub(crate) mod business_ipc;
+
 use crate::{
     database_key_active_wrapper_loader::load_active_database_key_wrapper,
     database_key_presence::inspect_database_key_active_presence,
@@ -276,7 +278,6 @@ pub(crate) struct OperationalV2BusinessDatabase {
     worker: Option<JoinHandle<ProductionDatabaseConnectionCloseOutcome>>,
 }
 
-#[allow(dead_code)] // Rust-only service calls are intentionally not wired to IPC yet.
 enum BusinessDatabaseCommand {
     CreateRequest {
         input: CreateServiceRequest,
@@ -352,7 +353,6 @@ impl fmt::Debug for OperationalV2BusinessDatabase {
     }
 }
 
-#[allow(dead_code)] // The next IPC slice will consume this sealed crate-private surface.
 impl OperationalV2BusinessDatabase {
     fn request<T>(
         &self,

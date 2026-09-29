@@ -94,6 +94,168 @@
 .panel p {
   max-width: 65ch;
 }
+.panel h3,
+.panel h4 {
+  color: #1f3f37;
+}
+.formGrid,
+.compactForm {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.85rem;
+  align-items: end;
+  margin: 1rem 0 1.5rem;
+}
+.formGrid label,
+.compactForm label {
+  display: grid;
+  gap: 0.35rem;
+  color: #33483f;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+.formGrid input,
+.formGrid select,
+.compactForm input,
+.compactForm select {
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.55rem;
+  color: #27342f;
+  background: #fff;
+  border: 1px solid #a9aaa5;
+  border-radius: 0.3rem;
+}
+.panel button {
+  min-height: 2.5rem;
+  padding: 0.55rem 0.8rem;
+  color: #fff;
+  background: #27594b;
+  border: 2px solid #27594b;
+  border-radius: 0.35rem;
+  cursor: pointer;
+  font-weight: 700;
+}
+.panel button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.panel [role="alert"] {
+  padding: 0.7rem;
+  color: #702f1a;
+  background: #fff2ec;
+  border-left: 0.25rem solid #b44d20;
+}
+.listToolbar,
+.sectionHeading,
+.actions,
+.reviewList li {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.checkbox {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+}
+.requestList,
+.reviewList,
+.simpleList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.requestList li + li,
+.reviewList li + li {
+  border-top: 1px solid #e1dbd1;
+}
+.panel .requestRow {
+  display: flex;
+  width: 100%;
+  padding: 0.85rem 0;
+  color: #27342f;
+  background: transparent;
+  border: 0;
+  justify-content: space-between;
+  text-align: left;
+}
+.requestRow span:first-child {
+  display: grid;
+  gap: 0.2rem;
+}
+.requestRow small {
+  color: #5a665f;
+}
+.status {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  color: #27594b;
+  background: #e7f0ed;
+  border-radius: 1rem;
+  font-size: 0.8rem;
+  font-weight: 750;
+}
+.detailPanel {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 2px solid #d8d0c2;
+}
+.sectionHeading h3 {
+  margin: 0.25rem 0;
+}
+.details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.75rem;
+}
+.details div {
+  padding: 0.7rem;
+  background: #f7f4ee;
+}
+.details dt {
+  color: #67746d;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.details dd {
+  margin: 0.2rem 0 0;
+}
+.occurrenceCard {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  background: #faf8f3;
+  border: 1px solid #e1dbd1;
+  border-radius: 0.4rem;
+}
+.panel .secondaryButton {
+  color: #27594b;
+  background: #fff;
+}
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.table th,
+.table td {
+  padding: 0.7rem 0.5rem;
+  border-bottom: 1px solid #ded8cd;
+  text-align: left;
+}
+.table th {
+  color: #526159;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+.reviewList li {
+  padding: 1rem 0;
+}
+.reviewList p {
+  margin: 0.25rem 0 0;
+}
 .setupAction {
   margin-top: 1.5rem;
   padding-top: 1.25rem;

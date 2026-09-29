@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router";
 import styles from "./App.module.css";
+import {
+  CancellationReviewScreen,
+  RequestsScreen,
+  SchedulingScreen,
+} from "./components/BusinessScreens";
 import { HealthPanel } from "./components/HealthPanel";
+import { getBusinessFeaturesAvailable } from "./lib/business";
 import {
   getStartupStatus,
   requestFirstTimeSetup,
@@ -11,32 +17,20 @@ import {
 
 const areas = [
   { label: "Requests", path: "/requests" },
-  { label: "Schedule", path: "/schedule" },
-  { label: "Permanent Records", path: "/permanent-records" },
-  { label: "Requirements", path: "/requirements" },
+  { label: "Scheduling", path: "/scheduling" },
+  { label: "Cancellation Review", path: "/cancellation-review" },
 ] as const;
 
 function FoundationOverview() {
   return (
     <section aria-labelledby="foundation-heading" className={styles.panel}>
-      <p className={styles.eyebrow}>Initial repository bootstrap</p>
-      <h2 id="foundation-heading">Unfinished application foundation</h2>
+      <p className={styles.eyebrow}>Exact-V2 parish operations</p>
+      <h2 id="foundation-heading">Parish request workflows</h2>
       <p>
-        This shell confirms the desktop foundation only. Parish workflows and data storage are not
-        implemented, and no real parish data should be entered.
+        Create and schedule service requests, review the live schedule, and decide cancellation
+        reviews using the approved workflow areas.
       </p>
       <HealthPanel />
-    </section>
-  );
-}
-
-function Placeholder({ area }: { area: (typeof areas)[number]["label"] }) {
-  return (
-    <section aria-labelledby="placeholder-heading" className={styles.panel}>
-      <p className={styles.eyebrow}>Placeholder area</p>
-      <h2 id="placeholder-heading">{area}</h2>
-      <p>{area} is unavailable and has not yet been implemented.</p>
-      <p>This page does not accept, store, or simulate parish data.</p>
     </section>
   );
 }
@@ -134,6 +128,7 @@ export function App() {
   const [setupError, setSetupError] = useState<string | null>(null);
   const [migrationConfirmationPending, setMigrationConfirmationPending] = useState(false);
   const [migrationConfirmationError, setMigrationConfirmationError] = useState<string | null>(null);
+  const [businessFeaturesAvailable, setBusinessFeaturesAvailable] = useState<boolean | null>(null);
 
   useEffect(() => {
     void statusRefreshKey;
@@ -168,6 +163,22 @@ export function App() {
     if (startupStatus !== "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution") {
       setMigrationConfirmationError(null);
     }
+  }, [startupStatus]);
+
+  useEffect(() => {
+    let active = true;
+    if (startupStatus !== "ready") {
+      setBusinessFeaturesAvailable(null);
+      return () => {
+        active = false;
+      };
+    }
+    void getBusinessFeaturesAvailable().then((available) => {
+      if (active) setBusinessFeaturesAvailable(available);
+    });
+    return () => {
+      active = false;
+    };
   }, [startupStatus]);
 
   async function requestSetup() {
@@ -210,17 +221,39 @@ export function App() {
     );
   }
 
+  if (businessFeaturesAvailable === null) {
+    return (
+      <main className={styles.main}>
+        <section className={styles.panel}>
+          <h1>Church App</h1>
+          <p>Preparing parish workflows…</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!businessFeaturesAvailable) {
+    return (
+      <main className={styles.main}>
+        <section className={styles.panel}>
+          <h1>Church App</h1>
+          <p>Parish workflows are unavailable for this database.</p>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <div className={styles.app}>
       <a className={styles.skipLink} href="#main-content">
         Skip to main content
       </a>
       <header className={styles.header}>
-        <p className={styles.kicker}>Windows desktop foundation</p>
+        <p className={styles.kicker}>Parish operations</p>
         <h1>Church App</h1>
-        <p className={styles.subtitle}>An unfinished, non-production application shell</p>
+        <p className={styles.subtitle}>Requests, scheduling, and cancellation review</p>
       </header>
-      <nav aria-label="Staff area placeholders" className={styles.navigation}>
+      <nav aria-label="Staff areas" className={styles.navigation}>
         <ul>
           {areas.map((area) => (
             <li key={area.path}>
@@ -237,14 +270,14 @@ export function App() {
       <main className={styles.main} id="main-content">
         <Routes>
           <Route element={<FoundationOverview />} path="/" />
-          {areas.map((area) => (
-            <Route element={<Placeholder area={area.label} />} key={area.path} path={area.path} />
-          ))}
+          <Route element={<RequestsScreen />} path="/requests" />
+          <Route element={<SchedulingScreen />} path="/scheduling" />
+          <Route element={<CancellationReviewScreen />} path="/cancellation-review" />
           <Route element={<UnknownRoute />} path="*" />
         </Routes>
       </main>
       <footer className={styles.footer}>
-        Foundation status only. No parish workflow is available.
+        Exact-V2 business workflows. Times are shown in Asia/Manila.
       </footer>
     </div>
   );

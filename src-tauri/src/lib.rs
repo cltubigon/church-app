@@ -123,19 +123,61 @@ pub fn run() {
         request_post_recovery_migration_execution_confirmation, startup_status,
     };
 
+    #[cfg(windows)]
+    use production_database_connection_handoff::v2_business_database::business_ipc::{
+        BusinessIpcState, business_approve_cancellation_review, business_complete_request,
+        business_create_draft_occurrence, business_create_request,
+        business_delete_draft_occurrence, business_features_available, business_get_request,
+        business_list_pending_cancellation_reviews, business_list_requests,
+        business_list_requests_with_pending_cancellation_review, business_list_schedule_occupancy,
+        business_reject_cancellation_review, business_request_cancellation_review,
+        business_reschedule_occurrence, business_schedule_request,
+        business_update_draft_occurrence,
+    };
+
     let lifecycle = ApplicationLifecycle::new();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(Arc::clone(&lifecycle))
         .setup(move |app| {
             lifecycle.start(app.handle().clone());
             Ok(())
-        })
+        });
+
+    #[cfg(windows)]
+    let builder = builder
+        .manage(BusinessIpcState::new())
         .invoke_handler(tauri::generate_handler![
             health_check,
             startup_status,
             request_first_time_setup,
-            request_post_recovery_migration_execution_confirmation
-        ])
+            request_post_recovery_migration_execution_confirmation,
+            business_features_available,
+            business_create_request,
+            business_list_requests,
+            business_list_requests_with_pending_cancellation_review,
+            business_get_request,
+            business_create_draft_occurrence,
+            business_update_draft_occurrence,
+            business_delete_draft_occurrence,
+            business_schedule_request,
+            business_reschedule_occurrence,
+            business_complete_request,
+            business_list_schedule_occupancy,
+            business_request_cancellation_review,
+            business_list_pending_cancellation_reviews,
+            business_approve_cancellation_review,
+            business_reject_cancellation_review
+        ]);
+
+    #[cfg(not(windows))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        health_check,
+        startup_status,
+        request_first_time_setup,
+        request_post_recovery_migration_execution_confirmation
+    ]);
+
+    builder
         .build(tauri::generate_context!())
         .expect("the Church App foundation runtime could not start")
         .run(|app, event| {
