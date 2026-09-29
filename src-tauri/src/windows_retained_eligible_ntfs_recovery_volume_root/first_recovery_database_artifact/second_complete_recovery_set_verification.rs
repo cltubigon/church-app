@@ -7,6 +7,9 @@ mod final_two_set_verification;
 pub(crate) use final_two_set_verification::{
     FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
     MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    ProductionDatabaseV1ToV2MigrationCloseFailure, ProductionDatabaseV1ToV2MigrationOutcome,
+    ProductionDatabaseV1ToV2MigrationRestartRequiredFailure,
+    ProductionDatabaseV2MigrationCommittedRestartRequired,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     WritableV1MigrationOpenedCloseFailure, WritableV1MigrationPreparationFailure,
     WritableV1MigrationPreparationOutcome, WritableV1MigrationPreparedProductionDatabase,

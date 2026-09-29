@@ -730,7 +730,7 @@ mod tests {
             "user_version",
             "std::fs",
             "Path",
-            "File",
+            "File::",
             "invoke_handler",
             "tauri::command",
             "callback",

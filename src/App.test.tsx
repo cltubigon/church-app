@@ -239,6 +239,17 @@ describe("application foundation", () => {
     expect(document.body.textContent).not.toContain("Migration completed");
   });
 
+  it("renders successful migration as restart-required without an action", async () => {
+    mockedInvoke.mockResolvedValue("migrationCommittedRestartRequired");
+    renderApp();
+
+    expect(await screen.findByText("Migration completed. Restart required.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Confirm migration authorization" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
   it("requests setup once without arguments and promptly re-checks startup status", async () => {
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") return Promise.resolve("unavailable");

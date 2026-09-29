@@ -31,6 +31,14 @@ use super::{
     set_and_verify,
 };
 
+mod transactional_v1_to_v2_migration;
+
+pub(crate) use transactional_v1_to_v2_migration::{
+    WritableV1ToV2MigrationCloseFailure, WritableV1ToV2MigrationCloseRetryOutcome,
+    WritableV1ToV2MigrationError, WritableV1ToV2MigrationOutcome,
+    WritableV1ToV2MigrationTerminalDisposition,
+};
+
 const WRITABLE_MIGRATION_OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
     .union(OpenFlags::SQLITE_OPEN_FULL_MUTEX)
     .union(OpenFlags::SQLITE_OPEN_PRIVATE_CACHE)
@@ -59,6 +67,7 @@ const METADATA_COLUMNS: [&str; 12] = [
 
 pub(crate) struct WritableV1MigrationDatabase {
     owner: ConnectionLifetimeOwner,
+    expected_v1_metadata: DatabaseMetadataContractV1,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -423,7 +432,10 @@ pub(crate) fn open_writable_v1_migration_database(
         );
     }
 
-    WritableV1MigrationDatabaseOpenOutcome::Prepared(WritableV1MigrationDatabase { owner })
+    WritableV1MigrationDatabaseOpenOutcome::Prepared(WritableV1MigrationDatabase {
+        owner,
+        expected_v1_metadata: expected_metadata,
+    })
 }
 
 #[cfg(test)]

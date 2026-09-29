@@ -285,7 +285,10 @@ pub(crate) use full_integrity_validation::{
 pub(crate) use writable_v1_migration_preparation::{
     WritableV1MigrationDatabase, WritableV1MigrationDatabaseCloseFailure,
     WritableV1MigrationDatabaseCloseRetryOutcome, WritableV1MigrationDatabaseOpenError,
-    WritableV1MigrationDatabaseOpenOutcome, open_writable_v1_migration_database,
+    WritableV1MigrationDatabaseOpenOutcome, WritableV1ToV2MigrationCloseFailure,
+    WritableV1ToV2MigrationCloseRetryOutcome, WritableV1ToV2MigrationError,
+    WritableV1ToV2MigrationOutcome, WritableV1ToV2MigrationTerminalDisposition,
+    open_writable_v1_migration_database,
 };
 
 #[cfg(test)]

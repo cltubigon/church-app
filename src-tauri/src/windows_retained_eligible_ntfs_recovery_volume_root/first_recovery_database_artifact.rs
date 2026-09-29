@@ -16,6 +16,9 @@ pub(crate) use first_recovery_envelope_artifact::{
     FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
     FirstRecoverySetRecoveredKeyVerified,
     MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    ProductionDatabaseV1ToV2MigrationCloseFailure, ProductionDatabaseV1ToV2MigrationOutcome,
+    ProductionDatabaseV1ToV2MigrationRestartRequiredFailure,
+    ProductionDatabaseV2MigrationCommittedRestartRequired,
     SecondCompleteRecoverySetVerificationFailure, SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
@@ -1081,18 +1084,19 @@ mod tests {
     fn source_locks_success_and_failure_ownership_without_set_completion_claim() {
         const SOURCE: &str = include_str!("first_recovery_database_artifact.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
-        assert!(production.contains("struct FirstRecoveryDatabaseArtifactPublished"));
+        let implementation = production.split_once("use std::").unwrap().1;
+        assert!(implementation.contains("struct FirstRecoveryDatabaseArtifactPublished"));
         assert!(
-            production
+            implementation
                 .contains("source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup")
         );
-        assert!(production.contains("destinations: TwoRetainedRecoverySetDirectories"));
+        assert!(implementation.contains("destinations: TwoRetainedRecoverySetDirectories"));
         assert!(
-            production
+            implementation
                 .contains("partial_first_database: Option<RetainedFirstRecoveryDatabaseArtifact>")
         );
-        assert!(!production.contains("CompleteRecoverySet"));
-        assert!(!production.contains("SecondRecoveryDatabase"));
+        assert!(!implementation.contains("CompleteRecoverySet"));
+        assert!(!implementation.contains("SecondRecoveryDatabase"));
     }
 
     #[test]

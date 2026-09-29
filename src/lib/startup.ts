@@ -10,7 +10,9 @@ export type StartupStatus =
   | "shutdownIncomplete"
   | "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
   | "migrationExecutionConfirmedAwaitingWritablePreparation"
-  | "writableV1MigrationPreparedAwaitingTransaction";
+  | "writableV1MigrationPreparedAwaitingTransaction"
+  | "migrationCommittedRestartRequired"
+  | "migrationFailedRestartRequired";
 
 export type FirstTimeSetupRequestResult =
   | "started"
@@ -31,6 +33,8 @@ const startupStatuses = new Set<StartupStatus>([
   "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
   "migrationExecutionConfirmedAwaitingWritablePreparation",
   "writableV1MigrationPreparedAwaitingTransaction",
+  "migrationCommittedRestartRequired",
+  "migrationFailedRestartRequired",
 ]);
 
 export type PostRecoveryMigrationExecutionConfirmationRequestResult =

@@ -127,7 +127,11 @@ use crate::{
         FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
         FirstRecoverySetRecoveredKeyVerified,
         MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
-        NativeRecoveryVolumeSelectionOutcome, RecoveryVolumeRootSeparatedFromProductionStorage,
+        NativeRecoveryVolumeSelectionOutcome, ProductionDatabaseV1ToV2MigrationCloseFailure,
+        ProductionDatabaseV1ToV2MigrationOutcome,
+        ProductionDatabaseV1ToV2MigrationRestartRequiredFailure,
+        ProductionDatabaseV2MigrationCommittedRestartRequired,
+        RecoveryVolumeRootSeparatedFromProductionStorage,
         RetainAndSeparateSecondRecoveryVolumeError, SecondCompleteRecoverySetVerificationFailure,
         SecondCompleteRecoverySetVerificationOutcome,
         SecondCompleteRecoverySetVerificationVerifierCloseFailure,
@@ -167,6 +171,8 @@ pub(crate) enum StartupStatus {
     TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
     MigrationExecutionConfirmedAwaitingWritablePreparation,
     WritableV1MigrationPreparedAwaitingTransaction,
+    MigrationCommittedRestartRequired,
+    MigrationFailedRestartRequired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -433,6 +439,8 @@ enum MigrationPreparationState {
     TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
     MigrationExecutionConfirmedAwaitingWritablePreparation,
     WritableV1MigrationPreparedAwaitingTransaction,
+    MigrationCommittedRestartRequired,
+    MigrationFailedRestartRequired,
     CustodyTerminalFailure,
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
@@ -709,6 +717,9 @@ enum MigrationWorkerParkedOwnership {
         MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     ),
     WritableV1MigrationPrepared(WritableV1MigrationPreparedProductionDatabase),
+    MigrationCommittedRestartRequired(ProductionDatabaseV2MigrationCommittedRestartRequired),
+    MigrationRestartRequiredFailure(ProductionDatabaseV1ToV2MigrationRestartRequiredFailure),
+    MigrationCloseFailure(ProductionDatabaseV1ToV2MigrationCloseFailure),
     WritableV1MigrationPreparationFailure(WritableV1MigrationPreparationFailure),
     WritableV1MigrationSourceCloseFailure(WritableV1MigrationSourceCloseFailure),
     WritableV1MigrationOpenedCloseFailure(WritableV1MigrationOpenedCloseFailure),
@@ -1262,6 +1273,12 @@ impl ApplicationLifecycle {
                 }
                 MigrationPreparationState::WritableV1MigrationPreparedAwaitingTransaction => {
                     StartupStatus::WritableV1MigrationPreparedAwaitingTransaction
+                }
+                MigrationPreparationState::MigrationCommittedRestartRequired => {
+                    StartupStatus::MigrationCommittedRestartRequired
+                }
+                MigrationPreparationState::MigrationFailedRestartRequired => {
+                    StartupStatus::MigrationFailedRestartRequired
                 }
                 _ => inner.state.status(),
             }
@@ -2831,10 +2848,17 @@ impl ApplicationLifecycle {
             MigrationWorkerParkedOwnership::WritableV1MigrationPrepared(_) => {
                 MigrationPreparationState::WritableV1MigrationPreparedAwaitingTransaction
             }
+            MigrationWorkerParkedOwnership::MigrationCommittedRestartRequired(_) => {
+                MigrationPreparationState::MigrationCommittedRestartRequired
+            }
+            MigrationWorkerParkedOwnership::MigrationRestartRequiredFailure(_) => {
+                MigrationPreparationState::MigrationFailedRestartRequired
+            }
             MigrationWorkerParkedOwnership::WritableV1MigrationPreparationFailure(_)
             | MigrationWorkerParkedOwnership::WritableV1MigrationSourceCloseFailure(_)
             | MigrationWorkerParkedOwnership::WritableV1MigrationOpenedCloseFailure(_)
-            | MigrationWorkerParkedOwnership::WritableV1MigrationPreparedShutdownCloseFailure(_) => {
+            | MigrationWorkerParkedOwnership::WritableV1MigrationPreparedShutdownCloseFailure(_)
+            | MigrationWorkerParkedOwnership::MigrationCloseFailure(_) => {
                 MigrationPreparationState::CloseRetryRequired
             }
             MigrationWorkerParkedOwnership::TerminalFailure(_) => {
@@ -3103,12 +3127,23 @@ impl ApplicationLifecycle {
                     } else {
                         let owner =
                             migration_execution_confirmation_outcome_ownership(outcome, true);
-                        self.park_migration_worker(
-                            continue_confirmed_writable_v1_migration_preparation(owner, app),
-                            control,
-                            exclusivity,
-                            app,
-                        );
+                        let owner =
+                            continue_confirmed_writable_v1_migration_preparation(owner, app);
+                        if self.lock().migration_shutdown_requested {
+                            self.finish_or_park_migration_shutdown(
+                                owner,
+                                control,
+                                exclusivity,
+                                app,
+                            );
+                        } else {
+                            self.park_migration_worker(
+                                continue_prepared_v1_to_v2_migration(owner),
+                                control,
+                                exclusivity,
+                                app,
+                            );
+                        }
                     }
                     return;
                 }
@@ -3763,6 +3798,27 @@ fn continue_confirmed_writable_v1_migration_preparation(
 }
 
 #[cfg(windows)]
+fn continue_prepared_v1_to_v2_migration(
+    owner: MigrationWorkerParkedOwnership,
+) -> MigrationWorkerParkedOwnership {
+    let MigrationWorkerParkedOwnership::WritableV1MigrationPrepared(prepared) = owner else {
+        return owner;
+    };
+    match prepared.execute_v1_to_v2() {
+        ProductionDatabaseV1ToV2MigrationOutcome::Committed(committed) => {
+            MigrationWorkerParkedOwnership::MigrationCommittedRestartRequired(committed)
+        }
+        ProductionDatabaseV1ToV2MigrationOutcome::RestartRequiredFailure(failure) => {
+            let _category = failure.category();
+            MigrationWorkerParkedOwnership::MigrationRestartRequiredFailure(failure)
+        }
+        ProductionDatabaseV1ToV2MigrationOutcome::CloseFailed(failure) => {
+            MigrationWorkerParkedOwnership::MigrationCloseFailure(failure)
+        }
+    }
+}
+
+#[cfg(windows)]
 fn migration_verification_preparation_state(
     owner: &MigrationWorkerParkedOwnership,
 ) -> MigrationPreparationState {
@@ -3815,10 +3871,17 @@ fn migration_verification_preparation_state(
         MigrationWorkerParkedOwnership::WritableV1MigrationPrepared(_) => {
             MigrationPreparationState::WritableV1MigrationPreparedAwaitingTransaction
         }
+        MigrationWorkerParkedOwnership::MigrationCommittedRestartRequired(_) => {
+            MigrationPreparationState::MigrationCommittedRestartRequired
+        }
+        MigrationWorkerParkedOwnership::MigrationRestartRequiredFailure(_) => {
+            MigrationPreparationState::MigrationFailedRestartRequired
+        }
         MigrationWorkerParkedOwnership::WritableV1MigrationPreparationFailure(_)
         | MigrationWorkerParkedOwnership::WritableV1MigrationSourceCloseFailure(_)
         | MigrationWorkerParkedOwnership::WritableV1MigrationOpenedCloseFailure(_)
-        | MigrationWorkerParkedOwnership::WritableV1MigrationPreparedShutdownCloseFailure(_) => {
+        | MigrationWorkerParkedOwnership::WritableV1MigrationPreparedShutdownCloseFailure(_)
+        | MigrationWorkerParkedOwnership::MigrationCloseFailure(_) => {
             MigrationPreparationState::CloseRetryRequired
         }
         _ => std::process::abort(),
@@ -4173,6 +4236,31 @@ fn retry_migration_worker_ownership(
                 )
             }
         },
+        MigrationWorkerParkedOwnership::MigrationCommittedRestartRequired(committed) => {
+            shutdown_recovery_source(committed.abandon_published_destinations_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::MigrationRestartRequiredFailure(failure) => {
+            shutdown_recovery_source(failure.abandon_published_destinations_and_retain_source())
+        }
+        MigrationWorkerParkedOwnership::MigrationCloseFailure(failure) => {
+            match failure.retry_close() {
+                ProductionDatabaseV1ToV2MigrationOutcome::Committed(committed) => {
+                    shutdown_recovery_source(
+                        committed.abandon_published_destinations_and_retain_source(),
+                    )
+                }
+                ProductionDatabaseV1ToV2MigrationOutcome::RestartRequiredFailure(failure) => {
+                    shutdown_recovery_source(
+                        failure.abandon_published_destinations_and_retain_source(),
+                    )
+                }
+                ProductionDatabaseV1ToV2MigrationOutcome::CloseFailed(failure) => {
+                    MigrationWorkerRetryOutcome::Retained(
+                        MigrationWorkerParkedOwnership::MigrationCloseFailure(failure),
+                    )
+                }
+            }
+        }
         MigrationWorkerParkedOwnership::TerminalFailure(failure) => {
             match failure.retry_source_close() {
                 MigrationRecoveryKeyCustodySourceCloseRetryOutcome::Closed(failure) => {
@@ -5874,7 +5962,7 @@ mod tests {
             .0;
         assert_eq!(
             startup_status,
-            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,"
+            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
         );
 
         let request_result = SOURCE
@@ -9040,7 +9128,7 @@ mod tests {
             .split_once("fn publish_first_recovery_manifest")
             .unwrap()
             .1
-            .split_once("fn classify_first_recovery_set_verification_failure")
+            .split_once("fn publish_second_recovery_database")
             .unwrap()
             .0;
         assert!(
@@ -9465,7 +9553,7 @@ mod tests {
             .split_once("fn continue_first_complete_recovery_set_verification")
             .unwrap()
             .1
-            .split_once("fn finish_or_park_migration_shutdown")
+            .split_once("fn continue_second_complete_recovery_set_verification")
             .unwrap()
             .0;
         let publication = SOURCE
@@ -10097,5 +10185,77 @@ mod tests {
         for forbidden in ["BEGIN", "execute_batch", "remove_file", "delete", "rename"] {
             assert!(!prepared.contains(forbidden));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_owner_executes_once_after_shutdown_recheck_and_parks_restart_required() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let dispatch = SOURCE
+            .split_once("fn run_post_recovery_migration_execution_confirmation_dispatch(")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let shutdown_check = dispatch
+            .find("if self.lock().migration_shutdown_requested")
+            .unwrap();
+        let transaction = dispatch
+            .find("continue_prepared_v1_to_v2_migration(owner)")
+            .unwrap();
+        assert!(shutdown_check < transaction);
+
+        let continuation = SOURCE
+            .split_once("fn continue_prepared_v1_to_v2_migration(")
+            .unwrap()
+            .1
+            .split_once("fn migration_verification_preparation_state")
+            .unwrap()
+            .0;
+        assert_eq!(
+            continuation.matches("prepared.execute_v1_to_v2()").count(),
+            1
+        );
+        assert!(continuation.contains("MigrationCommittedRestartRequired"));
+        assert!(continuation.contains("MigrationRestartRequiredFailure"));
+        assert!(continuation.contains("MigrationCloseFailure"));
+        for forbidden in [
+            "OperationalProductionDatabase",
+            "activate",
+            "remove_file",
+            "restore",
+            "replacement",
+        ] {
+            assert!(!continuation.contains(forbidden));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_completion_remains_exclusive_until_source_shutdown_resolution() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let parking = SOURCE
+            .split_once("fn park_migration_worker")
+            .unwrap()
+            .1
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .0;
+        let parked_state = parking.split_once("loop {").unwrap().0;
+        assert!(parked_state.contains("MigrationCommittedRestartRequired"));
+        assert!(parked_state.contains("MigrationFailedRestartRequired"));
+        assert!(!parked_state.contains("drop(exclusivity)"));
+        assert!(!parked_state.contains("migration_work_resolved = true"));
+
+        let shutdown = SOURCE
+            .split_once("fn retry_migration_worker_ownership")
+            .unwrap()
+            .1;
+        assert!(shutdown.contains(
+            "MigrationWorkerParkedOwnership::MigrationCommittedRestartRequired(committed)"
+        ));
+        assert!(shutdown.contains("committed.abandon_published_destinations_and_retain_source()"));
+        assert!(shutdown.contains("MigrationWorkerParkedOwnership::MigrationCloseFailure"));
     }
 }

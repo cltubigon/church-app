@@ -86,6 +86,9 @@ function StartupBoundary({
       "Migration execution is confirmed. Writable migration preparation has not begun.",
     writableV1MigrationPreparedAwaitingTransaction:
       "The writable V1 migration database is prepared and verified. The migration transaction has not begun.",
+    migrationCommittedRestartRequired: "Migration completed. Restart required.",
+    migrationFailedRestartRequired:
+      "Migration could not be confirmed as complete. Restart is required before further action.",
   }[status];
 
   return (
@@ -146,6 +149,7 @@ export function App() {
         status === "ready" ||
         status === "setupInProgress" ||
         status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" ||
+        status === "writableV1MigrationPreparedAwaitingTransaction" ||
         status === "stopping"
       ) {
         timer = setTimeout(refresh, 500);

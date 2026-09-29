@@ -12,7 +12,10 @@ use crate::{
         ProductionDatabaseConnectionCloseFailure, ProductionDatabaseConnectionCloseOutcome,
         WritableV1MigrationDatabase, WritableV1MigrationDatabaseCloseFailure,
         WritableV1MigrationDatabaseCloseRetryOutcome, WritableV1MigrationDatabaseOpenError,
-        WritableV1MigrationDatabaseOpenOutcome, open_writable_v1_migration_database,
+        WritableV1MigrationDatabaseOpenOutcome, WritableV1ToV2MigrationCloseFailure,
+        WritableV1ToV2MigrationCloseRetryOutcome, WritableV1ToV2MigrationError,
+        WritableV1ToV2MigrationOutcome, WritableV1ToV2MigrationTerminalDisposition,
+        open_writable_v1_migration_database,
     },
     storage_foundation::ProductionDatabasePath,
 };
@@ -59,6 +62,33 @@ pub(crate) struct WritableV1MigrationPreparedShutdownCloseFailure {
     confirmed_recovery:
         MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     close_failure: ProductionDatabaseConnectionCloseFailure,
+}
+
+pub(crate) struct ProductionDatabaseV2MigrationCommittedRestartRequired {
+    confirmed_recovery:
+        MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    _connection_closed: (),
+}
+
+pub(crate) struct ProductionDatabaseV1ToV2MigrationRestartRequiredFailure {
+    confirmed_recovery:
+        MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    category: WritableV1ToV2MigrationError,
+    _connection_closed: (),
+}
+
+pub(crate) struct ProductionDatabaseV1ToV2MigrationCloseFailure {
+    confirmed_recovery:
+        MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    close_failure: WritableV1ToV2MigrationCloseFailure,
+}
+
+#[must_use = "the V1-to-V2 migration execution outcome must be handled"]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ProductionDatabaseV1ToV2MigrationOutcome {
+    Committed(ProductionDatabaseV2MigrationCommittedRestartRequired),
+    RestartRequiredFailure(ProductionDatabaseV1ToV2MigrationRestartRequiredFailure),
+    CloseFailed(ProductionDatabaseV1ToV2MigrationCloseFailure),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -805,6 +835,15 @@ impl WritableV1MigrationOpenedCloseFailure {
 }
 
 impl WritableV1MigrationPreparedProductionDatabase {
+    pub(crate) fn execute_v1_to_v2(self) -> ProductionDatabaseV1ToV2MigrationOutcome {
+        let Self {
+            confirmed_recovery,
+            database,
+            _transaction_not_started: (),
+        } = self;
+        map_v1_to_v2_migration_outcome(confirmed_recovery, database.execute_v1_to_v2())
+    }
+
     pub(crate) fn close_for_shutdown(self) -> WritableV1MigrationPreparedShutdownOutcome {
         let Self {
             confirmed_recovery,
@@ -824,6 +863,96 @@ impl WritableV1MigrationPreparedProductionDatabase {
                         close_failure,
                     },
                 )
+            }
+        }
+    }
+}
+
+fn map_v1_to_v2_migration_outcome(
+    confirmed_recovery: MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    outcome: WritableV1ToV2MigrationOutcome,
+) -> ProductionDatabaseV1ToV2MigrationOutcome {
+    match outcome {
+        WritableV1ToV2MigrationOutcome::Closed(
+            WritableV1ToV2MigrationTerminalDisposition::CommittedAndValidated,
+        ) => ProductionDatabaseV1ToV2MigrationOutcome::Committed(
+            ProductionDatabaseV2MigrationCommittedRestartRequired {
+                confirmed_recovery,
+                _connection_closed: (),
+            },
+        ),
+        WritableV1ToV2MigrationOutcome::Closed(disposition) => {
+            let category = match disposition {
+                WritableV1ToV2MigrationTerminalDisposition::RolledBack(category) => category,
+                WritableV1ToV2MigrationTerminalDisposition::CommitAmbiguous => {
+                    WritableV1ToV2MigrationError::CommitAmbiguous
+                }
+                WritableV1ToV2MigrationTerminalDisposition::CommittedButInvalid => {
+                    WritableV1ToV2MigrationError::PostCommitValidationFailed
+                }
+                WritableV1ToV2MigrationTerminalDisposition::CommittedAndValidated => {
+                    unreachable!()
+                }
+            };
+            ProductionDatabaseV1ToV2MigrationOutcome::RestartRequiredFailure(
+                ProductionDatabaseV1ToV2MigrationRestartRequiredFailure {
+                    confirmed_recovery,
+                    category,
+                    _connection_closed: (),
+                },
+            )
+        }
+        WritableV1ToV2MigrationOutcome::CloseFailed(close_failure) => {
+            ProductionDatabaseV1ToV2MigrationOutcome::CloseFailed(
+                ProductionDatabaseV1ToV2MigrationCloseFailure {
+                    confirmed_recovery,
+                    close_failure,
+                },
+            )
+        }
+    }
+}
+
+impl ProductionDatabaseV2MigrationCommittedRestartRequired {
+    pub(crate) fn abandon_published_destinations_and_retain_source(
+        self,
+    ) -> RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+        self.confirmed_recovery
+            .abandon_published_destinations_and_retain_source()
+    }
+}
+
+impl ProductionDatabaseV1ToV2MigrationRestartRequiredFailure {
+    pub(crate) fn category(&self) -> WritableV1ToV2MigrationError {
+        self.category
+    }
+
+    pub(crate) fn abandon_published_destinations_and_retain_source(
+        self,
+    ) -> RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+        self.confirmed_recovery
+            .abandon_published_destinations_and_retain_source()
+    }
+}
+
+impl ProductionDatabaseV1ToV2MigrationCloseFailure {
+    pub(crate) fn retry_close(self) -> ProductionDatabaseV1ToV2MigrationOutcome {
+        let Self {
+            confirmed_recovery,
+            close_failure,
+        } = self;
+        match close_failure.retry_close() {
+            WritableV1ToV2MigrationCloseRetryOutcome::Closed(disposition) => {
+                map_v1_to_v2_migration_outcome(
+                    confirmed_recovery,
+                    WritableV1ToV2MigrationOutcome::Closed(disposition),
+                )
+            }
+            WritableV1ToV2MigrationCloseRetryOutcome::Failed(close_failure) => {
+                ProductionDatabaseV1ToV2MigrationOutcome::CloseFailed(Self {
+                    confirmed_recovery,
+                    close_failure,
+                })
             }
         }
     }
@@ -1104,5 +1233,38 @@ mod tests {
             ),
             "SetCorrespondenceFailed"
         );
+    }
+
+    #[test]
+    fn transaction_entry_and_restart_required_owners_are_narrow() {
+        let source = include_str!("final_two.rs");
+        let execution = source
+            .split_once("impl WritableV1MigrationPreparedProductionDatabase")
+            .unwrap()
+            .1
+            .split_once("fn map_v1_to_v2_migration_outcome")
+            .unwrap()
+            .0;
+        assert_eq!(execution.matches("database.execute_v1_to_v2()").count(), 1);
+
+        for owner_name in [
+            "ProductionDatabaseV2MigrationCommittedRestartRequired",
+            "ProductionDatabaseV1ToV2MigrationRestartRequiredFailure",
+        ] {
+            let owner = source
+                .split_once(&format!("pub(crate) struct {owner_name}"))
+                .unwrap()
+                .1
+                .split_once('}')
+                .unwrap()
+                .0;
+            assert!(owner.contains("confirmed_recovery"));
+            for forbidden in ["Connection", "DatabaseKey", "Transaction", "token"] {
+                assert!(
+                    !owner.contains(forbidden),
+                    "{owner_name} contains {forbidden}"
+                );
+            }
+        }
     }
 }

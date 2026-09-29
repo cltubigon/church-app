@@ -7,6 +7,9 @@ mod second_complete_set;
 pub(crate) use second_complete_set::{
     FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
     MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    ProductionDatabaseV1ToV2MigrationCloseFailure, ProductionDatabaseV1ToV2MigrationOutcome,
+    ProductionDatabaseV1ToV2MigrationRestartRequiredFailure,
+    ProductionDatabaseV2MigrationCommittedRestartRequired,
     SecondCompleteRecoverySetVerificationError, SecondCompleteRecoverySetVerificationFailure,
     SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,

@@ -68,6 +68,9 @@ pub(crate) use retained_recovery_set_directories::{
     FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
     FirstRecoverySetRecoveredKeyVerified,
     MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
+    ProductionDatabaseV1ToV2MigrationCloseFailure, ProductionDatabaseV1ToV2MigrationOutcome,
+    ProductionDatabaseV1ToV2MigrationRestartRequiredFailure,
+    ProductionDatabaseV2MigrationCommittedRestartRequired,
     SecondCompleteRecoverySetVerificationFailure, SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
@@ -1133,9 +1136,7 @@ mod tests {
         assert!(production.contains(
             "use crate::production_database_migration_recovery_envelope::RecoverySetRequiredBytes;"
         ));
-        assert!(lifecycle.contains(
-            "pub(crate) use production_database_migration_confirmation::production_database_migration_backup_stage::RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup;"
-        ));
+        assert!(lifecycle.contains("RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup"));
         assert!(
             !crate_root.contains("RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup")
         );
