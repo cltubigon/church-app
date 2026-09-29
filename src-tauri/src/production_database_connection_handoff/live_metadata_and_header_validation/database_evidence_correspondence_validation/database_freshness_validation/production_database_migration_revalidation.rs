@@ -101,6 +101,12 @@ impl RevalidatedProductionDatabaseMigrationOpportunity {
         )
     }
 
+    pub(in crate::production_database_connection_handoff) fn retained_file_identity(
+        &self,
+    ) -> crate::production_database_file::ProductionDatabaseFileIdentity {
+        self.owner.inspected.identity()
+    }
+
     /// Borrows only the already-retained connection for the fixed migration
     /// full-integrity operation. No path, key, or reopening capability crosses
     /// this boundary.

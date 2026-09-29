@@ -19,10 +19,13 @@ pub(crate) use reentered_recovery_key_verification::{
     SecondCompleteRecoverySetVerificationFailure, SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
-    publish_second_recovery_database_artifact, publish_second_recovery_envelope_artifact,
-    publish_second_recovery_manifest_artifact, verify_final_two_recovery_sets,
-    verify_first_complete_recovery_set, verify_first_recovery_set_with_reentered_recovery_key,
-    verify_second_complete_recovery_set,
+    WritableV1MigrationOpenedCloseFailure, WritableV1MigrationPreparationFailure,
+    WritableV1MigrationPreparationOutcome, WritableV1MigrationPreparedProductionDatabase,
+    WritableV1MigrationPreparedShutdownCloseFailure, WritableV1MigrationPreparedShutdownOutcome,
+    WritableV1MigrationSourceCloseFailure, publish_second_recovery_database_artifact,
+    publish_second_recovery_envelope_artifact, publish_second_recovery_manifest_artifact,
+    verify_final_two_recovery_sets, verify_first_complete_recovery_set,
+    verify_first_recovery_set_with_reentered_recovery_key, verify_second_complete_recovery_set,
 };
 
 use std::{

@@ -12,4 +12,10 @@ The implemented database capability remains limited to encrypted local schema-ve
 
 The shell now shows one migration-authorization action only after Rust reports `TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution`. It invokes one argument-free command; React cannot send the confirmation decision or any trusted value. A Rust-owned Win32 modal, parented to the real application window and dispatched on the main thread, produces `Confirmed`, `Cancelled`, or `Unavailable`.
 
-Fresh confirmation consumes the exact final Layer D owner into a single-use process-local owner and reports only `MigrationExecutionConfirmedAwaitingWritablePreparation`. Cancellation and unavailability remain retryable at the prior state. Shutdown arbitration preserves the existing source-only abandonment and close-retry chain. This reachability confirms authorization only: no writable database, key recovery, SQL, schema migration, metadata change, or recovery-artifact mutation is implemented.
+Fresh confirmation consumes the exact final Layer D owner into a single-use process-local owner and reports only `MigrationExecutionConfirmedAwaitingWritablePreparation`. Cancellation and unavailability remain retryable at the prior state. Shutdown arbitration preserves the existing source-only abandonment and close-retry chain.
+
+## Writable V1 migration preparation
+
+After fresh confirmation, Rust now revalidates the retained final recovery/source proof, recovers a bounded generation-bound key through the existing custody path, closes the retained read-only source connection, and prepares the canonical application-owned `parish-data.db` with a migration-specific writable SQLCipher connection. Hardened file identity, key application, integrity, metadata/header, exact V1 physical schema, `user_version = 1`, and restart classification are checked before success. The key owner is dropped after application.
+
+Success reports only `WritableV1MigrationPreparedAwaitingTransaction`; migration work remains unresolved and exclusivity remains held. No transaction or database mutation occurs in this slice. V2 DDL, metadata and `user_version` updates, commit, post-commit validation, restart-required completion, operational V2 adoption, restore, and retention remain unimplemented.

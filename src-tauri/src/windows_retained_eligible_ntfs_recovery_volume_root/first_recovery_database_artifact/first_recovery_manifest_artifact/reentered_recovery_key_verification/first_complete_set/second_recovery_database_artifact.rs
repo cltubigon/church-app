@@ -17,8 +17,12 @@ pub(crate) use second_recovery_envelope_artifact::{
     SecondRecoveryManifestArtifactPublicationError,
     SecondRecoveryManifestArtifactPublicationFailure,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
-    publish_second_recovery_envelope_artifact, publish_second_recovery_manifest_artifact,
-    verify_final_two_recovery_sets, verify_second_complete_recovery_set,
+    WritableV1MigrationOpenedCloseFailure, WritableV1MigrationPreparationFailure,
+    WritableV1MigrationPreparationOutcome, WritableV1MigrationPreparedProductionDatabase,
+    WritableV1MigrationPreparedShutdownCloseFailure, WritableV1MigrationPreparedShutdownOutcome,
+    WritableV1MigrationSourceCloseFailure, publish_second_recovery_envelope_artifact,
+    publish_second_recovery_manifest_artifact, verify_final_two_recovery_sets,
+    verify_second_complete_recovery_set,
 };
 #[cfg(test)]
 pub(crate) use second_recovery_envelope_artifact::{

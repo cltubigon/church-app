@@ -73,7 +73,7 @@ pub(crate) use recovery_envelope::{
     ProductionDatabaseMigrationRecoveryEnvelopeVerifierCloseRetryOutcome,
     RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     RecoverySetManifestPreparationError, UndisclosedMigrationRecoveryKeyCustodyInterruption,
-    VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup,
+    VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup, WritableMigrationKeyAuthority,
     prepare_migration_recovery_key_custody, run_migration_recovery_key_custody_native_ceremony,
     verify_production_database_migration_recovery_envelope,
 };
@@ -124,9 +124,23 @@ pub(crate) struct VerifiedEncryptedProductionDatabaseMigrationBackupStageProof {
 
 pub(crate) struct VerifiedEncryptedProductionDatabaseMigrationBackupStage {
     authorization: ProductionDatabaseMigrationAuthorization,
-    source: FullIntegrityValidatedProductionDatabaseMigrationSource,
+    source: RetainedMigrationSourceState,
     backup_stage_proof: VerifiedEncryptedProductionDatabaseMigrationBackupStageProof,
     context: ProductionDatabaseMigrationBackupContext,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum RetainedMigrationSourceState {
+    Live(FullIntegrityValidatedProductionDatabaseMigrationSource),
+    Detached,
+}
+
+impl From<FullIntegrityValidatedProductionDatabaseMigrationSource>
+    for RetainedMigrationSourceState
+{
+    fn from(source: FullIntegrityValidatedProductionDatabaseMigrationSource) -> Self {
+        Self::Live(source)
+    }
 }
 
 pub(crate) struct UndisclosedMigrationRecoveryKeyCustodyShutdown {
@@ -351,9 +365,27 @@ pub(crate) fn prepare_production_database_migration_backup_stage(
 }
 
 impl VerifiedEncryptedProductionDatabaseMigrationBackupStage {
+    fn source(&self) -> &FullIntegrityValidatedProductionDatabaseMigrationSource {
+        match &self.source {
+            RetainedMigrationSourceState::Live(source) => source,
+            RetainedMigrationSourceState::Detached => {
+                panic!("migration source was already detached")
+            }
+        }
+    }
+
+    fn take_source(&mut self) -> FullIntegrityValidatedProductionDatabaseMigrationSource {
+        match std::mem::replace(&mut self.source, RetainedMigrationSourceState::Detached) {
+            RetainedMigrationSourceState::Live(source) => source,
+            RetainedMigrationSourceState::Detached => {
+                panic!("migration source was already detached")
+            }
+        }
+    }
+
     #[cfg(test)]
     fn preservation_evidence_for_test(&self) -> (usize, DatabaseMetadataContractV1) {
-        self.source
+        self.source()
             .with_migration_backup_source(|connection, metadata, _| {
                 (unsafe { connection.handle() as usize }, *metadata)
             })
@@ -375,7 +407,12 @@ impl VerifiedEncryptedProductionDatabaseMigrationBackupStage {
         destroy_migration_authorization(authorization);
         drop(backup_stage_proof);
         drop(context);
-        source.close()
+        match source {
+            RetainedMigrationSourceState::Live(source) => source.close(),
+            RetainedMigrationSourceState::Detached => {
+                ProductionDatabaseConnectionCloseOutcome::Closed
+            }
+        }
     }
 }
 
@@ -1037,14 +1074,15 @@ fn run_stage(
     })
 }
 
-fn close_source(
-    source: FullIntegrityValidatedProductionDatabaseMigrationSource,
-) -> SourceCloseState {
-    match source.close() {
-        ProductionDatabaseConnectionCloseOutcome::Closed => SourceCloseState::Closed,
-        ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
-            SourceCloseState::RetryRequired(failure)
-        }
+fn close_source(source: impl Into<RetainedMigrationSourceState>) -> SourceCloseState {
+    match source.into() {
+        RetainedMigrationSourceState::Live(source) => match source.close() {
+            ProductionDatabaseConnectionCloseOutcome::Closed => SourceCloseState::Closed,
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                SourceCloseState::RetryRequired(failure)
+            }
+        },
+        RetainedMigrationSourceState::Detached => SourceCloseState::Closed,
     }
 }
 
@@ -1073,7 +1111,7 @@ pub(crate) fn stage_encrypted_production_database_migration_backup(
         Ok(backup_stage_proof) => ProductionDatabaseMigrationBackupStageOutcome::Verified(
             VerifiedEncryptedProductionDatabaseMigrationBackupStage {
                 authorization,
-                source,
+                source: RetainedMigrationSourceState::Live(source),
                 backup_stage_proof,
                 context,
             },
@@ -1371,7 +1409,7 @@ mod tests {
             )
             .unwrap();
         verified
-            .source
+            .source()
             .with_migration_backup_source(|_, _, assessment| {
                 let wrong_key = bind_database_key_candidate_to_trusted_installation_evidence(
                     wrong_candidate,

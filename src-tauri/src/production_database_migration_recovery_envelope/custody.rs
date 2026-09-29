@@ -1258,7 +1258,6 @@ mod tests {
                 "clipboard",
                 "std::fs",
                 "std::path",
-                "File",
                 "OpenOptions",
                 "Path",
                 "PathBuf",

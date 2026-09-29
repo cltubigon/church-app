@@ -330,3 +330,9 @@ The implemented initialization-state model remains separate decision logic. Pars
 Layer D lifecycle composition is complete. The canonical final two-set aggregate verifier is the only verifier invoked from exact `SecondCompleteRecoverySetVerified`; the lifecycle adds no parallel validation or secret input. Exact aggregate failure ownership is retained for an explicit canonical retry, and exact `TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup` is retained on success under the coarse state `TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution`. Migration work remains unresolved and exclusivity remains held.
 
 This decision does not authorize or execute migration, replacement/promotion, source deletion, restore, retention/deletion, frontend work, or new IPC. Every aggregate shutdown path is source-only and leaves both three-artifact recovery sets untouched.
+
+## Writable V1 migration-preparation decision
+
+Fresh execution confirmation is single-use and continues without a second prompt into a bounded preparation owner. Canonical final-proof revalidation and key recovery occur before the retained read-only connection is explicitly closed; writable access opens only after definitive close success. The canonical production path, hardened identity checks, raw SQLCipher key application, integrity checks, exact V1 metadata/schema facts, and restart classifier are reused without a parallel database or key abstraction.
+
+Preparation accepts only exact V1 and performs no mutation. Success parks `WritableV1MigrationPreparedProductionDatabase` at `WritableV1MigrationPreparedAwaitingTransaction`, with unresolved migration work and exclusivity retained. The transaction, V2 changes, commit, post-commit validation, restart-only activation, operational V2 startup, restore, and retention/deletion remain separate future decisions.

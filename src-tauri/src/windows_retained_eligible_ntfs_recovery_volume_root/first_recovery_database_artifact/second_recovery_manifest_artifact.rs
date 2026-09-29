@@ -11,7 +11,11 @@ pub(crate) use second_complete_set::{
     SecondCompleteRecoverySetVerificationOutcome,
     SecondCompleteRecoverySetVerificationVerifierCloseFailure, SecondCompleteRecoverySetVerified,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
-    verify_final_two_recovery_sets, verify_second_complete_recovery_set,
+    WritableV1MigrationOpenedCloseFailure, WritableV1MigrationPreparationFailure,
+    WritableV1MigrationPreparationOutcome, WritableV1MigrationPreparedProductionDatabase,
+    WritableV1MigrationPreparedShutdownCloseFailure, WritableV1MigrationPreparedShutdownOutcome,
+    WritableV1MigrationSourceCloseFailure, verify_final_two_recovery_sets,
+    verify_second_complete_recovery_set,
 };
 #[cfg(test)]
 pub(crate) use second_complete_set::{

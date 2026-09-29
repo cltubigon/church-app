@@ -47,7 +47,8 @@ pub(crate) use custody::{
     PreparedUndisclosedMigrationRecoveryKeyCustody,
     RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     RecoverySetManifestPreparationError, UndisclosedMigrationRecoveryKeyCustodyInterruption,
-    prepare_migration_recovery_key_custody, run_migration_recovery_key_custody_native_ceremony,
+    WritableMigrationKeyAuthority, prepare_migration_recovery_key_custody,
+    run_migration_recovery_key_custody_native_ceremony,
 };
 
 const HASH_BUFFER_LENGTH: usize = 64 * 1024;
@@ -724,15 +725,23 @@ fn run_transition(
 pub(crate) fn verify_production_database_migration_recovery_envelope(
     encrypted_stage: VerifiedEncryptedProductionDatabaseMigrationBackupStage,
 ) -> ProductionDatabaseMigrationRecoveryEnvelopeOutcome {
+    let result =
+        encrypted_stage
+            .source()
+            .with_migration_backup_source(|_, metadata, assessment| {
+                run_transition(
+                    &encrypted_stage.backup_stage_proof,
+                    &encrypted_stage.context,
+                    metadata,
+                    assessment,
+                )
+            });
     let VerifiedEncryptedProductionDatabaseMigrationBackupStage {
         authorization,
         source,
         backup_stage_proof,
         context,
     } = encrypted_stage;
-    let result = source.with_migration_backup_source(|_, metadata, assessment| {
-        run_transition(&backup_stage_proof, &context, metadata, assessment)
-    });
     match result {
         Ok(parts) => ProductionDatabaseMigrationRecoveryEnvelopeOutcome::Verified(
             VerifiedRecoveryEnvelopedProductionDatabaseMigrationBackup {

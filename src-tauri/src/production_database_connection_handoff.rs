@@ -23,7 +23,7 @@ use windows_sys::Win32::{
     Foundation::{HANDLE, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{
         CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES, FILE_READ_ATTRIBUTES,
-        FILE_READ_DATA, FILE_SHARE_MODE, FILE_SHARE_READ, OPEN_EXISTING,
+        FILE_READ_DATA, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     },
 };
 
@@ -40,6 +40,7 @@ mod create_new_database;
 mod fixed_metadata_and_header_observation;
 mod full_integrity_validation;
 mod live_metadata_and_header_validation;
+mod writable_v1_migration_preparation;
 
 /// Runs only the canonical fixed cipher-integrity operation on a borrowed
 /// connection. This grants no quick-check or general connection capability.
@@ -279,6 +280,12 @@ pub(crate) use full_integrity_validation::{
     prepare_production_database_migration_full_integrity,
     validate_production_database_full_integrity,
     validate_production_database_full_integrity_on_borrowed_connection,
+};
+
+pub(crate) use writable_v1_migration_preparation::{
+    WritableV1MigrationDatabase, WritableV1MigrationDatabaseCloseFailure,
+    WritableV1MigrationDatabaseCloseRetryOutcome, WritableV1MigrationDatabaseOpenError,
+    WritableV1MigrationDatabaseOpenOutcome, open_writable_v1_migration_database,
 };
 
 #[cfg(test)]
@@ -1000,6 +1007,21 @@ fn acquire_guarded_inspection(
     path: &ProductionDatabasePath,
     inspected: InspectedProductionDatabaseFile,
 ) -> Result<GuardedInspection, ProductionDatabaseConnectionOpenError> {
+    acquire_guarded_inspection_with_share(path, inspected, GUARD_SHARE)
+}
+
+fn acquire_guarded_inspection_for_writable_migration(
+    path: &ProductionDatabasePath,
+    inspected: InspectedProductionDatabaseFile,
+) -> Result<GuardedInspection, ProductionDatabaseConnectionOpenError> {
+    acquire_guarded_inspection_with_share(path, inspected, GUARD_SHARE | FILE_SHARE_WRITE)
+}
+
+fn acquire_guarded_inspection_with_share(
+    path: &ProductionDatabasePath,
+    inspected: InspectedProductionDatabaseFile,
+    share: FILE_SHARE_MODE,
+) -> Result<GuardedInspection, ProductionDatabaseConnectionOpenError> {
     let encoded = encode_guard_path(path.as_path().as_os_str())?;
     // SAFETY: the path is NUL-terminated and live for the call. Security
     // attributes and the template handle are null, so the new handle is not
@@ -1008,7 +1030,7 @@ fn acquire_guarded_inspection(
         CreateFileW(
             encoded.as_ptr(),
             GUARD_ACCESS,
-            GUARD_SHARE,
+            share,
             std::ptr::null(),
             GUARD_DISPOSITION,
             GUARD_FLAGS,
@@ -1562,7 +1584,6 @@ mod tests {
             "ATTACH DATABASE",
             "tauri::command",
             "GENERIC_READ",
-            "FILE_SHARE_WRITE",
             "FILE_SHARE_DELETE",
             "FILE_WRITE_DATA",
             "FILE_APPEND_DATA",

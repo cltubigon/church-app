@@ -568,7 +568,17 @@ The migration worker moves exact `TwoCompleteRecoverySetsVerifiedProductionDatab
 
 Shutdown before main-thread take prevents the dialog and abandons through the existing source-only shutdown chain. Shutdown while the modal is active suppresses adoption of a confirmation result. Shutdown after confirmation consumes the confirmed owner back to only the original custody source, drops recovery proof authority through RAII, and uses canonical `abort_for_shutdown()` plus source-close retry. All six recovery artifacts remain untouched. No database key is recovered, no writable connection or transaction is created, no SQL or V1-to-V2 migration executes, and no metadata or `user_version` changes. Writable preparation, migration execution, post-commit validation, restart-required transition, operational V2 startup acceptance, restore, and retention remain unimplemented.
 
-## 35. Links
+## 35. Writable V1 migration preparation
+
+Fresh post-Layer-D confirmation now continues deterministically into a bounded Rust-only preparation transition. Exact `MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup` first revalidates its retained final recovery/source facts, recovers one generation-bound database key through the canonical custody/key-loader path, detaches and explicitly closes the retained read-only production connection, and only then opens the canonical application-owned `parish-data.db` through a migration-specific writable owner. A close failure retains close-only ownership and cannot reach writable open; shutdown resolves that close before returning to the canonical source-abort chain.
+
+The writable open reuses hardened production-file inspection and identity continuity, the canonical raw SQLCipher key application, integrity validation, metadata/header validation, exact V1 physical-schema validation, and the restart classifier. Only `ExactV1` is accepted; `ExactV2`, inconsistent, unsupported-newer, changed, unavailable, wrong-key, or integrity-invalid observations fail closed. The Rust key owner is dropped immediately after key application and never enters `LifecycleInner`, serialization, logs, IPC, or React.
+
+Success retains exact final recovery proof plus the live migration-specific writable connection as `WritableV1MigrationPreparedProductionDatabase` and parks at `WritableV1MigrationPreparedAwaitingTransaction`. Migration work remains unresolved and cross-process exclusivity remains held. This preparation executes no `BEGIN`, DDL, DML, metadata update, `user_version` update, or commit. Shutdown explicitly closes the writable connection before recovering the original custody/source authority and invoking the canonical abort/source-close chain; all six recovery artifacts remain untouched.
+
+Still unimplemented are `BEGIN IMMEDIATE`, V2 DDL, metadata and `user_version` updates, transaction commit, post-commit V2 validation, restart-required completion, operational V2 startup adoption, restore, and retention/deletion.
+
+## 36. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)

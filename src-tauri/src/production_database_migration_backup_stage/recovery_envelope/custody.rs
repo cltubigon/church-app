@@ -24,6 +24,8 @@ use crate::{
     installation_evidence_protection::{
         GenerationBoundDatabaseKey, bind_database_key_candidate_to_trusted_installation_evidence,
     },
+    production_database_connection_handoff::FullIntegrityValidatedProductionDatabaseMigrationSource,
+    production_database_file::ProductionDatabaseFileIdentity,
 };
 
 use super::super::{
@@ -58,6 +60,28 @@ pub(crate) struct RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
     encrypted_stage: super::super::VerifiedEncryptedProductionDatabaseMigrationBackupStage,
     verified_envelope: IndependentlyVerifiedMigrationRecoveryEnvelopeV1,
     custody: VerifiedMigrationRecoveryKeyCustody,
+}
+
+pub(crate) struct WritableMigrationKeyAuthority {
+    key: GenerationBoundDatabaseKey,
+    expected_metadata: DatabaseMetadataContractV1,
+    expected_file_identity: ProductionDatabaseFileIdentity,
+}
+
+impl WritableMigrationKeyAuthority {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        GenerationBoundDatabaseKey,
+        DatabaseMetadataContractV1,
+        ProductionDatabaseFileIdentity,
+    ) {
+        (
+            self.key,
+            self.expected_metadata,
+            self.expected_file_identity,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -390,6 +414,30 @@ impl PossiblyExposedMigrationRecoveryKeyCustodyFailure {
 }
 
 impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
+    pub(crate) fn recover_writable_migration_key_authority(
+        &self,
+    ) -> Result<WritableMigrationKeyAuthority, ()> {
+        let expected_file_identity = self.encrypted_stage.source().retained_file_identity();
+        let (key, expected_metadata) = self.encrypted_stage.source().with_migration_backup_source(
+            |_, metadata, assessment| {
+                super::super::load_fresh_bound_key(&self.encrypted_stage.context, assessment)
+                    .map(|key| (key, *metadata))
+                    .map_err(|_| ())
+            },
+        )?;
+        Ok(WritableMigrationKeyAuthority {
+            key,
+            expected_metadata,
+            expected_file_identity,
+        })
+    }
+
+    pub(crate) fn detach_read_only_migration_source(
+        &mut self,
+    ) -> FullIntegrityValidatedProductionDatabaseMigrationSource {
+        self.encrypted_stage.take_source()
+    }
+
     pub(crate) fn observe_retained_production_single_physical_device(
         &self,
     ) -> Result<
@@ -397,7 +445,7 @@ impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
         crate::windows_retained_volume_topology::RetainedVolumeTopologyError,
     > {
         self.encrypted_stage
-            .source
+            .source()
             .observe_retained_single_physical_device()
     }
 
@@ -406,7 +454,7 @@ impl RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup {
         candidate: DecodedDatabaseKeyCandidate,
     ) -> Result<(GenerationBoundDatabaseKey, DatabaseMetadataContractV1), ()> {
         self.encrypted_stage
-            .source
+            .source()
             .with_migration_backup_source(|_, metadata, assessment| {
                 bind_database_key_candidate_to_trusted_installation_evidence(candidate, assessment)
                     .map(|key| (key, *metadata))

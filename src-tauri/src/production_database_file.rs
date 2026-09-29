@@ -35,6 +35,12 @@ struct RetainedFileIdentity {
     file_id: [u8; 16],
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct ProductionDatabaseFileIdentity {
+    parent: RetainedFileIdentity,
+    file: RetainedFileIdentity,
+}
+
 pub(crate) struct InspectedProductionDatabaseFile {
     _retained_parent: File,
     _retained_file: File,
@@ -44,6 +50,13 @@ pub(crate) struct InspectedProductionDatabaseFile {
 
 #[cfg(windows)]
 impl InspectedProductionDatabaseFile {
+    pub(crate) fn identity(&self) -> ProductionDatabaseFileIdentity {
+        ProductionDatabaseFileIdentity {
+            parent: self._parent_identity,
+            file: self._file_identity,
+        }
+    }
+
     /// Comparison only: never releases the inspected native identity or handles.
     pub(crate) fn has_native_identity(&self, volume_serial: u64, file_id: [u8; 16]) -> bool {
         windows::identities_match(
@@ -140,11 +153,11 @@ mod windows {
             FILE_ATTRIBUTE_SPARSE_FILE, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
             FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES,
             FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_MODE,
-            FILE_SHARE_READ, FILE_STANDARD_INFO, FILE_TYPE_DISK, FileAttributeTagInfo,
-            FileBasicInfo, FileIdInfo, FileStandardInfo, GETFINALPATHNAMEBYHANDLE_FLAGS,
-            GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
-            GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OPEN_EXISTING,
-            VOLUME_NAME_GUID,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TYPE_DISK,
+            FileAttributeTagInfo, FileBasicInfo, FileIdInfo, FileStandardInfo,
+            GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandle,
+            GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
+            GetVolumeInformationByHandleW, OPEN_EXISTING, VOLUME_NAME_GUID,
         },
     };
 
@@ -652,6 +665,7 @@ mod windows {
         path: &Path,
         retained: &RetainedEntry,
         directory: bool,
+        file_share: FILE_SHARE_MODE,
     ) -> Result<(), InspectionIssue> {
         let reopened = open_entry(
             path,
@@ -663,7 +677,7 @@ mod windows {
             if directory {
                 DIRECTORY_SHARE
             } else {
-                FILE_SHARE
+                file_share
             },
             if directory {
                 DIRECTORY_FLAGS
@@ -690,6 +704,7 @@ mod windows {
 
     fn inspect_with_hook<F>(
         path: &ProductionDatabasePath,
+        file_share: FILE_SHARE_MODE,
         mut hook: F,
     ) -> ProductionDatabaseInspection
     where
@@ -724,13 +739,13 @@ mod windows {
             if let Err(issue) = stable_entry(&parent) {
                 return map_issue(issue);
             }
-            if let Err(issue) = reopen_and_confirm(parent_path, &parent, true) {
+            if let Err(issue) = reopen_and_confirm(parent_path, &parent, true, file_share) {
                 return map_issue(issue);
             }
             return ProductionDatabaseInspection::Missing;
         }
 
-        let file_handle = match open_entry(path.as_path(), FILE_ACCESS, FILE_SHARE, FILE_FLAGS) {
+        let file_handle = match open_entry(path.as_path(), FILE_ACCESS, file_share, FILE_FLAGS) {
             Ok(file) => file,
             Err(OpenIssue::Invalid) => return ProductionDatabaseInspection::Invalid,
             Err(OpenIssue::Missing) => return ProductionDatabaseInspection::Invalid,
@@ -761,8 +776,8 @@ mod windows {
 
         let confirmation = stable_entry(&parent)
             .and_then(|_| stable_entry(&file))
-            .and_then(|_| reopen_and_confirm(parent_path, &parent, true))
-            .and_then(|_| reopen_and_confirm(path.as_path(), &file, false))
+            .and_then(|_| reopen_and_confirm(parent_path, &parent, true, file_share))
+            .and_then(|_| reopen_and_confirm(path.as_path(), &file, false, file_share))
             .and_then(|_| {
                 let final_names = enumerate_database_names(parent_path)?;
                 if final_names != first_names {
@@ -783,7 +798,13 @@ mod windows {
     }
 
     pub(super) fn inspect(path: &ProductionDatabasePath) -> ProductionDatabaseInspection {
-        inspect_with_hook(path, |_| {})
+        inspect_with_hook(path, FILE_SHARE, |_| {})
+    }
+
+    pub(super) fn inspect_for_writable_migration(
+        path: &ProductionDatabasePath,
+    ) -> ProductionDatabaseInspection {
+        inspect_with_hook(path, FILE_SHARE | FILE_SHARE_WRITE, |_| {})
     }
 
     #[cfg(test)]
@@ -794,7 +815,7 @@ mod windows {
     where
         F: FnMut(InspectionPhase),
     {
-        inspect_with_hook(path, hook)
+        inspect_with_hook(path, FILE_SHARE, hook)
     }
 
     #[cfg(test)]
@@ -859,6 +880,21 @@ pub(crate) fn inspect_production_database_file(
     path: &crate::storage_foundation::ProductionDatabasePath,
 ) -> ProductionDatabaseInspection {
     windows::inspect(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn inspect_production_database_file_for_writable_migration(
+    path: &crate::storage_foundation::ProductionDatabasePath,
+) -> ProductionDatabaseInspection {
+    windows::inspect_for_writable_migration(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn inspected_production_database_file_matches_identity(
+    inspected: &InspectedProductionDatabaseFile,
+    expected: ProductionDatabaseFileIdentity,
+) -> bool {
+    inspected.identity() == expected
 }
 
 #[cfg(windows)]

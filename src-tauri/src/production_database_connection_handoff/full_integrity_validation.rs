@@ -30,6 +30,12 @@ impl fmt::Debug for FullIntegrityValidatedProductionDatabaseMigrationSource {
 }
 
 impl FullIntegrityValidatedProductionDatabaseMigrationSource {
+    pub(crate) fn retained_file_identity(
+        &self,
+    ) -> crate::production_database_file::ProductionDatabaseFileIdentity {
+        self.source.retained_file_identity()
+    }
+
     pub(crate) fn observe_retained_single_physical_device(
         &self,
     ) -> Result<

@@ -84,6 +84,8 @@ function StartupBoundary({
       "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
     migrationExecutionConfirmedAwaitingWritablePreparation:
       "Migration execution is confirmed. Writable migration preparation has not begun.",
+    writableV1MigrationPreparedAwaitingTransaction:
+      "The writable V1 migration database is prepared and verified. The migration transaction has not begun.",
   }[status];
 
   return (

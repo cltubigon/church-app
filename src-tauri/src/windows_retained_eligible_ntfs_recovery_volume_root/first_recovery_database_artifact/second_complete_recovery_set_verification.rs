@@ -8,7 +8,10 @@ pub(crate) use final_two_set_verification::{
     FinalTwoSetVerificationError, FinalTwoSetVerificationFailure, FinalTwoSetVerificationOutcome,
     MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     TwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
-    verify_final_two_recovery_sets,
+    WritableV1MigrationOpenedCloseFailure, WritableV1MigrationPreparationFailure,
+    WritableV1MigrationPreparationOutcome, WritableV1MigrationPreparedProductionDatabase,
+    WritableV1MigrationPreparedShutdownCloseFailure, WritableV1MigrationPreparedShutdownOutcome,
+    WritableV1MigrationSourceCloseFailure, verify_final_two_recovery_sets,
 };
 
 use std::{ffi::OsString, fmt, fs::File, io::Read, os::windows::ffi::OsStringExt, path::PathBuf};

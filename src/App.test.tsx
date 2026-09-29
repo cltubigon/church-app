@@ -129,6 +129,10 @@ describe("application foundation", () => {
       "migrationExecutionConfirmedAwaitingWritablePreparation",
       "Migration execution is confirmed. Writable migration preparation has not begun.",
     ],
+    [
+      "writableV1MigrationPreparedAwaitingTransaction",
+      "The writable V1 migration database is prepared and verified. The migration transaction has not begun.",
+    ],
   ])("does not offer first-time setup while startup status is %s", async (status, message) => {
     mockedInvoke.mockResolvedValue(status);
     renderApp();
@@ -218,6 +222,19 @@ describe("application foundation", () => {
     expect(
       screen.queryByRole("button", { name: "Confirm migration authorization" }),
     ).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Migration is complete");
+    expect(document.body.textContent).not.toContain("Migration completed");
+  });
+
+  it("renders writable-prepared as transaction-not-started", async () => {
+    mockedInvoke.mockResolvedValue("writableV1MigrationPreparedAwaitingTransaction");
+    renderApp();
+
+    expect(
+      await screen.findByText(
+        "The writable V1 migration database is prepared and verified. The migration transaction has not begun.",
+      ),
+    ).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("Migration is complete");
     expect(document.body.textContent).not.toContain("Migration completed");
   });

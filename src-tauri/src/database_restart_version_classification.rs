@@ -29,6 +29,15 @@ pub(crate) enum ProductionDatabaseRestartClassification {
     UnsupportedNewer,
 }
 
+pub(crate) fn require_exact_v1_for_writable_migration(
+    classification: ProductionDatabaseRestartClassification,
+) -> Result<(), ProductionDatabaseRestartClassification> {
+    match classification {
+        ProductionDatabaseRestartClassification::ExactV1 => Ok(()),
+        other => Err(other),
+    }
+}
+
 pub(crate) fn classify_production_database_restart_state(
     observed: &ObservedProductionDatabaseRestartState<'_>,
 ) -> ProductionDatabaseRestartClassification {
@@ -453,6 +462,26 @@ mod tests {
                         .contains(&forbidden.to_ascii_lowercase())
                 );
             }
+        }
+    }
+
+    #[test]
+    fn writable_migration_accepts_only_exact_v1() {
+        assert_eq!(
+            require_exact_v1_for_writable_migration(
+                ProductionDatabaseRestartClassification::ExactV1
+            ),
+            Ok(())
+        );
+        for rejected in [
+            ProductionDatabaseRestartClassification::ExactV2,
+            ProductionDatabaseRestartClassification::Inconsistent,
+            ProductionDatabaseRestartClassification::UnsupportedNewer,
+        ] {
+            assert_eq!(
+                require_exact_v1_for_writable_migration(rejected),
+                Err(rejected)
+            );
         }
     }
 }
