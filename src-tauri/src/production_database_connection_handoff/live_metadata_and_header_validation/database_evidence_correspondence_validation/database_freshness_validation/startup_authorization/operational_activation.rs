@@ -4,7 +4,10 @@ use std::fmt;
 
 use crate::{
     database_metadata_contract::DatabaseMetadataContractV1,
+    database_restart_version_classification::ProductionDatabaseRestartClassification,
     installation_evidence_protection::TrustedCurrentInstallationEvidenceAssessment,
+    production_database_connection_handoff::ProductionDatabaseConnectionCloseFailure,
+    production_database_file::ProductionDatabaseFileIdentity,
 };
 
 use super::{
@@ -17,6 +20,36 @@ pub(crate) struct OperationalProductionDatabase {
     owner: ConnectionLifetimeOwner,
     metadata_contract: DatabaseMetadataContractV1,
     trusted_assessment: TrustedCurrentInstallationEvidenceAssessment,
+    restart_classification: ProductionDatabaseRestartClassification,
+}
+
+pub(crate) struct ClosedExactV2OperationalProductionDatabase {
+    file_identity: ProductionDatabaseFileIdentity,
+    metadata_contract: DatabaseMetadataContractV1,
+    trusted_assessment: TrustedCurrentInstallationEvidenceAssessment,
+}
+
+impl ClosedExactV2OperationalProductionDatabase {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ProductionDatabaseFileIdentity,
+        DatabaseMetadataContractV1,
+        TrustedCurrentInstallationEvidenceAssessment,
+    ) {
+        (
+            self.file_identity,
+            self.metadata_contract,
+            self.trusted_assessment,
+        )
+    }
+}
+
+#[must_use = "the exact-v2 operational handoff outcome must be handled"]
+pub(crate) enum ExactV2OperationalHandoffOutcome {
+    Closed(ClosedExactV2OperationalProductionDatabase),
+    Rejected(OperationalProductionDatabase),
+    CloseFailed(ProductionDatabaseConnectionCloseFailure),
 }
 
 impl fmt::Debug for OperationalProductionDatabase {
@@ -33,8 +66,38 @@ impl OperationalProductionDatabase {
             owner,
             metadata_contract,
             trusted_assessment,
+            restart_classification: _,
         } = self;
         close_operational_owner(owner, metadata_contract, trusted_assessment)
+    }
+
+    pub(crate) fn close_for_exact_v2_business_handoff(self) -> ExactV2OperationalHandoffOutcome {
+        if self.restart_classification != ProductionDatabaseRestartClassification::ExactV2 {
+            return ExactV2OperationalHandoffOutcome::Rejected(self);
+        }
+        let Self {
+            owner,
+            metadata_contract,
+            trusted_assessment,
+            restart_classification: _,
+        } = self;
+        let file_identity = owner.inspected.identity();
+        match super::super::super::super::super::close_lifetime_owner(owner) {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                ExactV2OperationalHandoffOutcome::Closed(
+                    ClosedExactV2OperationalProductionDatabase {
+                        file_identity,
+                        metadata_contract,
+                        trusted_assessment,
+                    },
+                )
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                let _ = metadata_contract;
+                let _ = trusted_assessment;
+                ExactV2OperationalHandoffOutcome::CloseFailed(failure)
+            }
+        }
     }
 }
 
@@ -42,6 +105,16 @@ impl OperationalProductionDatabase {
 /// into the distinct operational root capability.
 pub(crate) fn activate_production_database_for_operational_use(
     database: StartupAuthorizedProductionDatabaseConnection,
+) -> OperationalProductionDatabase {
+    activate_classified_production_database_for_operational_use(
+        database,
+        ProductionDatabaseRestartClassification::ExactV1,
+    )
+}
+
+pub(crate) fn activate_classified_production_database_for_operational_use(
+    database: StartupAuthorizedProductionDatabaseConnection,
+    restart_classification: ProductionDatabaseRestartClassification,
 ) -> OperationalProductionDatabase {
     let StartupAuthorizedProductionDatabaseConnection {
         owner,
@@ -53,6 +126,7 @@ pub(crate) fn activate_production_database_for_operational_use(
         owner,
         metadata_contract,
         trusted_assessment,
+        restart_classification,
     }
 }
 
@@ -91,6 +165,7 @@ impl OperationalProductionDatabase {
             owner,
             metadata_contract,
             trusted_assessment,
+            restart_classification: _,
         } = self;
         close_operational_owner_using(owner, metadata_contract, trusted_assessment, close)
     }
@@ -103,6 +178,20 @@ mod tests {
     use crate::installation_state::{ExpectedStorageEvidence, InstallationEvidence};
 
     use super::*;
+
+    impl ClosedExactV2OperationalProductionDatabase {
+        pub(crate) fn for_test(
+            file_identity: ProductionDatabaseFileIdentity,
+            metadata_contract: DatabaseMetadataContractV1,
+            trusted_assessment: TrustedCurrentInstallationEvidenceAssessment,
+        ) -> Self {
+            Self {
+                file_identity,
+                metadata_contract,
+                trusted_assessment,
+            }
+        }
+    }
     use crate::production_database_connection_handoff::{
         ProductionDatabaseConnectionCloseOutcome, ProductionDatabaseStartupAuthorizationOutcome,
         authorize_production_database_startup,
@@ -207,6 +296,42 @@ mod tests {
     }
 
     #[test]
+    fn only_exact_v2_classification_can_enter_the_business_handoff() {
+        for rejected in [
+            ProductionDatabaseRestartClassification::ExactV1,
+            ProductionDatabaseRestartClassification::Inconsistent,
+            ProductionDatabaseRestartClassification::UnsupportedNewer,
+        ] {
+            let (root, database) = startup_authorized_owner();
+            let operational =
+                activate_classified_production_database_for_operational_use(database, rejected);
+            let ExactV2OperationalHandoffOutcome::Rejected(operational) =
+                operational.close_for_exact_v2_business_handoff()
+            else {
+                panic!("non-V2 classification must be rejected");
+            };
+            assert!(matches!(
+                operational.close(),
+                ProductionDatabaseConnectionCloseOutcome::Closed
+            ));
+            root.assert_exact_cleanup();
+        }
+
+        let (root, database) = startup_authorized_owner();
+        let operational = activate_classified_production_database_for_operational_use(
+            database,
+            ProductionDatabaseRestartClassification::ExactV2,
+        );
+        let ExactV2OperationalHandoffOutcome::Closed(closed) =
+            operational.close_for_exact_v2_business_handoff()
+        else {
+            panic!("Exact V2 must consume and checked-close the read-only owner");
+        };
+        let _ = closed;
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
     fn production_source_is_the_narrow_observation_free_activation_boundary() {
         const SOURCE: &str = include_str!("operational_activation.rs");
         let production = SOURCE.split("#[cfg(test)]").next().unwrap();
@@ -226,10 +351,11 @@ mod tests {
             .split_once("\n}")
             .unwrap()
             .0;
-        assert_eq!(owner.lines().filter(|line| line.contains(':')).count(), 3);
+        assert_eq!(owner.lines().filter(|line| line.contains(':')).count(), 4);
         assert!(owner.contains("owner: ConnectionLifetimeOwner"));
         assert!(owner.contains("metadata_contract: DatabaseMetadataContractV1"));
         assert!(owner.contains("trusted_assessment: TrustedCurrentInstallationEvidenceAssessment"));
+        assert!(owner.contains("restart_classification: ProductionDatabaseRestartClassification"));
 
         for forbidden in [
             "impl FnOnce(rusqlite::Connection",

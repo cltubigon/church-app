@@ -88,9 +88,11 @@ use crate::{
     },
     production_database_connection_handoff::{
         DatabaseEvidenceCorrespondenceValidationCloseFailure,
-        DatabaseEvidenceCorrespondenceValidationOutcome, FullIntegrityValidationCloseRetryOutcome,
-        LiveMetadataAndHeaderValidationCloseFailure, LiveMetadataAndHeaderValidationOutcome,
-        OperationalProductionDatabase, ProductionDatabaseConnectionCloseOutcome,
+        DatabaseEvidenceCorrespondenceValidationOutcome, ExactV2OperationalHandoffOutcome,
+        FullIntegrityValidationCloseRetryOutcome, LiveMetadataAndHeaderValidationCloseFailure,
+        LiveMetadataAndHeaderValidationOutcome,
+        OperationalProductionDatabase as ReadOnlyOperationalProductionDatabase,
+        OperationalV2BusinessDatabase, ProductionDatabaseConnectionCloseOutcome,
         ProductionDatabaseConnectionConstructionCloseFailure,
         ProductionDatabaseFreshnessValidationCloseFailure,
         ProductionDatabaseFreshnessValidationOutcome,
@@ -98,9 +100,10 @@ use crate::{
         ProductionDatabaseMigrationRevalidationContext,
         ProductionDatabaseStartupAuthorizationCloseFailure,
         ProductionDatabaseStartupAuthorizationOutcome, ProductionDatabaseValidationCloseFailure,
-        ProductionDatabaseValidationOutcome, activate_production_database_for_operational_use,
-        authorize_production_database_startup, offer_production_database_migration_opportunity,
-        open_keyed_production_database_read_only,
+        ProductionDatabaseValidationOutcome, V2BusinessDatabaseActivationOutcome,
+        activate_classified_production_database_for_operational_use,
+        activate_exact_v2_business_database, authorize_production_database_startup,
+        offer_production_database_migration_opportunity, open_keyed_production_database_read_only,
         validate_production_database_evidence_correspondence,
         validate_production_database_freshness,
         validate_production_database_live_metadata_and_headers,
@@ -153,6 +156,20 @@ use crate::{
         verify_second_complete_recovery_set,
     },
 };
+
+#[cfg(windows)]
+#[allow(clippy::large_enum_variant)]
+enum OperationalProductionDatabase {
+    ExactV1(ReadOnlyOperationalProductionDatabase),
+    ExactV2(OperationalV2BusinessDatabase),
+}
+
+#[cfg(windows)]
+impl OperationalProductionDatabase {
+    const fn is_exact_v1(&self) -> bool {
+        matches!(self, Self::ExactV1(_))
+    }
+}
 
 #[cfg(all(windows, debug_assertions))]
 use crate::manual_startup_debug_support::{
@@ -1448,7 +1465,7 @@ impl ApplicationLifecycle {
         });
 
         let mut inner = self.lock();
-        if !matches!(inner.state, LifecycleState::Ready(_)) {
+        if !matches!(inner.state, LifecycleState::Ready(ref owner) if owner.is_exact_v1()) {
             return ProductionDatabaseMigrationDiscoveryRequestOutcome::NotReady;
         }
         if inner.migration_discovery != ProductionDatabaseMigrationDiscoveryState::NotAttempted {
@@ -4487,7 +4504,11 @@ fn retain_startup_close_owner<T>(
 
 #[cfg(windows)]
 fn close_operational(owner: OperationalProductionDatabase) -> Option<RetainedCloseFailure> {
-    match owner.close() {
+    let outcome = match owner {
+        OperationalProductionDatabase::ExactV1(owner) => owner.close(),
+        OperationalProductionDatabase::ExactV2(owner) => owner.shutdown(),
+    };
+    match outcome {
         ProductionDatabaseConnectionCloseOutcome::Closed => None,
         ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
             Some(RetainedCloseFailure::Operational(failure))
@@ -4736,7 +4757,7 @@ fn run_production_startup(
         | ProductionDatabaseInspection::Unavailable
         | ProductionDatabaseInspection::Invalid => return unavailable(),
     };
-    let opened = match open_keyed_production_database_read_only(database_path, inspected, key) {
+    let opened = match open_keyed_production_database_read_only(database_path.clone(), inspected, key) {
         Ok(opened) => opened,
         Err(crate::production_database_connection_handoff::ProductionDatabaseConnectionOpenError::Failed) => {
             return unavailable();
@@ -4777,6 +4798,7 @@ fn run_production_startup(
             exclusivity,
         ),
     };
+    let restart_classification = metadata.restart_classification();
     if lifecycle.shutdown_pending() {
         return close_protected_interrupted_owner(metadata, lifecycle, exclusivity);
     }
@@ -4842,12 +4864,67 @@ fn run_production_startup(
             )
         }
     };
-    drop(exclusivity);
     if lifecycle.shutdown_pending() {
+        drop(exclusivity);
         return close_interrupted_owner(authorized);
     }
-
-    StartupWorkerResult::Ready(activate_production_database_for_operational_use(authorized))
+    let operational = activate_classified_production_database_for_operational_use(
+        authorized,
+        restart_classification,
+    );
+    match restart_classification {
+        ProductionDatabaseRestartClassification::ExactV1 => {
+            drop(exclusivity);
+            StartupWorkerResult::Ready(OperationalProductionDatabase::ExactV1(operational))
+        }
+        ProductionDatabaseRestartClassification::ExactV2 => {
+            let closed = match operational.close_for_exact_v2_business_handoff() {
+                ExactV2OperationalHandoffOutcome::Closed(closed) => closed,
+                ExactV2OperationalHandoffOutcome::Rejected(owner) => {
+                    return close_protected_unavailable_owner(owner, lifecycle, exclusivity);
+                }
+                ExactV2OperationalHandoffOutcome::CloseFailed(failure) => {
+                    retain_startup_close_owner(
+                        lifecycle,
+                        RetainedCloseFailure::Operational(failure),
+                        exclusivity,
+                    )
+                }
+            };
+            match activate_exact_v2_business_database(closed, database_path, &key_paths) {
+                V2BusinessDatabaseActivationOutcome::Ready(worker) => {
+                    drop(exclusivity);
+                    if lifecycle.shutdown_pending() {
+                        match worker.shutdown() {
+                            ProductionDatabaseConnectionCloseOutcome::Closed => interrupted(),
+                            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                                StartupWorkerResult::CloseRetryRequired(
+                                    RetainedCloseFailure::Operational(failure),
+                                )
+                            }
+                        }
+                    } else {
+                        StartupWorkerResult::Ready(OperationalProductionDatabase::ExactV2(worker))
+                    }
+                }
+                V2BusinessDatabaseActivationOutcome::Failed(_) => {
+                    drop(exclusivity);
+                    unavailable()
+                }
+                V2BusinessDatabaseActivationOutcome::CloseFailed(failure) => {
+                    retain_startup_close_owner(
+                        lifecycle,
+                        RetainedCloseFailure::Operational(failure),
+                        exclusivity,
+                    )
+                }
+            }
+        }
+        ProductionDatabaseRestartClassification::Inconsistent
+        | ProductionDatabaseRestartClassification::UnsupportedNewer => {
+            close_protected_unavailable_owner(operational, lifecycle, exclusivity)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -4978,6 +5055,16 @@ trait CanonicallyClosable {
 }
 
 #[cfg(windows)]
+impl CanonicallyClosable for OperationalProductionDatabase {
+    fn close_canonically(self) -> ProductionDatabaseConnectionCloseOutcome {
+        match self {
+            Self::ExactV1(owner) => owner.close(),
+            Self::ExactV2(owner) => owner.shutdown(),
+        }
+    }
+}
+
+#[cfg(windows)]
 macro_rules! canonical_close {
     ($($owner:ty),+ $(,)?) => {
         $(impl CanonicallyClosable for $owner {
@@ -4988,6 +5075,7 @@ macro_rules! canonical_close {
 
 #[cfg(windows)]
 canonical_close!(
+    ReadOnlyOperationalProductionDatabase,
     crate::production_database_connection_handoff::ProductionReadOnlyDatabaseConnection,
     crate::production_database_connection_handoff::ReadabilityAndIntegrityValidatedProductionDatabaseConnection,
     crate::production_database_connection_handoff::LiveMetadataAndHeaderValidatedProductionDatabaseConnection,
@@ -5270,7 +5358,7 @@ mod tests {
             .find("authorize_production_database_startup")
             .unwrap();
         let ready = worker
-            .find("StartupWorkerResult::Ready(activate_production_database_for_operational_use")
+            .find("activate_classified_production_database_for_operational_use")
             .unwrap();
 
         assert!(freshness < pause);
@@ -5338,13 +5426,12 @@ mod tests {
         let authorization = worker
             .find("authorize_production_database_startup(fresh, final_installation_evidence)")
             .unwrap();
-        let release = worker.find("drop(exclusivity)").unwrap();
-        let post_authorization_shutdown = worker[release..]
+        let post_authorization_shutdown = worker[authorization..]
             .find("if lifecycle.shutdown_pending()")
             .unwrap()
-            + release;
+            + authorization;
         let activation = worker
-            .find("activate_production_database_for_operational_use(authorized)")
+            .find("activate_classified_production_database_for_operational_use")
             .unwrap();
 
         assert!(paths < initial_shutdown);
@@ -5352,10 +5439,9 @@ mod tests {
         assert!(acquire < early_observation);
         assert!(early_observation < final_observation);
         assert!(final_observation < authorization);
-        assert!(authorization < release);
-        assert!(release < post_authorization_shutdown);
+        assert!(authorization < post_authorization_shutdown);
         assert!(post_authorization_shutdown < activation);
-        assert_eq!(worker.matches("drop(exclusivity)").count(), 1);
+        assert_eq!(worker.matches("drop(exclusivity)").count(), 4);
         assert_eq!(
             worker
                 .matches("acquire_first_time_setup_cross_process_exclusivity()")
@@ -5608,7 +5694,7 @@ mod tests {
         ] {
             assert!(worker.contains(failure));
         }
-        assert_eq!(worker.matches("retain_startup_close_owner(").count(), 6);
+        assert_eq!(worker.matches("retain_startup_close_owner(").count(), 8);
     }
 
     #[cfg(windows)]
@@ -6282,7 +6368,8 @@ mod tests {
         lifecycle: &ApplicationLifecycle,
     ) -> crate::production_database_connection_handoff::MigrationDiscoveryTestRoot {
         let (root, owner) = crate::production_database_connection_handoff::genuine_operational_production_database_for_test();
-        lifecycle.lock().state = LifecycleState::Ready(owner);
+        lifecycle.lock().state =
+            LifecycleState::Ready(OperationalProductionDatabase::ExactV1(owner));
         root
     }
 
@@ -6680,7 +6767,7 @@ mod tests {
             .unwrap()
             .0;
         assert!(startup.contains("validate_production_database_live_metadata_and_headers"));
-        assert!(startup.contains("activate_production_database_for_operational_use"));
+        assert!(startup.contains("activate_classified_production_database_for_operational_use"));
         assert!(!startup.contains("offer_production_database_migration_opportunity"));
         const LIVE_VALIDATION: &str = include_str!(
             "production_database_connection_handoff/live_metadata_and_header_validation.rs"

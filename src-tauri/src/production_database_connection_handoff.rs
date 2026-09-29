@@ -41,6 +41,7 @@ mod fixed_metadata_and_header_observation;
 mod full_integrity_validation;
 mod live_metadata_and_header_validation;
 mod restart_schema_observation;
+mod v2_business_database;
 mod writable_v1_migration_preparation;
 
 /// Runs only the canonical fixed cipher-integrity operation on a borrowed
@@ -227,13 +228,14 @@ pub(crate) use create_new_database::{
 
 #[allow(unused_imports)]
 pub(crate) use live_metadata_and_header_validation::{
+    ClosedExactV2OperationalProductionDatabase,
     ClosedPreparedMetadataValidatedProductionDatabaseForSetup,
     DatabaseEvidenceCorrespondenceMismatch,
     DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection,
     DatabaseEvidenceCorrespondenceValidationCloseFailure,
     DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome,
     DatabaseEvidenceCorrespondenceValidationOutcome,
-    DatabaseFreshnessValidatedProductionDatabaseConnection,
+    DatabaseFreshnessValidatedProductionDatabaseConnection, ExactV2OperationalHandoffOutcome,
     LiveMetadataAndHeaderValidatedProductionDatabaseConnection,
     LiveMetadataAndHeaderValidationCloseFailure, LiveMetadataAndHeaderValidationCloseRetryOutcome,
     LiveMetadataAndHeaderValidationError, LiveMetadataAndHeaderValidationOutcome,
@@ -254,6 +256,7 @@ pub(crate) use live_metadata_and_header_validation::{
     SetupProductionDatabaseRevalidationCloseFailure,
     SetupProductionDatabaseRevalidationCloseOutcome, SetupProductionDatabaseRevalidationError,
     StartupAuthorizedProductionDatabaseConnection,
+    activate_classified_production_database_for_operational_use,
     activate_production_database_for_operational_use, authorize_production_database_startup,
     close_and_preserve_prepared_metadata_validated_production_database_for_setup,
     offer_production_database_migration_opportunity,
@@ -283,6 +286,10 @@ pub(crate) use full_integrity_validation::{
     validate_production_database_full_integrity_on_borrowed_connection,
 };
 
+pub(crate) use v2_business_database::{
+    OperationalV2BusinessDatabase, V2BusinessDatabaseActivationOutcome,
+    activate_exact_v2_business_database,
+};
 pub(crate) use writable_v1_migration_preparation::{
     WritableV1MigrationDatabase, WritableV1MigrationDatabaseCloseFailure,
     WritableV1MigrationDatabaseCloseRetryOutcome, WritableV1MigrationDatabaseOpenError,
@@ -1361,7 +1368,7 @@ mod tests {
             production_database_path(self.0.clone())
         }
 
-        fn create_empty_database(&self) {
+        pub(super) fn create_empty_database(&self) {
             let connection = Connection::open(self.0.join(PRODUCTION_DATABASE_FILENAME))
                 .expect("synthetic SQLite file creation should succeed");
             connection
@@ -1462,7 +1469,7 @@ mod tests {
         )
     }
 
-    fn test_lifetime_owner(root: &TestRoot) -> ConnectionLifetimeOwner {
+    pub(super) fn test_lifetime_owner(root: &TestRoot) -> ConnectionLifetimeOwner {
         let guarded = acquire_guarded_inspection(&root.typed_path(), root.inspected())
             .expect("guard acquisition should succeed");
         ConnectionLifetimeOwner {

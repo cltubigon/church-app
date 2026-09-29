@@ -21,8 +21,9 @@ use super::{
 mod database_freshness_validation;
 
 pub(crate) use database_freshness_validation::{
-    DatabaseFreshnessValidatedProductionDatabaseConnection, OperationalProductionDatabase,
-    ProductionDatabaseFreshnessValidationCloseFailure,
+    ClosedExactV2OperationalProductionDatabase,
+    DatabaseFreshnessValidatedProductionDatabaseConnection, ExactV2OperationalHandoffOutcome,
+    OperationalProductionDatabase, ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
     ProductionDatabaseMigrationOpportunityCloseFailure,
@@ -36,6 +37,7 @@ pub(crate) use database_freshness_validation::{
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
     RevalidatedProductionDatabaseMigrationOpportunity,
     StartupAuthorizedProductionDatabaseConnection,
+    activate_classified_production_database_for_operational_use,
     activate_production_database_for_operational_use, authorize_production_database_startup,
     offer_production_database_migration_opportunity,
     revalidate_production_database_migration_opportunity, validate_production_database_freshness,

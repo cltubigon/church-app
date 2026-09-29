@@ -1,5 +1,7 @@
 # Project overview
 
+Fresh canonical Exact-V2 startup now ends in one Rust-owned writable business database worker. The transition explicitly resolves the startup read-only connection first, reuses the canonical protected-key recovery and SQLCipher raw-key application boundaries, revalidates Exact V2, enables and reads back foreign-key enforcement, and moves the sole connection into a fixed-capacity serial worker with deterministic checked shutdown/close. Exact V1 never receives this authority and retains its existing migration-opportunity behavior. This is persistence authority only: business Rust operations, opaque entity references, request persistence, scheduling, cancellation reviews, business IPC, frontend workflows, restore, and retention/deletion remain unimplemented.
+
 Church App is intended to support a Roman Catholic parish through a Windows-first, desktop-first application that must operate offline. Future encrypted local parish data will be authoritative; central Supabase infrastructure is planned to be non-authoritative. The public Next.js surface and canonical contracts are intended for separate repositories and neither exists here.
 
 This repository currently provides only a Tauri 2 foundation: an accessible React shell, four unavailable placeholder areas, a typed Rust health command, focused tests, and narrow validation. It is not a usable parish application and must not receive real parish data.

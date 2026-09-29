@@ -1,5 +1,7 @@
 # Security and data
 
+Normal writable business authority is now implemented only for freshly validated Exact V2. The typed handoff must checked-close the existing read-only owner before the canonical file can be reopened writable; a close failure retains only exact close-retry ownership. The canonical protected key is recovered and bound to trusted evidence, applied once through the existing raw-key primitive, and dropped before worker readiness. No raw key enters lifecycle state, worker state, IPC, serialization, or logs. The writable connection is limited to canonical `parish-data.db`, preserves the existing busy-timeout, defensive, trusted-schema, and attachment restrictions, revalidates cipher/SQLite integrity and Exact V2 without schema mutation, and fails closed unless foreign-key enforcement reads back as enabled. One bounded Rust worker owns the connection through checked shutdown. Exact V1, inconsistent, and newer states cannot obtain this authority.
+
 - Never place secrets, tokens, credentials, or production environment configuration in the frontend or repository.
 - Never place sensitive parish or personal data in logs, tests, examples, or screenshots. Tests use synthetic bootstrap strings only.
 - Privileged operations belong in Rust. React must not directly access files, a future database, encryption material, or privileged services.

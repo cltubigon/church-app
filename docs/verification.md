@@ -1,5 +1,9 @@
 # Verification
 
+## Exact V2 business-worker evidence
+
+Focused Windows Rust tests use disposable synthetic SQLCipher databases and the canonical protected-key recovery/application path. They prove that a canonical Exact-V2 fixture reaches the bounded single-connection worker; wrong-key, Exact-V1, and malformed-V2 fixtures fail closed; activation leaves database bytes unchanged; and a fixed test-only insert violating the real V2 foreign key is rejected on the worker-owned connection. Separate tests prove explicit foreign-key enable/readback and failure when enablement cannot take effect, fixed queue capacity, serialized processing, rejection of queued/new commands after shutdown begins, in-flight completion ordering, checked close, injected close-failure ownership, and canonical close retry. Source-boundary and lifecycle tests exclude arbitrary SQL/callback APIs, `SQLITE_OPEN_CREATE`, public foreign-key toggles, and business IPC; preserve Exact-V1-only migration discovery; and retain coarse external `Ready`. These automated tests do not claim manual Windows runtime observation or implemented business persistence operations.
+
 Run from the repository root with Node.js 24.18.0, npm 11.16.0, and the pinned Rust toolchain.
 
 ## Frontend checks

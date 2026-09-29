@@ -1,5 +1,9 @@
 # Product decisions
 
+- **Exact-V2 business database authority:** one dedicated Rust worker owns one long-lived writable SQLCipher connection after a consuming read-only-to-writable handoff. Only a freshly validated canonical Exact-V2 operational owner can enter it. The queue is bounded, operations are serial, foreign keys are mandatory and verified, and shutdown is joined and checked-close preserving.
+- **Current operation boundary:** the worker has no production business commands, arbitrary SQL/callback surface, IPC, or frontend access. Later state changes must be sealed worker variants using `BEGIN IMMEDIATE`. Opaque entity references, request persistence, scheduling, cancellation reviews, restore, and retention/deletion remain future work.
+- **Unresolved deletion decision:** pending draft-occurrence deletion remains unresolved. No draft delete/remove operation is implemented or approved by this stage.
+
 ## Implemented foundation facts
 
 The current Rust-only boundary independently verifies both published recovery sets and composes them into final keyless Layer D proof. The aggregate transition consumes only `SecondCompleteRecoverySetVerified`; it accepts no fresh custody record or secret-bearing input and repeats no AEAD or SQLCipher verification.

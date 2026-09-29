@@ -34,13 +34,13 @@ pub(crate) use setup_database_revalidation::{
 };
 
 pub(crate) use database_evidence_correspondence_validation::{
-    DatabaseEvidenceCorrespondenceMismatch,
+    ClosedExactV2OperationalProductionDatabase, DatabaseEvidenceCorrespondenceMismatch,
     DatabaseEvidenceCorrespondenceValidatedProductionDatabaseConnection,
     DatabaseEvidenceCorrespondenceValidationCloseFailure,
     DatabaseEvidenceCorrespondenceValidationCloseRetryOutcome,
     DatabaseEvidenceCorrespondenceValidationOutcome,
-    DatabaseFreshnessValidatedProductionDatabaseConnection, OperationalProductionDatabase,
-    ProductionDatabaseFreshnessValidationCloseFailure,
+    DatabaseFreshnessValidatedProductionDatabaseConnection, ExactV2OperationalHandoffOutcome,
+    OperationalProductionDatabase, ProductionDatabaseFreshnessValidationCloseFailure,
     ProductionDatabaseFreshnessValidationCloseRetryOutcome,
     ProductionDatabaseFreshnessValidationOutcome, ProductionDatabaseMigrationOpportunity,
     ProductionDatabaseMigrationOpportunityCloseFailure,
@@ -54,6 +54,7 @@ pub(crate) use database_evidence_correspondence_validation::{
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
     RevalidatedProductionDatabaseMigrationOpportunity,
     StartupAuthorizedProductionDatabaseConnection,
+    activate_classified_production_database_for_operational_use,
     activate_production_database_for_operational_use, authorize_production_database_startup,
     offer_production_database_migration_opportunity,
     revalidate_production_database_migration_opportunity,
@@ -293,7 +294,7 @@ fn finish_restart_validation_using(
     }
 }
 
-fn observe_and_classify_restart_state(
+pub(super) fn observe_and_classify_restart_state(
     connection: &Connection,
 ) -> Result<
     (

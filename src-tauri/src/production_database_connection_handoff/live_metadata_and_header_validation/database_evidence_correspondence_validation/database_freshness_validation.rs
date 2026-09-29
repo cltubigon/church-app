@@ -44,10 +44,12 @@ pub(crate) use production_database_migration_revalidation::genuine_production_da
 pub(crate) use tests::TestRoot as MigrationDiscoveryTestRoot;
 
 pub(crate) use startup_authorization::{
+    ClosedExactV2OperationalProductionDatabase, ExactV2OperationalHandoffOutcome,
     OperationalProductionDatabase, ProductionDatabaseStartupAuthorizationCloseFailure,
     ProductionDatabaseStartupAuthorizationCloseRetryOutcome,
     ProductionDatabaseStartupAuthorizationError, ProductionDatabaseStartupAuthorizationOutcome,
     StartupAuthorizedProductionDatabaseConnection,
+    activate_classified_production_database_for_operational_use,
     activate_production_database_for_operational_use, authorize_production_database_startup,
 };
 

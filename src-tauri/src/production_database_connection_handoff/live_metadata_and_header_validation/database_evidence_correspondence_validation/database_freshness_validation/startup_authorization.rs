@@ -16,7 +16,9 @@ use super::{
 mod operational_activation;
 
 pub(crate) use operational_activation::{
-    OperationalProductionDatabase, activate_production_database_for_operational_use,
+    ClosedExactV2OperationalProductionDatabase, ExactV2OperationalHandoffOutcome,
+    OperationalProductionDatabase, activate_classified_production_database_for_operational_use,
+    activate_production_database_for_operational_use,
 };
 
 pub(crate) struct StartupAuthorizedProductionDatabaseConnection {
