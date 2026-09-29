@@ -63,6 +63,7 @@ pub(crate) enum BusinessFailure {
     InvalidInput,
     NotFound,
     InvalidState,
+    PendingCancellationAlreadyExists,
     ScheduleConflict,
     ConcurrentChange,
     DatabaseUnavailable,
@@ -73,6 +74,9 @@ pub(crate) struct ServiceRequestId(i64);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ScheduleOccurrenceId(i64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct CancellationReviewId(i64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ServiceCategory {
@@ -121,6 +125,24 @@ impl RequestStatus {
             "scheduled" => Some(Self::Scheduled),
             "completed" => Some(Self::Completed),
             "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CancellationDisposition {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+impl CancellationDisposition {
+    fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "pending" => Some(Self::Pending),
+            "approved" => Some(Self::Approved),
+            "rejected" => Some(Self::Rejected),
             _ => None,
         }
     }
@@ -186,9 +208,18 @@ pub(crate) struct ScheduleOccurrence {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CancellationReview {
+    pub(crate) id: CancellationReviewId,
+    pub(crate) disposition: CancellationDisposition,
+    pub(crate) requested_at: i64,
+    pub(crate) resolved_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServiceRequestDetail {
     pub(crate) request: ServiceRequestSummary,
     pub(crate) occurrences: Vec<ScheduleOccurrence>,
+    pub(crate) cancellation_reviews: Vec<CancellationReview>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,6 +242,16 @@ pub(crate) struct ScheduleOccupancyItem {
     pub(crate) request_id: ServiceRequestId,
     pub(crate) service_category: ServiceCategory,
     pub(crate) occurrence: ScheduleOccurrence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingCancellationReview {
+    pub(crate) review_id: CancellationReviewId,
+    pub(crate) request_id: ServiceRequestId,
+    pub(crate) service_category: ServiceCategory,
+    pub(crate) request_status: RequestStatus,
+    pub(crate) requester_display_name: String,
+    pub(crate) requested_at: i64,
 }
 
 #[must_use = "the V2 business database activation outcome must be handled"]
@@ -277,6 +318,22 @@ enum BusinessDatabaseCommand {
         reply: Sender<Result<(), BusinessFailure>>,
     },
     ListScheduleOccupancy(Sender<Result<Vec<ScheduleOccupancyItem>, BusinessFailure>>),
+    RequestCancellation {
+        request_id: ServiceRequestId,
+        reply: Sender<Result<CancellationReview, BusinessFailure>>,
+    },
+    ApproveCancellationReview {
+        review_id: CancellationReviewId,
+        reply: Sender<Result<(), BusinessFailure>>,
+    },
+    RejectCancellationReview {
+        review_id: CancellationReviewId,
+        reply: Sender<Result<(), BusinessFailure>>,
+    },
+    ListPendingCancellationReviews(Sender<Result<Vec<PendingCancellationReview>, BusinessFailure>>),
+    ListRequestsWithPendingCancellationReview(
+        Sender<Result<Vec<ServiceRequestSummary>, BusinessFailure>>,
+    ),
     #[cfg(test)]
     Probe(std::sync::mpsc::Sender<Result<(), V2BusinessDatabaseActivationError>>),
     #[cfg(test)]
@@ -409,6 +466,42 @@ impl OperationalV2BusinessDatabase {
         &self,
     ) -> Result<Vec<ScheduleOccupancyItem>, BusinessFailure> {
         self.request(BusinessDatabaseCommand::ListScheduleOccupancy)
+    }
+
+    pub(crate) fn request_cancellation(
+        &self,
+        request_id: ServiceRequestId,
+    ) -> Result<CancellationReview, BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::RequestCancellation { request_id, reply })
+    }
+
+    pub(crate) fn approve_cancellation_review(
+        &self,
+        review_id: CancellationReviewId,
+    ) -> Result<(), BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::ApproveCancellationReview {
+            review_id,
+            reply,
+        })
+    }
+
+    pub(crate) fn reject_cancellation_review(
+        &self,
+        review_id: CancellationReviewId,
+    ) -> Result<(), BusinessFailure> {
+        self.request(|reply| BusinessDatabaseCommand::RejectCancellationReview { review_id, reply })
+    }
+
+    pub(crate) fn list_pending_cancellation_reviews(
+        &self,
+    ) -> Result<Vec<PendingCancellationReview>, BusinessFailure> {
+        self.request(BusinessDatabaseCommand::ListPendingCancellationReviews)
+    }
+
+    pub(crate) fn list_requests_with_pending_cancellation_review(
+        &self,
+    ) -> Result<Vec<ServiceRequestSummary>, BusinessFailure> {
+        self.request(BusinessDatabaseCommand::ListRequestsWithPendingCancellationReview)
     }
 
     pub(crate) fn shutdown(self) -> ProductionDatabaseConnectionCloseOutcome {
@@ -710,6 +803,19 @@ fn reject_command(command: BusinessDatabaseCommand) {
         BusinessDatabaseCommand::ListScheduleOccupancy(reply) => {
             let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
         }
+        BusinessDatabaseCommand::RequestCancellation { reply, .. } => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        BusinessDatabaseCommand::ApproveCancellationReview { reply, .. }
+        | BusinessDatabaseCommand::RejectCancellationReview { reply, .. } => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        BusinessDatabaseCommand::ListPendingCancellationReviews(reply) => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
+        BusinessDatabaseCommand::ListRequestsWithPendingCancellationReview(reply) => {
+            let _ = reply.send(Err(BusinessFailure::DatabaseUnavailable));
+        }
         #[cfg(test)]
         BusinessDatabaseCommand::Probe(reply) => {
             let _ = reply.send(Err(V2BusinessDatabaseActivationError::DatabaseUnavailable));
@@ -788,6 +894,26 @@ fn process_command(connection: &mut Connection, command: BusinessDatabaseCommand
         }
         BusinessDatabaseCommand::ListScheduleOccupancy(reply) => {
             let _ = reply.send(list_schedule_occupancy_on_connection(connection));
+        }
+        BusinessDatabaseCommand::RequestCancellation { request_id, reply } => {
+            let _ = reply.send(request_cancellation_on_connection(connection, request_id));
+        }
+        BusinessDatabaseCommand::ApproveCancellationReview { review_id, reply } => {
+            let _ = reply.send(approve_cancellation_review_on_connection(
+                connection, review_id,
+            ));
+        }
+        BusinessDatabaseCommand::RejectCancellationReview { review_id, reply } => {
+            let _ = reply.send(reject_cancellation_review_on_connection(
+                connection, review_id,
+            ));
+        }
+        BusinessDatabaseCommand::ListPendingCancellationReviews(reply) => {
+            let _ = reply.send(list_pending_cancellation_reviews_on_connection(connection));
+        }
+        BusinessDatabaseCommand::ListRequestsWithPendingCancellationReview(reply) => {
+            let _ = reply
+                .send(list_requests_with_pending_cancellation_review_on_connection(connection));
         }
         #[cfg(test)]
         BusinessDatabaseCommand::Probe(reply) => {
@@ -1031,9 +1157,23 @@ fn get_request_on_connection(
     let occurrences = rows
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    let mut review_statement = connection
+        .prepare(
+            "SELECT id, disposition, requested_at, resolved_at \
+             FROM request_cancellation_reviews WHERE service_request_id = ?1 \
+             ORDER BY requested_at ASC, id ASC",
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    let review_rows = review_statement
+        .query_map([request_id.0], decode_cancellation_review)
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    let cancellation_reviews = review_rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
     Ok(ServiceRequestDetail {
         request,
         occurrences,
+        cancellation_reviews,
     })
 }
 
@@ -1063,6 +1203,19 @@ fn decode_occurrence(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleOccurr
         local_date: row.get(2)?,
         local_time: row.get(3)?,
         location: row.get(4)?,
+    })
+}
+
+fn decode_cancellation_review(row: &rusqlite::Row<'_>) -> rusqlite::Result<CancellationReview> {
+    let disposition_code: String = row.get(1)?;
+    let Some(disposition) = CancellationDisposition::from_code(&disposition_code) else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    Ok(CancellationReview {
+        id: CancellationReviewId(row.get(0)?),
+        disposition,
+        requested_at: row.get(2)?,
+        resolved_at: row.get(3)?,
     })
 }
 
@@ -1418,6 +1571,221 @@ fn complete_request_on_connection(
     }
     transaction
         .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn request_cancellation_on_connection(
+    connection: &mut Connection,
+    request_id: ServiceRequestId,
+) -> Result<CancellationReview, BusinessFailure> {
+    let requested_at = trusted_created_at()?;
+    let transaction = begin_immediate(connection)?;
+    let (_, status) = parent_state(&transaction, request_id)?;
+    if !matches!(status, RequestStatus::Pending | RequestStatus::Scheduled) {
+        return Err(BusinessFailure::InvalidState);
+    }
+    let pending_count: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM request_cancellation_reviews \
+             WHERE service_request_id = ?1 AND disposition = 'pending'",
+            [request_id.0],
+            |row| row.get(0),
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    if pending_count != 0 {
+        return Err(BusinessFailure::PendingCancellationAlreadyExists);
+    }
+    transaction
+        .execute(
+            "INSERT INTO request_cancellation_reviews(\
+                service_request_id, disposition, requested_at, resolved_at\
+             ) VALUES (?1, 'pending', ?2, NULL)",
+            params![request_id.0, requested_at],
+        )
+        .map_err(|error| {
+            if matches!(
+                &error,
+                rusqlite::Error::SqliteFailure(code, _)
+                    if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            ) {
+                BusinessFailure::PendingCancellationAlreadyExists
+            } else {
+                BusinessFailure::DatabaseUnavailable
+            }
+        })?;
+    let review = CancellationReview {
+        id: CancellationReviewId(transaction.last_insert_rowid()),
+        disposition: CancellationDisposition::Pending,
+        requested_at,
+        resolved_at: None,
+    };
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    Ok(review)
+}
+
+fn cancellation_review_parent_state(
+    transaction: &Transaction<'_>,
+    review_id: CancellationReviewId,
+) -> Result<(ServiceRequestId, CancellationDisposition, RequestStatus), BusinessFailure> {
+    let row = transaction
+        .query_row(
+            "SELECT review.service_request_id, review.disposition, request.status \
+             FROM request_cancellation_reviews review \
+             JOIN service_requests request ON request.id = review.service_request_id \
+             WHERE review.id = ?1",
+            [review_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .ok_or(BusinessFailure::NotFound)?;
+    Ok((
+        ServiceRequestId(row.0),
+        CancellationDisposition::from_code(&row.1).ok_or(BusinessFailure::DatabaseUnavailable)?,
+        RequestStatus::from_code(&row.2).ok_or(BusinessFailure::DatabaseUnavailable)?,
+    ))
+}
+
+fn approve_cancellation_review_on_connection(
+    connection: &mut Connection,
+    review_id: CancellationReviewId,
+) -> Result<(), BusinessFailure> {
+    approve_cancellation_review_transaction(connection, review_id, false)
+}
+
+fn approve_cancellation_review_transaction(
+    connection: &mut Connection,
+    review_id: CancellationReviewId,
+    #[cfg_attr(not(test), allow(unused_variables))] fail_after_parent_update: bool,
+) -> Result<(), BusinessFailure> {
+    let resolved_at = trusted_created_at()?;
+    let transaction = begin_immediate(connection)?;
+    let (request_id, disposition, status) =
+        cancellation_review_parent_state(&transaction, review_id)?;
+    if disposition != CancellationDisposition::Pending
+        || !matches!(status, RequestStatus::Pending | RequestStatus::Scheduled)
+    {
+        return Err(BusinessFailure::InvalidState);
+    }
+    let request_changed = transaction
+        .execute(
+            "UPDATE service_requests SET status = 'cancelled' \
+             WHERE id = ?1 AND status IN ('pending', 'scheduled')",
+            [request_id.0],
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    if request_changed != 1 {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    #[cfg(test)]
+    if fail_after_parent_update {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    let review_changed = transaction
+        .execute(
+            "UPDATE request_cancellation_reviews \
+             SET disposition = 'approved', resolved_at = ?1 \
+             WHERE id = ?2 AND disposition = 'pending'",
+            params![resolved_at, review_id.0],
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    if review_changed != 1 {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn reject_cancellation_review_on_connection(
+    connection: &mut Connection,
+    review_id: CancellationReviewId,
+) -> Result<(), BusinessFailure> {
+    let resolved_at = trusted_created_at()?;
+    let transaction = begin_immediate(connection)?;
+    let (_, disposition, _) = cancellation_review_parent_state(&transaction, review_id)?;
+    if disposition != CancellationDisposition::Pending {
+        return Err(BusinessFailure::InvalidState);
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE request_cancellation_reviews \
+             SET disposition = 'rejected', resolved_at = ?1 \
+             WHERE id = ?2 AND disposition = 'pending'",
+            params![resolved_at, review_id.0],
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    if changed != 1 {
+        return Err(BusinessFailure::ConcurrentChange);
+    }
+    transaction
+        .commit()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn list_pending_cancellation_reviews_on_connection(
+    connection: &Connection,
+) -> Result<Vec<PendingCancellationReview>, BusinessFailure> {
+    let mut statement = connection
+        .prepare(
+            "SELECT review.id, request.id, request.service_category, request.status, \
+                    request.requester_full_name, review.requested_at \
+             FROM request_cancellation_reviews review \
+             JOIN service_requests request ON request.id = review.service_request_id \
+             WHERE review.disposition = 'pending' \
+             ORDER BY review.requested_at ASC, review.id ASC",
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    statement
+        .query_map([], |row| {
+            let service_code: String = row.get(2)?;
+            let status_code: String = row.get(3)?;
+            let Some(service_category) = ServiceCategory::from_code(&service_code) else {
+                return Err(rusqlite::Error::InvalidQuery);
+            };
+            let Some(request_status) = RequestStatus::from_code(&status_code) else {
+                return Err(rusqlite::Error::InvalidQuery);
+            };
+            Ok(PendingCancellationReview {
+                review_id: CancellationReviewId(row.get(0)?),
+                request_id: ServiceRequestId(row.get(1)?),
+                service_category,
+                request_status,
+                requester_display_name: row.get(4)?,
+                requested_at: row.get(5)?,
+            })
+        })
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)
+}
+
+fn list_requests_with_pending_cancellation_review_on_connection(
+    connection: &Connection,
+) -> Result<Vec<ServiceRequestSummary>, BusinessFailure> {
+    let mut statement = connection
+        .prepare(
+            "SELECT request.id, request.service_category, request.status, \
+                    request.requester_full_name, request.requester_phone, \
+                    request.requester_email, request.created_at \
+             FROM request_cancellation_reviews review \
+             JOIN service_requests request ON request.id = review.service_request_id \
+             WHERE review.disposition = 'pending' \
+             ORDER BY review.requested_at ASC, review.id ASC",
+        )
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?;
+    statement
+        .query_map([], decode_summary)
+        .map_err(|_| BusinessFailure::DatabaseUnavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|_| BusinessFailure::DatabaseUnavailable)
 }
 
@@ -1813,8 +2181,23 @@ mod tests {
             occurrence
         );
         assert_eq!(worker.list_schedule_occupancy().unwrap().len(), 1);
-        worker.complete_request(request.id).unwrap();
+        let rejected = worker.request_cancellation(request.id).unwrap();
+        assert_eq!(worker.list_pending_cancellation_reviews().unwrap().len(), 1);
+        assert_eq!(
+            worker
+                .list_requests_with_pending_cancellation_review()
+                .unwrap()[0]
+                .status,
+            RequestStatus::Scheduled
+        );
+        worker.reject_cancellation_review(rejected.id).unwrap();
+        assert_eq!(worker.list_schedule_occupancy().unwrap().len(), 1);
+        let approved = worker.request_cancellation(request.id).unwrap();
+        worker.approve_cancellation_review(approved.id).unwrap();
         assert!(worker.list_schedule_occupancy().unwrap().is_empty());
+        let detail = worker.get_request(request.id).unwrap();
+        assert_eq!(detail.request.status, RequestStatus::Cancelled);
+        assert_eq!(detail.cancellation_reviews.len(), 2);
         assert!(matches!(
             worker.shutdown(),
             ProductionDatabaseConnectionCloseOutcome::Closed
@@ -2573,6 +2956,276 @@ mod tests {
         let detail = get_request_on_connection(&connection, first.id).unwrap();
         assert_eq!(detail.request.requester.full_name, "Synthetic Requester");
         assert_eq!(detail.occurrences.len(), 1);
+    }
+
+    #[test]
+    fn cancellation_requests_preserve_primary_status_enforce_eligibility_and_retain_history() {
+        let mut connection = business_connection();
+        let pending = create_request(&mut connection, ServiceCategory::Baptism);
+        let before = trusted_created_at().unwrap();
+        let first = request_cancellation_on_connection(&mut connection, pending.id).unwrap();
+        assert_eq!(first.disposition, CancellationDisposition::Pending);
+        assert!(first.requested_at >= before);
+        assert_eq!(first.resolved_at, None);
+        assert_eq!(
+            get_request_on_connection(&connection, pending.id)
+                .unwrap()
+                .request
+                .status,
+            RequestStatus::Pending
+        );
+        assert_eq!(
+            request_cancellation_on_connection(&mut connection, pending.id),
+            Err(BusinessFailure::PendingCancellationAlreadyExists)
+        );
+
+        reject_cancellation_review_on_connection(&mut connection, first.id).unwrap();
+        let second = request_cancellation_on_connection(&mut connection, pending.id).unwrap();
+        assert_ne!(second.id, first.id);
+        approve_cancellation_review_on_connection(&mut connection, second.id).unwrap();
+        connection
+            .execute(
+                "UPDATE request_cancellation_reviews SET requested_at = 42 WHERE id IN (?1, ?2)",
+                params![first.id.0, second.id.0],
+            )
+            .unwrap();
+        assert_eq!(
+            request_cancellation_on_connection(&mut connection, pending.id),
+            Err(BusinessFailure::InvalidState)
+        );
+        assert_eq!(
+            approve_cancellation_review_on_connection(&mut connection, second.id),
+            Err(BusinessFailure::InvalidState)
+        );
+        let history = get_request_on_connection(&connection, pending.id)
+            .unwrap()
+            .cancellation_reviews;
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert_eq!(history[0].disposition, CancellationDisposition::Rejected);
+        assert!(history[0].resolved_at.is_some());
+        assert_eq!(history[1].disposition, CancellationDisposition::Approved);
+        assert!(history[1].resolved_at.is_some());
+
+        let completed = create_request(&mut connection, ServiceCategory::Confirmation);
+        connection
+            .execute(
+                "UPDATE service_requests SET status = 'completed' WHERE id = ?1",
+                [completed.id.0],
+            )
+            .unwrap();
+        assert_eq!(
+            request_cancellation_on_connection(&mut connection, completed.id),
+            Err(BusinessFailure::InvalidState)
+        );
+        let cancelled = create_request(&mut connection, ServiceCategory::Confirmation);
+        connection
+            .execute(
+                "UPDATE service_requests SET status = 'cancelled' WHERE id = ?1",
+                [cancelled.id.0],
+            )
+            .unwrap();
+        assert_eq!(
+            request_cancellation_on_connection(&mut connection, cancelled.id),
+            Err(BusinessFailure::InvalidState)
+        );
+    }
+
+    #[test]
+    fn cancellation_resolution_preserves_or_releases_schedule_occupancy_as_locked() {
+        let mut connection = business_connection();
+        let scheduled = create_request(&mut connection, ServiceCategory::Baptism);
+        let occurrence = create_occurrence(
+            &mut connection,
+            scheduled.id,
+            OccurrenceKind::Primary,
+            "2037-09-10",
+            "09:00",
+            None,
+        );
+        schedule_request_on_connection(&mut connection, scheduled.id).unwrap();
+
+        let rejected = request_cancellation_on_connection(&mut connection, scheduled.id).unwrap();
+        assert_eq!(
+            list_schedule_occupancy_on_connection(&connection)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            get_request_on_connection(&connection, scheduled.id)
+                .unwrap()
+                .request
+                .status,
+            RequestStatus::Scheduled
+        );
+        reject_cancellation_review_on_connection(&mut connection, rejected.id).unwrap();
+        assert_eq!(
+            get_request_on_connection(&connection, scheduled.id)
+                .unwrap()
+                .request
+                .status,
+            RequestStatus::Scheduled
+        );
+        assert_eq!(
+            list_schedule_occupancy_on_connection(&connection)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            reject_cancellation_review_on_connection(&mut connection, rejected.id),
+            Err(BusinessFailure::InvalidState)
+        );
+
+        let approved = request_cancellation_on_connection(&mut connection, scheduled.id).unwrap();
+        approve_cancellation_review_on_connection(&mut connection, approved.id).unwrap();
+        assert!(
+            list_schedule_occupancy_on_connection(&connection)
+                .unwrap()
+                .is_empty()
+        );
+        let detail = get_request_on_connection(&connection, scheduled.id).unwrap();
+        assert_eq!(detail.request.status, RequestStatus::Cancelled);
+        assert_eq!(detail.occurrences[0].id, occurrence.id);
+        assert_eq!(detail.cancellation_reviews.len(), 2);
+        assert_eq!(
+            detail.cancellation_reviews[1].disposition,
+            CancellationDisposition::Approved
+        );
+        assert!(detail.cancellation_reviews[1].resolved_at.is_some());
+    }
+
+    #[test]
+    fn cancellation_approval_rechecks_parent_and_rolls_back_both_mutations() {
+        let mut connection = business_connection();
+        let changed_parent = create_request(&mut connection, ServiceCategory::Baptism);
+        let review =
+            request_cancellation_on_connection(&mut connection, changed_parent.id).unwrap();
+        connection
+            .execute(
+                "UPDATE service_requests SET status = 'completed' WHERE id = ?1",
+                [changed_parent.id.0],
+            )
+            .unwrap();
+        assert_eq!(
+            approve_cancellation_review_on_connection(&mut connection, review.id),
+            Err(BusinessFailure::InvalidState)
+        );
+        assert_eq!(
+            get_request_on_connection(&connection, changed_parent.id)
+                .unwrap()
+                .cancellation_reviews[0]
+                .disposition,
+            CancellationDisposition::Pending
+        );
+
+        let rollback_parent = create_request(&mut connection, ServiceCategory::Confirmation);
+        let rollback_review =
+            request_cancellation_on_connection(&mut connection, rollback_parent.id).unwrap();
+        assert_eq!(
+            approve_cancellation_review_transaction(&mut connection, rollback_review.id, true),
+            Err(BusinessFailure::ConcurrentChange)
+        );
+        let detail = get_request_on_connection(&connection, rollback_parent.id).unwrap();
+        assert_eq!(detail.request.status, RequestStatus::Pending);
+        assert_eq!(
+            detail.cancellation_reviews[0].disposition,
+            CancellationDisposition::Pending
+        );
+        assert_eq!(detail.cancellation_reviews[0].resolved_at, None);
+    }
+
+    #[test]
+    fn pending_cancellation_discovery_filter_and_detail_are_deterministic_and_dedicated() {
+        let mut connection = business_connection();
+        let pending = create_request(&mut connection, ServiceCategory::Baptism);
+        let scheduled = create_request(&mut connection, ServiceCategory::Confirmation);
+        create_occurrence(
+            &mut connection,
+            scheduled.id,
+            OccurrenceKind::Primary,
+            "2038-10-11",
+            "10:00",
+            None,
+        );
+        schedule_request_on_connection(&mut connection, scheduled.id).unwrap();
+        let resolved = create_request(&mut connection, ServiceCategory::FirstCommunion);
+
+        let first = request_cancellation_on_connection(&mut connection, pending.id).unwrap();
+        let second = request_cancellation_on_connection(&mut connection, scheduled.id).unwrap();
+        let excluded = request_cancellation_on_connection(&mut connection, resolved.id).unwrap();
+        reject_cancellation_review_on_connection(&mut connection, excluded.id).unwrap();
+        connection
+            .execute(
+                "UPDATE request_cancellation_reviews SET requested_at = 42 WHERE id IN (?1, ?2)",
+                params![first.id.0, second.id.0],
+            )
+            .unwrap();
+
+        let reviews = list_pending_cancellation_reviews_on_connection(&connection).unwrap();
+        assert_eq!(
+            reviews
+                .iter()
+                .map(|item| item.review_id)
+                .collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert_eq!(reviews[0].request_status, RequestStatus::Pending);
+        assert_eq!(reviews[1].request_status, RequestStatus::Scheduled);
+        assert_eq!(reviews[0].requester_display_name, "Synthetic Requester");
+        let filtered =
+            list_requests_with_pending_cancellation_review_on_connection(&connection).unwrap();
+        assert_eq!(
+            filtered.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![pending.id, scheduled.id]
+        );
+        assert_eq!(filtered[0].status, RequestStatus::Pending);
+        assert_eq!(filtered[1].status, RequestStatus::Scheduled);
+        assert!(
+            list_requests_on_connection(&connection)
+                .unwrap()
+                .iter()
+                .all(|item| matches!(
+                    item.status,
+                    RequestStatus::Pending | RequestStatus::Scheduled
+                ))
+        );
+        let detail = get_request_on_connection(&connection, resolved.id).unwrap();
+        assert_eq!(detail.cancellation_reviews.len(), 1);
+        assert_eq!(
+            detail.cancellation_reviews[0].disposition,
+            CancellationDisposition::Rejected
+        );
+    }
+
+    #[test]
+    fn cancellation_surface_uses_immediate_transactions_and_has_no_direct_cancel_command() {
+        let source = include_str!("v2_business_database.rs");
+        let commands = source
+            .split("enum BusinessDatabaseCommand")
+            .nth(1)
+            .unwrap()
+            .split("impl fmt::Debug")
+            .next()
+            .unwrap();
+        assert!(source.contains("BusinessDatabaseCommand::RequestCancellation"));
+        assert!(source.contains("BusinessDatabaseCommand::ApproveCancellationReview"));
+        assert!(source.contains("BusinessDatabaseCommand::RejectCancellationReview"));
+        assert!(source.contains("BusinessDatabaseCommand::ListPendingCancellationReviews"));
+        assert!(!commands.contains("CancelRequest"));
+        for function in [
+            "fn request_cancellation_on_connection",
+            "fn approve_cancellation_review_transaction",
+            "fn reject_cancellation_review_on_connection",
+        ] {
+            let body = source.split(function).nth(1).unwrap();
+            let body = body.split("\nfn ").next().unwrap();
+            assert!(body.contains("begin_immediate(connection)"));
+        }
     }
 
     #[test]
