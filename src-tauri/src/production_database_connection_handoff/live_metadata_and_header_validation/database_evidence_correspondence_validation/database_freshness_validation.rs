@@ -416,6 +416,8 @@ mod tests {
         database_freshness_classification::AssuredFreshnessAnchor,
         database_key::DatabaseKey,
         database_key_protected_payload::{DecodedDatabaseKeyCandidate, EncodedDatabaseKeyPayload},
+        database_restart_version_classification::ProductionDatabaseRestartClassification,
+        database_schema_v2_contract::V2_SCHEMA_DDL,
         freshness_anchor_contract::FreshnessAnchorContractV1,
         installation_evidence_authenticated_envelope::{
             EvidenceAuthenticationKeyGenerationIdentifier, construct_authenticated_envelope_v1,
@@ -436,6 +438,7 @@ mod tests {
             synthetic_installation_bound_authenticated_active_freshness_anchor,
             trusted_current_installation_evidence_assessment_for_test,
         },
+        installation_state::{ExpectedStorageEvidence, InstallationEvidence},
         production_database_connection_handoff::{
             ProductionDatabaseValidationOutcome, apply_key_once,
             open_keyed_production_database_read_only,
@@ -625,6 +628,25 @@ mod tests {
         connection.close().map_err(|(_, error)| error).unwrap();
     }
 
+    fn create_v2_fixture(root: &TestRoot) {
+        let key = generation_bound_key(root);
+        let connection = Connection::open(root.path().join(PRODUCTION_DATABASE_FILENAME)).unwrap();
+        apply_key_once(&connection, &key).unwrap();
+        connection
+            .execute_batch("PRAGMA application_id = 1128808784; PRAGMA user_version = 2;")
+            .unwrap();
+        connection.execute_batch(CREATE_METADATA_RELATION).unwrap();
+        let mut metadata = metadata_values();
+        metadata[2] = Value::Integer(2);
+        connection
+            .execute(INSERT_METADATA_ROW, params_from_iter(metadata.iter()))
+            .unwrap();
+        for statement in V2_SCHEMA_DDL {
+            connection.execute_batch(statement).unwrap();
+        }
+        connection.close().map_err(|(_, error)| error).unwrap();
+    }
+
     fn correspondence_evidence(
         installation_generation: u64,
         recovery_generation: u64,
@@ -694,6 +716,62 @@ mod tests {
             panic!("matching current anchor should validate freshness");
         };
         (root, owner)
+    }
+
+    #[test]
+    fn exact_v2_preserves_correspondence_freshness_authorization_and_operational_activation() {
+        let root = TestRoot::create();
+        create_v2_fixture(&root);
+        let keyed = open_keyed_production_database_read_only(
+            root.typed_path(),
+            root.inspected(),
+            generation_bound_key(&root),
+        )
+        .expect("guarded keyed V2 handoff should succeed");
+        let ProductionDatabaseValidationOutcome::Validated(readable) =
+            validate_production_database_readability_and_integrity(keyed)
+        else {
+            panic!("V2 cipher and quick integrity should validate");
+        };
+        let super::super::super::LiveMetadataAndHeaderValidationOutcome::Validated(live) =
+            validate_production_database_live_metadata_and_headers(readable)
+        else {
+            panic!("exact V2 restart observation should validate");
+        };
+        assert_eq!(
+            live.restart_classification(),
+            ProductionDatabaseRestartClassification::ExactV2
+        );
+        let assessment = trusted_current_installation_evidence_assessment_for_test(
+            correspondence_evidence(7, 11),
+        );
+        let super::super::DatabaseEvidenceCorrespondenceValidationOutcome::Validated(corresponding) =
+            validate_production_database_evidence_correspondence(live, assessment)
+        else {
+            panic!("V2 identity facts should correspond to existing evidence");
+        };
+        let ProductionDatabaseFreshnessValidationOutcome::Validated(fresh) =
+            validate_production_database_freshness(
+                corresponding,
+                present(MATCHING_IDENTITY, 7, 11),
+            )
+        else {
+            panic!("V2 should preserve the existing freshness lineage");
+        };
+        let ProductionDatabaseStartupAuthorizationOutcome::Authorized(authorized) =
+            authorize_production_database_startup(
+                fresh,
+                InstallationEvidence::Initialized(ExpectedStorageEvidence::Present),
+            )
+        else {
+            panic!("V2 should pass the existing startup authorization gate");
+        };
+        let operational = activate_production_database_for_operational_use(authorized);
+        assert!(matches!(
+            operational.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
     }
 
     fn present(

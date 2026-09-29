@@ -11,7 +11,9 @@
 use std::fmt;
 
 use crate::{
-    database_metadata_contract::{DatabaseCreationTimestamp, DatabaseMetadataContractV1},
+    database_metadata_contract::{
+        DatabaseCreationTimestamp, DatabaseMetadataContractV1, DatabaseSchemaVersion,
+    },
     installation_evidence_contract::{
         DatabaseKeyGenerationIdentifier, InstallationGeneration, InstallationIdentifier,
         PermanentApplicationIdentifier, RecoveryOrReplacementGeneration,
@@ -164,8 +166,31 @@ impl<'a> ParsedUntrustedDatabaseMetadataV1<'a> {
         self,
         expected_database_schema_version: u16,
     ) -> Result<(), MetadataValidationError> {
-        self.validate_structure_for_schema_version(expected_database_schema_version)
+        self.validate_restart_contract(expected_database_schema_version)
             .map(|_| ())
+    }
+
+    pub(crate) fn validate_restart_contract(
+        self,
+        expected_database_schema_version: u16,
+    ) -> Result<DatabaseMetadataContractV1, MetadataValidationError> {
+        let database_schema_version =
+            DatabaseSchemaVersion::supported(expected_database_schema_version)
+                .ok_or(MetadataValidationError::UnsupportedSchemaVersion)?;
+        let validated =
+            self.validate_structure_for_schema_version(expected_database_schema_version)?;
+
+        Ok(DatabaseMetadataContractV1::new_for_supported_schema(
+            database_schema_version,
+            validated.permanent_application_identifier,
+            validated.parish_identifier,
+            validated.installation_identifier,
+            validated.installation_generation,
+            validated.recovery_replacement_generation,
+            validated.database_key_generation_identifier,
+            validated.setup_publication_identifier,
+            validated.database_created_at,
+        ))
     }
 
     fn validate_structure_for_schema_version(

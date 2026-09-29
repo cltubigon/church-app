@@ -40,6 +40,7 @@ mod create_new_database;
 mod fixed_metadata_and_header_observation;
 mod full_integrity_validation;
 mod live_metadata_and_header_validation;
+mod restart_schema_observation;
 mod writable_v1_migration_preparation;
 
 /// Runs only the canonical fixed cipher-integrity operation on a borrowed

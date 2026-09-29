@@ -56,6 +56,13 @@ pub(crate) struct DatabaseSchemaVersion(NonZeroU16);
 impl DatabaseSchemaVersion {
     const V1: Self = Self(NonZeroU16::MIN);
 
+    pub(crate) const fn supported(value: u16) -> Option<Self> {
+        match NonZeroU16::new(value) {
+            Some(value) if value.get() <= 2 => Some(Self(value)),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn get(self) -> u16 {
         self.0.get()
     }
@@ -106,6 +113,34 @@ impl DatabaseMetadataContractV1 {
             singleton_id: DatabaseMetadataSingletonId::ONE,
             metadata_contract_version: MetadataContractVersion::V1,
             database_schema_version: DatabaseSchemaVersion::V1,
+            permanent_application_identifier,
+            database_format_identity: APPLICATION_DATABASE_FORMAT_IDENTITY,
+            parish_identifier,
+            installation_identifier,
+            installation_generation,
+            recovery_replacement_generation,
+            database_key_generation_identifier,
+            setup_publication_identifier,
+            database_created_at,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn new_for_supported_schema(
+        database_schema_version: DatabaseSchemaVersion,
+        permanent_application_identifier: PermanentApplicationIdentifier,
+        parish_identifier: ParishIdentifier,
+        installation_identifier: InstallationIdentifier,
+        installation_generation: InstallationGeneration,
+        recovery_replacement_generation: RecoveryOrReplacementGeneration,
+        database_key_generation_identifier: DatabaseKeyGenerationIdentifier,
+        setup_publication_identifier: SetupPublicationIdentifier,
+        database_created_at: DatabaseCreationTimestamp,
+    ) -> Self {
+        Self {
+            singleton_id: DatabaseMetadataSingletonId::ONE,
+            metadata_contract_version: MetadataContractVersion::V1,
+            database_schema_version,
             permanent_application_identifier,
             database_format_identity: APPLICATION_DATABASE_FORMAT_IDENTITY,
             parish_identifier,

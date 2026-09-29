@@ -201,6 +201,33 @@ fn observe_and_validate_metadata(
     validate_owned_metadata_observation(&observation)
 }
 
+pub(super) fn observe_owned_metadata(
+    connection: &Connection,
+) -> Result<Vec<OwnedRawDatabaseMetadataValue>, FixedMetadataAndHeaderObservationError> {
+    let mut statement = classify_metadata_observation(connection.prepare(METADATA_QUERY))?;
+    if statement.column_count() != METADATA_COLUMN_COUNT {
+        return Err(FixedMetadataAndHeaderObservationError::MetadataObservationUnavailable);
+    }
+    let mut rows = classify_metadata_observation(statement.query([]))?;
+    let first_row = classify_metadata_step(rows.next())?
+        .ok_or(FixedMetadataAndHeaderObservationError::MetadataRowMissing)?;
+    let mut observation = Vec::with_capacity(METADATA_COLUMN_COUNT);
+    for index in 0..METADATA_COLUMN_COUNT {
+        let value = classify_metadata_observation(first_row.get_ref(index))?;
+        observation.push(match value {
+            ValueRef::Null => OwnedRawDatabaseMetadataValue::Null,
+            ValueRef::Integer(value) => OwnedRawDatabaseMetadataValue::Integer(value),
+            ValueRef::Real(_) => OwnedRawDatabaseMetadataValue::Real,
+            ValueRef::Text(value) => OwnedRawDatabaseMetadataValue::Text(value.to_vec()),
+            ValueRef::Blob(value) => OwnedRawDatabaseMetadataValue::Blob(value.to_vec()),
+        });
+    }
+    if classify_metadata_step(rows.next())?.is_some() {
+        return Err(FixedMetadataAndHeaderObservationError::DuplicateMetadataRows);
+    }
+    Ok(observation)
+}
+
 pub(super) fn classify_metadata_observation<T, E>(
     result: Result<T, E>,
 ) -> Result<T, FixedMetadataAndHeaderObservationError> {
@@ -215,7 +242,7 @@ pub(super) fn classify_metadata_step<T, E>(
     })
 }
 
-fn adapt_owned_value(
+pub(super) fn adapt_owned_value(
     value: &OwnedRawDatabaseMetadataValue,
 ) -> Result<RawDatabaseMetadataValue<'_>, FixedMetadataAndHeaderObservationError> {
     match value {

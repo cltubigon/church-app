@@ -63,6 +63,7 @@ use production_database_migration_confirmation::production_database_migration_ba
 use crate::{
     database_key_active_wrapper_loader::load_active_database_key_wrapper,
     database_key_presence::inspect_database_key_active_presence,
+    database_restart_version_classification::ProductionDatabaseRestartClassification,
     first_time_setup_exclusivity::{
         FirstTimeSetupCrossProcessExclusivity, FirstTimeSetupCrossProcessExclusivityOutcome,
         acquire_first_time_setup_cross_process_exclusivity,
@@ -4588,6 +4589,18 @@ fn run_production_database_migration_discovery(
             );
         }
     };
+    if metadata.restart_classification() != ProductionDatabaseRestartClassification::ExactV1 {
+        return match metadata.close() {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                ProductionDatabaseMigrationDiscoveryWorkerResult::CloseRetryRequired(
+                    ProductionDatabaseMigrationDiscoveryCloseFailure::Candidate(failure),
+                )
+            }
+        };
+    }
     let correspondence =
         match validate_production_database_evidence_correspondence(metadata, trusted_assessment) {
             DatabaseEvidenceCorrespondenceValidationOutcome::Validated(owner) => owner,
@@ -4753,6 +4766,8 @@ fn run_production_startup(
         return close_protected_interrupted_owner(validated, lifecycle, exclusivity);
     }
 
+    // This read-only transition makes the fresh canonical ExactV1/ExactV2 restart
+    // classification before any schema-specific migration-opportunity behavior.
     let metadata = match validate_production_database_live_metadata_and_headers(validated) {
         LiveMetadataAndHeaderValidationOutcome::Validated(owner) => owner,
         LiveMetadataAndHeaderValidationOutcome::Failed(_) => return unavailable(),
@@ -6249,6 +6264,20 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn wait_for_migration_discovery_state(
+        lifecycle: &ApplicationLifecycle,
+        expected: ProductionDatabaseMigrationDiscoveryState,
+    ) {
+        for _ in 0..200 {
+            if lifecycle.lock().migration_discovery == expected {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("migration worker did not reach the expected discovery state");
+    }
+
+    #[cfg(windows)]
     fn install_ready_owner_for_migration_discovery(
         lifecycle: &ApplicationLifecycle,
     ) -> crate::production_database_connection_handoff::MigrationDiscoveryTestRoot {
@@ -6311,6 +6340,10 @@ mod tests {
                 spawn_migration_thread,
             ),
             ProductionDatabaseMigrationDiscoveryRequestOutcome::Started
+        );
+        wait_for_migration_state(
+            &lifecycle,
+            production_database_migration_confirmation::ProductionDatabaseMigrationConfirmationStateForTest::Pending,
         );
         lifecycle.join_workers();
         {
@@ -6473,6 +6506,10 @@ mod tests {
             request.join().unwrap(),
             ProductionDatabaseMigrationDiscoveryRequestOutcome::Started
         );
+        wait_for_migration_discovery_state(
+            &lifecycle,
+            ProductionDatabaseMigrationDiscoveryState::Finished,
+        );
         lifecycle.join_workers();
         assert!(ran.load(Ordering::SeqCst));
         assert_eq!(
@@ -6600,6 +6637,7 @@ mod tests {
             "open_keyed_production_database_read_only",
             "validate_production_database_readability_and_integrity",
             "validate_production_database_live_metadata_and_headers",
+            "metadata.restart_classification()",
             "validate_production_database_evidence_correspondence",
             "validate_production_database_freshness",
             "let final_installation_evidence",
@@ -6633,6 +6671,26 @@ mod tests {
         assert_eq!(production.matches(request_name).count(), 1);
         assert!(!BOOTSTRAP.contains(request_name));
         assert!(!FRONTEND.contains(request_name));
+        assert!(worker.contains("ProductionDatabaseRestartClassification::ExactV1"));
+        let startup = production
+            .split_once("#[cfg(windows)]\nfn run_production_startup(")
+            .unwrap()
+            .1
+            .split_once("#[cfg(windows)]\nstruct StartupPaths")
+            .unwrap()
+            .0;
+        assert!(startup.contains("validate_production_database_live_metadata_and_headers"));
+        assert!(startup.contains("activate_production_database_for_operational_use"));
+        assert!(!startup.contains("offer_production_database_migration_opportunity"));
+        const LIVE_VALIDATION: &str = include_str!(
+            "production_database_connection_handoff/live_metadata_and_header_validation.rs"
+        );
+        assert_eq!(
+            LIVE_VALIDATION
+                .matches("classify_production_database_restart_state(")
+                .count(),
+            1
+        );
         let shutdown = production
             .split_once("pub(crate) fn request_shutdown")
             .unwrap()

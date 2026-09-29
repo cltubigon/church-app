@@ -157,6 +157,7 @@ pub(crate) fn validate_production_database_evidence_correspondence(
     let LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
         owner,
         metadata_contract,
+        restart_classification: _,
     } = database;
 
     let correspondence = classify_database_metadata_correspondence(

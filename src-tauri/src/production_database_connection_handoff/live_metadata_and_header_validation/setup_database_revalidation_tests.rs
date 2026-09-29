@@ -277,7 +277,7 @@ fn headers_cardinality_and_every_metadata_field_fail_at_the_correct_boundary() {
         ),
         (
             "UPDATE church_app_database_metadata SET database_schema_version = 2",
-            Some(Live::UnsupportedDatabaseSchemaVersion),
+            Some(Live::UserVersionMismatch),
         ),
         (
             "UPDATE church_app_database_metadata SET permanent_application_identifier = 'synthetic-other'",

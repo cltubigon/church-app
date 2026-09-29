@@ -6,13 +6,19 @@ use std::fmt;
 use rusqlite::Connection;
 
 use crate::database_metadata_contract::DatabaseMetadataContractV1;
+use crate::database_metadata_decoding::{
+    MetadataValidationError, RawDatabaseMetadataRow, RawDatabaseMetadataValue,
+};
+use crate::database_restart_version_classification::{
+    ObservedProductionDatabaseRestartState, ProductionDatabaseRestartClassification,
+    classify_production_database_restart_state,
+};
 
 use super::{
     ConnectionLifetimeOwner, ProductionDatabaseConnectionCloseOutcome,
     ReadabilityAndIntegrityValidatedProductionDatabaseConnection, close_lifetime_owner_using,
-    fixed_metadata_and_header_observation::{
-        FixedMetadataAndHeaderObservationError, observe_fixed_metadata_and_headers,
-    },
+    fixed_metadata_and_header_observation::FixedMetadataAndHeaderObservationError,
+    restart_schema_observation::observe_restart_schema,
 };
 
 mod database_evidence_correspondence_validation;
@@ -76,6 +82,7 @@ pub(crate) enum LiveMetadataAndHeaderValidationError {
     UnsupportedMetadataContractVersion,
     UnsupportedDatabaseSchemaVersion,
     UserVersionMismatch,
+    InconsistentRestartState,
 }
 
 impl fmt::Debug for LiveMetadataAndHeaderValidationError {
@@ -93,6 +100,7 @@ impl fmt::Debug for LiveMetadataAndHeaderValidationError {
             Self::UnsupportedMetadataContractVersion => "UnsupportedMetadataContractVersion",
             Self::UnsupportedDatabaseSchemaVersion => "UnsupportedDatabaseSchemaVersion",
             Self::UserVersionMismatch => "UserVersionMismatch",
+            Self::InconsistentRestartState => "InconsistentRestartState",
         })
     }
 }
@@ -101,6 +109,7 @@ impl fmt::Debug for LiveMetadataAndHeaderValidationError {
 pub(crate) struct LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
     owner: ConnectionLifetimeOwner,
     metadata_contract: DatabaseMetadataContractV1,
+    restart_classification: ProductionDatabaseRestartClassification,
 }
 
 impl fmt::Debug for LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
@@ -165,6 +174,10 @@ impl LiveMetadataAndHeaderValidationCloseFailure {
 }
 
 impl LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
+    pub(crate) const fn restart_classification(&self) -> ProductionDatabaseRestartClassification {
+        self.restart_classification
+    }
+
     /// Narrow comparison support for setup compositions that must preserve this
     /// exact live owner after checking the prepared contract.
     pub(super) fn matches_prepared_metadata(
@@ -180,6 +193,7 @@ impl LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
         let Self {
             owner,
             metadata_contract,
+            restart_classification: _,
         } = self;
         close_validated_owner_using(owner, metadata_contract, |connection| {
             connection
@@ -196,6 +210,7 @@ impl LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
         let Self {
             owner,
             metadata_contract,
+            restart_classification: _,
         } = self;
         close_validated_owner_using(owner, metadata_contract, close)
     }
@@ -215,15 +230,197 @@ fn close_validated_owner_using<T>(
 pub(crate) fn validate_production_database_live_metadata_and_headers(
     connection: ReadabilityAndIntegrityValidatedProductionDatabaseConnection,
 ) -> LiveMetadataAndHeaderValidationOutcome {
-    finish_validation_using(
+    finish_restart_validation_using(
         connection,
-        validate_fixed_live_metadata_and_headers,
+        observe_and_classify_restart_state,
         |connection| {
             connection
                 .close()
                 .map_err(|(returned_connection, _)| returned_connection)
         },
     )
+}
+
+fn finish_restart_validation_using(
+    connection: ReadabilityAndIntegrityValidatedProductionDatabaseConnection,
+    validate: impl FnOnce(
+        &Connection,
+    ) -> Result<
+        (
+            DatabaseMetadataContractV1,
+            ProductionDatabaseRestartClassification,
+        ),
+        LiveMetadataAndHeaderValidationError,
+    >,
+    close_on_failure: impl FnOnce(Connection) -> Result<(), Connection>,
+) -> LiveMetadataAndHeaderValidationOutcome {
+    let owner = connection.owner;
+    let validation_result = {
+        #[cfg(test)]
+        if super::test_primary_failure_is_injected(
+            super::ProductionDatabasePrimaryFailureBoundary::LiveMetadataHeaders,
+        ) {
+            Err(LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable)
+        } else {
+            validate(&owner.connection)
+        }
+        #[cfg(not(test))]
+        validate(&owner.connection)
+    };
+    match validation_result {
+        Ok((metadata_contract, restart_classification)) => {
+            LiveMetadataAndHeaderValidationOutcome::Validated(
+                LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
+                    owner,
+                    metadata_contract,
+                    restart_classification,
+                },
+            )
+        }
+        Err(category) => match close_lifetime_owner_using(owner, close_on_failure) {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                LiveMetadataAndHeaderValidationOutcome::Failed(category)
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                LiveMetadataAndHeaderValidationOutcome::CloseFailed(
+                    LiveMetadataAndHeaderValidationCloseFailure {
+                        category,
+                        owner: failure.owner,
+                    },
+                )
+            }
+        },
+    }
+}
+
+fn observe_and_classify_restart_state(
+    connection: &Connection,
+) -> Result<
+    (
+        DatabaseMetadataContractV1,
+        ProductionDatabaseRestartClassification,
+    ),
+    LiveMetadataAndHeaderValidationError,
+> {
+    use super::fixed_metadata_and_header_observation::{
+        adapt_owned_value, observe_application_id, observe_owned_metadata, observe_user_version,
+    };
+
+    let application_id = observe_application_id(connection).map_err(map_live_observation_error)?;
+    if application_id != super::PRODUCTION_DATABASE_APPLICATION_ID {
+        return Err(LiveMetadataAndHeaderValidationError::WrongApplicationId);
+    }
+    let user_version =
+        u32::try_from(observe_user_version(connection).map_err(map_live_observation_error)?)
+            .map_err(|_| LiveMetadataAndHeaderValidationError::HeaderObservationUnavailable)?;
+    let owned = observe_owned_metadata(connection).map_err(map_live_observation_error)?;
+    let values: Vec<_> = owned
+        .iter()
+        .map(adapt_owned_value)
+        .collect::<Result<_, _>>()
+        .map_err(map_live_observation_error)?;
+    let values: [RawDatabaseMetadataValue<'_>; 12] = values
+        .try_into()
+        .map_err(|_| LiveMetadataAndHeaderValidationError::MetadataObservationUnavailable)?;
+    let [
+        singleton_id,
+        metadata_contract_version,
+        database_schema_version,
+        permanent_application_identifier,
+        database_format_identity,
+        parish_identifier,
+        installation_identifier,
+        installation_generation,
+        recovery_replacement_generation,
+        database_key_generation_identifier,
+        setup_publication_identifier,
+        database_created_at,
+    ] = values;
+    let metadata = RawDatabaseMetadataRow::new(
+        singleton_id,
+        metadata_contract_version,
+        database_schema_version,
+        permanent_application_identifier,
+        database_format_identity,
+        parish_identifier,
+        installation_identifier,
+        installation_generation,
+        recovery_replacement_generation,
+        database_key_generation_identifier,
+        setup_publication_identifier,
+        database_created_at,
+    );
+    let (metadata_contract_version, metadata_database_schema_version) = metadata
+        .observed_versions()
+        .map_err(|_| LiveMetadataAndHeaderValidationError::MalformedMetadata)?;
+    let schema = observe_restart_schema(
+        connection,
+        user_version,
+        metadata_contract_version,
+        metadata_database_schema_version,
+    )
+    .map_err(|_| LiveMetadataAndHeaderValidationError::MetadataObservationUnavailable)?;
+    let classification =
+        classify_production_database_restart_state(&ObservedProductionDatabaseRestartState {
+            application_id,
+            metadata,
+            schema,
+        });
+    let parsed = metadata
+        .parse()
+        .map_err(|_| LiveMetadataAndHeaderValidationError::MalformedMetadata)?;
+    let metadata_contract = match metadata_database_schema_version {
+        1 => parsed
+            .validate_structure()
+            .map_err(map_metadata_validation_error)?,
+        2 => parsed
+            .validate_restart_contract(2)
+            .map_err(map_metadata_validation_error)?,
+        _ if metadata_contract_version > 1 => {
+            return Err(LiveMetadataAndHeaderValidationError::UnsupportedMetadataContractVersion);
+        }
+        _ => {
+            return Err(LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion);
+        }
+    };
+    if user_version != u32::from(metadata_database_schema_version) {
+        return Err(LiveMetadataAndHeaderValidationError::UserVersionMismatch);
+    }
+    match classification {
+        ProductionDatabaseRestartClassification::ExactV1
+        | ProductionDatabaseRestartClassification::ExactV2 => {}
+        ProductionDatabaseRestartClassification::Inconsistent => {
+            return Err(LiveMetadataAndHeaderValidationError::InconsistentRestartState);
+        }
+        ProductionDatabaseRestartClassification::UnsupportedNewer => {
+            return Err(LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion);
+        }
+    }
+    Ok((metadata_contract, classification))
+}
+
+fn map_metadata_validation_error(
+    error: MetadataValidationError,
+) -> LiveMetadataAndHeaderValidationError {
+    match error {
+        MetadataValidationError::UnsupportedMetadataVersion => {
+            LiveMetadataAndHeaderValidationError::UnsupportedMetadataContractVersion
+        }
+        MetadataValidationError::UnsupportedSchemaVersion => {
+            LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion
+        }
+        MetadataValidationError::WrongSingleton
+        | MetadataValidationError::WrongApplicationIdentifier
+        | MetadataValidationError::WrongDatabaseFormatIdentity
+        | MetadataValidationError::InvalidParishIdentifier
+        | MetadataValidationError::InvalidInstallationIdentifier
+        | MetadataValidationError::InvalidInstallationGeneration
+        | MetadataValidationError::InvalidRecoveryReplacementGeneration
+        | MetadataValidationError::InvalidDatabaseKeyGenerationIdentifier
+        | MetadataValidationError::InvalidSetupPublicationIdentifier => {
+            LiveMetadataAndHeaderValidationError::MalformedMetadata
+        }
+    }
 }
 
 pub(super) fn finish_validation_using(
@@ -252,6 +449,7 @@ pub(super) fn finish_validation_using(
             LiveMetadataAndHeaderValidatedProductionDatabaseConnection {
                 owner,
                 metadata_contract,
+                restart_classification: ProductionDatabaseRestartClassification::ExactV1,
             },
         ),
         Err(category) => match close_lifetime_owner_using(owner, close_on_failure) {
@@ -288,12 +486,6 @@ fn retry_validation_close_using(
             )
         }
     }
-}
-
-fn validate_fixed_live_metadata_and_headers(
-    connection: &Connection,
-) -> Result<DatabaseMetadataContractV1, LiveMetadataAndHeaderValidationError> {
-    observe_fixed_metadata_and_headers(connection, None).map_err(map_live_observation_error)
 }
 
 fn map_live_observation_error(
@@ -403,6 +595,7 @@ mod tests {
     use crate::{
         database_key::DatabaseKey,
         database_key_protected_payload::{DecodedDatabaseKeyCandidate, EncodedDatabaseKeyPayload},
+        database_schema_v2_contract::V2_SCHEMA_DDL,
         installation_evidence_authenticated_envelope::{
             EvidenceAuthenticationKeyGenerationIdentifier, construct_authenticated_envelope_v1,
         },
@@ -649,6 +842,16 @@ mod tests {
         connection.close().map_err(|(_, error)| error).unwrap();
     }
 
+    fn add_business_schema(root: &TestRoot, statements: &[&str]) {
+        let key = generation_bound_key(root);
+        let connection = Connection::open(root.path().join(PRODUCTION_DATABASE_FILENAME)).unwrap();
+        apply_key_once(&connection, &key).unwrap();
+        for statement in statements {
+            connection.execute_batch(statement).unwrap();
+        }
+        connection.close().map_err(|(_, error)| error).unwrap();
+    }
+
     fn accepted_predecessor(
         root: &TestRoot,
     ) -> ReadabilityAndIntegrityValidatedProductionDatabaseConnection {
@@ -751,12 +954,144 @@ mod tests {
         );
         let owner = validate_fixture(&root).expect("canonical fixture should validate");
         assert_eq!(
+            owner.restart_classification(),
+            ProductionDatabaseRestartClassification::ExactV1
+        );
+        assert_eq!(
             format!("{owner:?}"),
             "LiveMetadataAndHeaderValidatedProductionDatabaseConnection([REDACTED])"
         );
         assert!(matches!(
             owner.close(),
             ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn exact_v2_is_classified_from_the_read_only_connection_without_mutation() {
+        let root = TestRoot::create();
+        let mut row = canonical_values();
+        row[2] = Value::Integer(2);
+        create_fixture(
+            &root,
+            EXPECTED_APPLICATION_ID,
+            2,
+            Some(CREATE_METADATA_RELATION),
+            &[row],
+            false,
+        );
+        add_business_schema(&root, V2_SCHEMA_DDL);
+        let before = fs::read(root.path().join(PRODUCTION_DATABASE_FILENAME)).unwrap();
+
+        let owner = validate_fixture(&root).expect("exact V2 should validate for restart");
+        assert_eq!(
+            owner.restart_classification(),
+            ProductionDatabaseRestartClassification::ExactV2
+        );
+        assert_eq!(owner.metadata_contract.database_schema_version().get(), 2);
+        assert_eq!(
+            fs::read(root.path().join(PRODUCTION_DATABASE_FILENAME)).unwrap(),
+            before
+        );
+        assert!(matches!(
+            owner.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn partial_and_malformed_v2_fail_closed_and_unsupported_newer_is_refused() {
+        let partial = TestRoot::create();
+        let mut v2_row = canonical_values();
+        v2_row[2] = Value::Integer(2);
+        create_fixture(
+            &partial,
+            EXPECTED_APPLICATION_ID,
+            2,
+            Some(CREATE_METADATA_RELATION),
+            &[v2_row.clone()],
+            false,
+        );
+        add_business_schema(&partial, &V2_SCHEMA_DDL[..V2_SCHEMA_DDL.len() - 1]);
+        assert_eq!(
+            validate_fixture(&partial).unwrap_err(),
+            LiveMetadataAndHeaderValidationError::InconsistentRestartState
+        );
+        partial.assert_exact_cleanup();
+
+        let malformed = TestRoot::create();
+        create_fixture(
+            &malformed,
+            EXPECTED_APPLICATION_ID,
+            2,
+            Some(CREATE_METADATA_RELATION),
+            &[v2_row],
+            false,
+        );
+        add_business_schema(&malformed, V2_SCHEMA_DDL);
+        let key = generation_bound_key(&malformed);
+        let connection =
+            Connection::open(malformed.path().join(PRODUCTION_DATABASE_FILENAME)).unwrap();
+        apply_key_once(&connection, &key).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX idx_request_schedule_occurrences_schedule;
+                 CREATE INDEX idx_request_schedule_occurrences_schedule
+                 ON request_schedule_occurrences(scheduled_local_time, scheduled_local_date, id);",
+            )
+            .unwrap();
+        connection.close().map_err(|(_, error)| error).unwrap();
+        assert_eq!(
+            validate_fixture(&malformed).unwrap_err(),
+            LiveMetadataAndHeaderValidationError::InconsistentRestartState
+        );
+        malformed.assert_exact_cleanup();
+
+        let newer = TestRoot::create();
+        let mut newer_row = canonical_values();
+        newer_row[2] = Value::Integer(3);
+        create_fixture(
+            &newer,
+            EXPECTED_APPLICATION_ID,
+            3,
+            Some(CREATE_METADATA_RELATION),
+            &[newer_row],
+            false,
+        );
+        add_business_schema(&newer, V2_SCHEMA_DDL);
+        assert_eq!(
+            validate_fixture(&newer).unwrap_err(),
+            LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion
+        );
+        newer.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn v1_metadata_with_v2_schema_fails_closed_and_close_retry_preserves_the_category() {
+        let root = TestRoot::create();
+        create_fixture(
+            &root,
+            EXPECTED_APPLICATION_ID,
+            1,
+            Some(CREATE_METADATA_RELATION),
+            &[canonical_values()],
+            false,
+        );
+        add_business_schema(&root, V2_SCHEMA_DDL);
+
+        let outcome = super::super::with_production_database_close_failure_injected_at(0, || {
+            validate_production_database_live_metadata_and_headers(accepted_predecessor(&root))
+        });
+        let LiveMetadataAndHeaderValidationOutcome::CloseFailed(failure) = outcome else {
+            panic!("inconsistent restart state with close failure must retain ownership");
+        };
+        assert!(matches!(
+            failure.retry_close(),
+            LiveMetadataAndHeaderValidationCloseRetryOutcome::Closed(
+                LiveMetadataAndHeaderValidationError::InconsistentRestartState
+            )
         ));
         root.assert_exact_cleanup();
     }
@@ -1116,7 +1451,7 @@ mod tests {
             (
                 2,
                 Value::Integer(2),
-                LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion,
+                LiveMetadataAndHeaderValidationError::InconsistentRestartState,
             ),
             (
                 3,
@@ -1216,6 +1551,7 @@ mod tests {
             LiveMetadataAndHeaderValidationError::UnsupportedMetadataContractVersion,
             LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion,
             LiveMetadataAndHeaderValidationError::UserVersionMismatch,
+            LiveMetadataAndHeaderValidationError::InconsistentRestartState,
         ];
         for category in categories {
             let root = TestRoot::create();
@@ -1251,6 +1587,7 @@ mod tests {
             LiveMetadataAndHeaderValidationError::UnsupportedMetadataContractVersion,
             LiveMetadataAndHeaderValidationError::UnsupportedDatabaseSchemaVersion,
             LiveMetadataAndHeaderValidationError::UserVersionMismatch,
+            LiveMetadataAndHeaderValidationError::InconsistentRestartState,
         ];
         for category in categories {
             let root = TestRoot::create();
@@ -1308,6 +1645,7 @@ mod tests {
             owner: direct_predecessor(&root).owner,
             metadata_contract: validate_owned_metadata_observation(&canonical_owned_observation())
                 .unwrap(),
+            restart_classification: ProductionDatabaseRestartClassification::ExactV1,
         };
         let ProductionDatabaseConnectionCloseOutcome::Failed(failure) = owner.close_using(Err)
         else {
