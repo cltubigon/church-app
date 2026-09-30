@@ -32,8 +32,8 @@ pub(crate) use production_database_migration_confirmation::production_database_m
 };
 
 use production_database_migration_confirmation::{
-    AuthorizedProductionDatabaseMigrationHandoff, ProductionDatabaseMigrationConfirmation,
-    ProductionDatabaseMigrationCrossProcessExclusivity,
+    AuthorizedProductionDatabaseMigrationHandoff, ProductionDatabaseMigrationCancellationOutcome,
+    ProductionDatabaseMigrationConfirmation, ProductionDatabaseMigrationCrossProcessExclusivity,
     ProductionDatabaseMigrationCrossProcessExclusivityOutcome,
     ProductionDatabaseMigrationDiscoveryCloseFailure, ProductionDatabaseMigrationPendingContext,
     ProductionDatabaseMigrationPreparationFailure, ProductionDatabaseMigrationPreparationOutcome,
@@ -82,6 +82,10 @@ use crate::{
     native_post_recovery_migration_execution_confirmation::{
         NativePostRecoveryMigrationExecutionConfirmationOutcome,
         request_native_post_recovery_migration_execution_confirmation,
+    },
+    native_production_database_migration_confirmation::{
+        NativeProductionDatabaseMigrationConfirmationOutcome,
+        request_native_production_database_migration_confirmation,
     },
     native_recovery_key_reentry::{
         NativeRecoveryKeyReentryOutcome, request_native_recovery_key_reentry,
@@ -210,6 +214,16 @@ enum LifecycleState<Operational, CloseFailure> {
     CloseRetryRequired(CloseFailure),
     StartupCloseRetryRequired,
     SetupCloseRetryRequired,
+}
+
+fn ready_owner_allows_migration<Operational, CloseFailure>(
+    state: &LifecycleState<Operational, CloseFailure>,
+    is_exact_v1: impl FnOnce(&Operational) -> bool,
+) -> bool {
+    match state {
+        LifecycleState::Ready(owner) => is_exact_v1(owner),
+        _ => false,
+    }
 }
 
 impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
@@ -781,6 +795,14 @@ pub(crate) enum PostRecoveryMigrationExecutionConfirmationRequestResult {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ProductionDatabaseMigrationRequestResult {
+    Started,
+    NotAllowed,
+    Unavailable,
+}
+
 impl From<FirstTimeSetupRequestOutcome> for FirstTimeSetupRequestResult {
     fn from(outcome: FirstTimeSetupRequestOutcome) -> Self {
         match outcome {
@@ -1312,6 +1334,16 @@ impl ApplicationLifecycle {
     }
 
     #[cfg(windows)]
+    pub(crate) fn migration_initiation_available(&self) -> bool {
+        let inner = self.lock();
+        ready_owner_allows_migration(&inner.state, OperationalProductionDatabase::is_exact_v1)
+            && inner.migration_discovery == ProductionDatabaseMigrationDiscoveryState::NotAttempted
+            && inner.migration_confirmation.is_not_offered()
+            && inner.migration_work_resolved
+            && !inner.migration_shutdown_requested
+    }
+
+    #[cfg(windows)]
     pub(crate) fn with_exact_v2_business<T>(
         &self,
         operation: impl FnOnce(
@@ -1535,13 +1567,13 @@ impl ApplicationLifecycle {
 
     #[cfg(windows)]
     fn complete_migration_discovery(
-        &self,
+        self: &Arc<Self>,
         outcome: ProductionDatabaseMigrationDiscoveryWorkerResult,
         app: Option<&AppHandle>,
     ) {
         match outcome {
             ProductionDatabaseMigrationDiscoveryWorkerResult::Candidate(candidate) => {
-                let candidate = {
+                let (candidate, confirmation_ready) = {
                     let mut inner = self.lock();
                     let may_install = matches!(inner.state, LifecycleState::Ready(_))
                         && inner.migration_discovery
@@ -1552,16 +1584,18 @@ impl ApplicationLifecycle {
                         match inner.migration_confirmation.establish_pending(candidate) {
                             Ok(()) => {
                                 inner.migration_work_resolved = true;
-                                None
+                                (None, true)
                             }
-                            Err(candidate) => Some(candidate),
+                            Err(candidate) => (Some(candidate), false),
                         }
                     } else {
-                        Some(candidate)
+                        (Some(candidate), false)
                     }
                 };
                 if let Some(candidate) = candidate {
                     self.complete_migration_discovery_candidate_close(candidate.close(), app);
+                } else if confirmation_ready && let Some(app) = app {
+                    self.dispatch_production_database_migration_confirmation(app.clone());
                 }
             }
             ProductionDatabaseMigrationDiscoveryWorkerResult::Unavailable => {
@@ -1577,6 +1611,111 @@ impl ApplicationLifecycle {
                     .retain_discovery_close_failure(failure);
             }
         }
+        if self.may_exit()
+            && let Some(app) = app
+        {
+            app.exit(0);
+        }
+    }
+
+    #[cfg(windows)]
+    fn dispatch_production_database_migration_confirmation(self: &Arc<Self>, app: AppHandle) {
+        let main_app = app.clone();
+        let lifecycle = Arc::clone(self);
+        let scheduled = catch_unwind(AssertUnwindSafe(|| {
+            app.run_on_main_thread(move || {
+                let outcome = main_app
+                    .get_webview_window("main")
+                    .and_then(|window| window.hwnd().ok())
+                    .map_or(
+                        NativeProductionDatabaseMigrationConfirmationOutcome::Unavailable,
+                        |hwnd| request_native_production_database_migration_confirmation(hwnd.0),
+                    );
+                lifecycle.complete_production_database_migration_confirmation(outcome, main_app);
+            })
+        }))
+        .map_err(|_| ())
+        .and_then(|result| result.map_err(|_| ()));
+
+        if scheduled.is_err() {
+            self.cancel_pending_production_database_migration_confirmation(None);
+        }
+    }
+
+    #[cfg(windows)]
+    fn complete_production_database_migration_confirmation(
+        self: &Arc<Self>,
+        outcome: NativeProductionDatabaseMigrationConfirmationOutcome,
+        app: AppHandle,
+    ) {
+        let prior_worker = {
+            let mut inner = self.lock();
+            inner
+                .migration_work_resolved
+                .then(|| inner.migration_worker.take())
+                .flatten()
+        };
+        if let Some(worker) = prior_worker {
+            let _ = worker.join();
+        }
+
+        match outcome {
+            NativeProductionDatabaseMigrationConfirmationOutcome::Confirmed
+                if !self.lock().migration_shutdown_requested =>
+            {
+                let _ = self.begin_production_database_migration_revalidation(app);
+            }
+            NativeProductionDatabaseMigrationConfirmationOutcome::Confirmed
+            | NativeProductionDatabaseMigrationConfirmationOutcome::Cancelled
+            | NativeProductionDatabaseMigrationConfirmationOutcome::Unavailable => {
+                self.cancel_pending_production_database_migration_confirmation(Some(&app));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn cancel_pending_production_database_migration_confirmation(
+        self: &Arc<Self>,
+        app: Option<&AppHandle>,
+    ) {
+        let pending = {
+            let mut inner = self.lock();
+            match inner.migration_confirmation.cancel() {
+                ProductionDatabaseMigrationCancellationOutcome::PendingRevoked(pending) => {
+                    inner.migration_work_resolved = false;
+                    Some(pending)
+                }
+                ProductionDatabaseMigrationCancellationOutcome::RevalidationRevocationRequested
+                | ProductionDatabaseMigrationCancellationOutcome::Rejected => None,
+            }
+        };
+        let Some(pending) = pending else {
+            return;
+        };
+        let close_outcome = pending.close();
+        let mut inner = self.lock();
+        match close_outcome {
+            ProductionDatabaseConnectionCloseOutcome::Closed => {
+                if matches!(
+                    inner.state,
+                    LifecycleState::Ready(OperationalProductionDatabase::ExactV1(_))
+                ) && !inner.migration_shutdown_requested
+                    && inner
+                        .migration_confirmation
+                        .reset_after_cancelled_pending_closed()
+                {
+                    inner.migration_discovery =
+                        ProductionDatabaseMigrationDiscoveryState::NotAttempted;
+                }
+                inner.migration_work_resolved = true;
+            }
+            ProductionDatabaseConnectionCloseOutcome::Failed(failure) => {
+                inner
+                    .migration_confirmation
+                    .retain_source_close_failure(failure);
+            }
+        }
+        drop(inner);
         if self.may_exit()
             && let Some(app) = app
         {
@@ -5130,6 +5269,45 @@ pub(crate) fn startup_status(state: tauri::State<'_, Arc<ApplicationLifecycle>>)
 }
 
 #[tauri::command]
+pub(crate) fn migration_initiation_available(
+    state: tauri::State<'_, Arc<ApplicationLifecycle>>,
+) -> bool {
+    #[cfg(windows)]
+    return state.migration_initiation_available();
+
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        false
+    }
+}
+
+#[tauri::command]
+pub(crate) fn request_production_database_migration(
+    app: AppHandle,
+) -> ProductionDatabaseMigrationRequestResult {
+    #[cfg(windows)]
+    return match lifecycle_from_app(&app).request_production_database_migration_discovery(app) {
+        ProductionDatabaseMigrationDiscoveryRequestOutcome::Started => {
+            ProductionDatabaseMigrationRequestResult::Started
+        }
+        ProductionDatabaseMigrationDiscoveryRequestOutcome::NotReady
+        | ProductionDatabaseMigrationDiscoveryRequestOutcome::AlreadyAttempted => {
+            ProductionDatabaseMigrationRequestResult::NotAllowed
+        }
+        ProductionDatabaseMigrationDiscoveryRequestOutcome::Unavailable => {
+            ProductionDatabaseMigrationRequestResult::Unavailable
+        }
+    };
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        ProductionDatabaseMigrationRequestResult::Unavailable
+    }
+}
+
+#[tauri::command]
 pub(crate) fn request_first_time_setup(app: AppHandle) -> FirstTimeSetupRequestResult {
     #[cfg(windows)]
     return request_first_time_setup_with(
@@ -6284,6 +6462,8 @@ mod tests {
             "health_check,",
             "startup_status,",
             "request_first_time_setup,",
+            "migration_initiation_available,",
+            "request_production_database_migration,",
             "request_post_recovery_migration_execution_confirmation,",
         ] {
             assert!(bootstrap.contains(command));
@@ -6294,7 +6474,7 @@ mod tests {
             .split_once("fn request_first_time_setup_with")
             .unwrap()
             .1
-            .split_once("fn complete_setup")
+            .split_once("fn request_production_database_migration_discovery")
             .unwrap()
             .0;
         assert!(!setup_request.contains("run_production_startup"));
@@ -6421,6 +6601,111 @@ mod tests {
             owner
         };
         assert!(close_operational(owner).is_none());
+    }
+
+    #[test]
+    fn migration_capability_distinguishes_exact_v1_from_v2_and_non_ready_states() {
+        let ready_v1: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::Ready(TestOwner(1));
+        let ready_v2: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::Ready(TestOwner(2));
+        let failed: LifecycleState<TestOwner, TestCloseFailure> =
+            LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable);
+        let not_started: LifecycleState<TestOwner, TestCloseFailure> = LifecycleState::NotStarted;
+
+        assert!(ready_owner_allows_migration(&ready_v1, |owner| owner.0 == 1));
+        assert!(!ready_owner_allows_migration(&ready_v2, |owner| owner.0 == 1));
+        assert!(!ready_owner_allows_migration(&failed, |owner| owner.0 == 1));
+        assert!(!ready_owner_allows_migration(&not_started, |owner| owner.0 == 1));
+
+        let business_features_available = false;
+        assert!(!business_features_available);
+        assert!(ready_owner_allows_migration(&ready_v1, |owner| owner.0 == 1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_v1_lifecycle_exposes_only_the_coarse_migration_capability() {
+        let lifecycle = ApplicationLifecycle::new();
+        let root = install_ready_owner_for_migration_discovery(&lifecycle);
+        assert!(lifecycle.migration_initiation_available());
+        assert!(!lifecycle.business_features_available());
+
+        lifecycle.lock().migration_discovery =
+            ProductionDatabaseMigrationDiscoveryState::InProgress;
+        assert!(!lifecycle.migration_initiation_available());
+
+        close_ready_owner_for_migration_discovery(&lifecycle);
+        root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn migration_request_ipc_is_argument_free_and_reuses_only_canonical_discovery() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        const BOOTSTRAP: &str = include_str!("lib.rs");
+        let command = SOURCE
+            .split_once("pub(crate) fn request_production_database_migration(")
+            .unwrap()
+            .1
+            .split_once("#[tauri::command]\npub(crate) fn request_first_time_setup")
+            .unwrap()
+            .0;
+
+        assert!(command.starts_with("\n    app: AppHandle,\n)"));
+        assert!(command.contains("request_production_database_migration_discovery(app)"));
+        for forbidden in [
+            "bool",
+            "Path",
+            "schema",
+            "key",
+            "opportunity",
+            "offer_production_database_migration_opportunity",
+            "prepare_authorized_production_database_migration",
+            "execute_production_database_v1_to_v2_migration",
+        ] {
+            assert!(
+                !command.contains(forbidden),
+                "forbidden command authority: {forbidden}"
+            );
+        }
+        assert!(BOOTSTRAP.contains("request_production_database_migration,"));
+        assert!(BOOTSTRAP.contains("migration_initiation_available,"));
+    }
+
+    #[test]
+    fn initial_confirmation_is_native_rust_owned_and_enters_only_canonical_revalidation() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        const FRONTEND: &str = include_str!("../../src/App.tsx");
+        let dispatch = SOURCE
+            .split_once("fn dispatch_production_database_migration_confirmation")
+            .unwrap()
+            .1
+            .split_once("fn complete_production_database_migration_confirmation")
+            .unwrap()
+            .0;
+        assert!(dispatch.contains("run_on_main_thread"));
+        assert!(dispatch.contains("get_webview_window(\"main\")"));
+        assert!(dispatch.contains("window.hwnd()"));
+        assert!(dispatch.contains("request_native_production_database_migration_confirmation"));
+
+        let completion = SOURCE
+            .split_once("fn complete_production_database_migration_confirmation")
+            .unwrap()
+            .1
+            .split_once("fn cancel_pending_production_database_migration_confirmation")
+            .unwrap()
+            .0;
+        assert!(
+            completion.contains("NativeProductionDatabaseMigrationConfirmationOutcome::Confirmed")
+        );
+        assert!(completion.contains("begin_production_database_migration_revalidation(app)"));
+        assert!(
+            completion.contains("NativeProductionDatabaseMigrationConfirmationOutcome::Cancelled")
+        );
+        assert!(completion.contains("cancel_pending_production_database_migration_confirmation"));
+        for forbidden in ["confirmed: bool", "authorization:", "opportunity:"] {
+            assert!(!FRONTEND.contains(forbidden));
+        }
     }
 
     #[cfg(windows)]
@@ -6790,8 +7075,16 @@ mod tests {
             assert!(!worker.contains(forbidden));
         }
         let request_name = "request_production_database_migration_discovery(";
-        assert_eq!(production.matches(request_name).count(), 1);
-        assert!(!BOOTSTRAP.contains(request_name));
+        assert_eq!(production.matches(request_name).count(), 2);
+        let command = production
+            .split_once("pub(crate) fn request_production_database_migration(")
+            .unwrap()
+            .1
+            .split_once("#[tauri::command]\npub(crate) fn request_first_time_setup")
+            .unwrap()
+            .0;
+        assert_eq!(command.matches(request_name).count(), 1);
+        assert!(BOOTSTRAP.contains("request_production_database_migration,"));
         assert!(!FRONTEND.contains(request_name));
         assert!(worker.contains("ProductionDatabaseRestartClassification::ExactV1"));
         let startup = production
@@ -7374,7 +7667,15 @@ mod tests {
         const FRONTEND: &str = include_str!("../../src/App.tsx");
         let production = LIFECYCLE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
         let request_name = "begin_production_database_migration_revalidation(";
-        assert_eq!(production.matches(request_name).count(), 1);
+        assert_eq!(production.matches(request_name).count(), 2);
+        let native_completion = production
+            .split_once("fn complete_production_database_migration_confirmation")
+            .unwrap()
+            .1
+            .split_once("fn cancel_pending_production_database_migration_confirmation")
+            .unwrap()
+            .0;
+        assert_eq!(native_completion.matches(request_name).count(), 1);
         assert!(!BOOTSTRAP.contains(request_name));
         assert!(!FRONTEND.contains(request_name));
         assert!(production.contains("std::sync::mpsc::sync_channel(0)"));

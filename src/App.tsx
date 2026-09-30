@@ -9,8 +9,10 @@ import {
 import { HealthPanel } from "./components/HealthPanel";
 import { getBusinessFeaturesAvailable } from "./lib/business";
 import {
+  getMigrationInitiationAvailable,
   getStartupStatus,
   requestFirstTimeSetup,
+  requestProductionDatabaseMigration,
   requestPostRecoveryMigrationExecutionConfirmation,
   type StartupStatus,
 } from "./lib/startup";
@@ -129,6 +131,11 @@ export function App() {
   const [migrationConfirmationPending, setMigrationConfirmationPending] = useState(false);
   const [migrationConfirmationError, setMigrationConfirmationError] = useState<string | null>(null);
   const [businessFeaturesAvailable, setBusinessFeaturesAvailable] = useState<boolean | null>(null);
+  const [migrationInitiationAvailable, setMigrationInitiationAvailable] = useState<boolean | null>(
+    null,
+  );
+  const [migrationInitiationPending, setMigrationInitiationPending] = useState(false);
+  const [migrationInitiationError, setMigrationInitiationError] = useState<string | null>(null);
 
   useEffect(() => {
     void statusRefreshKey;
@@ -167,17 +174,28 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     if (startupStatus !== "ready") {
       setBusinessFeaturesAvailable(null);
+      setMigrationInitiationAvailable(null);
       return () => {
         active = false;
       };
     }
-    void getBusinessFeaturesAvailable().then((available) => {
-      if (active) setBusinessFeaturesAvailable(available);
-    });
+    const refreshCapabilities = async () => {
+      const [businessAvailable, migrationAvailable] = await Promise.all([
+        getBusinessFeaturesAvailable(),
+        getMigrationInitiationAvailable(),
+      ]);
+      if (!active) return;
+      setBusinessFeaturesAvailable(businessAvailable);
+      setMigrationInitiationAvailable(migrationAvailable);
+      if (!businessAvailable) timer = setTimeout(refreshCapabilities, 500);
+    };
+    void refreshCapabilities();
     return () => {
       active = false;
+      if (timer !== undefined) clearTimeout(timer);
     };
   }, [startupStatus]);
 
@@ -207,6 +225,19 @@ export function App() {
     setMigrationConfirmationPending(false);
   }
 
+  async function requestMigrationInitiation() {
+    if (migrationInitiationPending) return;
+
+    setMigrationInitiationPending(true);
+    setMigrationInitiationError(null);
+    const result = await requestProductionDatabaseMigration();
+    if (result === "unavailable") {
+      setMigrationInitiationError("Database upgrade preparation could not be started.");
+    }
+    setStatusRefreshKey((key) => key + 1);
+    setMigrationInitiationPending(false);
+  }
+
   if (startupStatus !== "ready") {
     return (
       <StartupBoundary
@@ -221,7 +252,7 @@ export function App() {
     );
   }
 
-  if (businessFeaturesAvailable === null) {
+  if (businessFeaturesAvailable === null || migrationInitiationAvailable === null) {
     return (
       <main className={styles.main}>
         <section className={styles.panel}>
@@ -238,6 +269,21 @@ export function App() {
         <section className={styles.panel}>
           <h1>Church App</h1>
           <p>Parish workflows are unavailable for this database.</p>
+          {migrationInitiationAvailable && (
+            <div aria-busy={migrationInitiationPending} className={styles.setupAction}>
+              <p>A protected database upgrade is required before parish workflows can be used.</p>
+              <button
+                disabled={migrationInitiationPending}
+                onClick={() => void requestMigrationInitiation()}
+                type="button"
+              >
+                {migrationInitiationPending
+                  ? "Preparing database upgrade…"
+                  : "Prepare database upgrade"}
+              </button>
+              {migrationInitiationError !== null && <p role="alert">{migrationInitiationError}</p>}
+            </div>
+          )}
         </section>
       </main>
     );

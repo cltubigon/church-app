@@ -191,6 +191,59 @@ describe("application foundation", () => {
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
   });
 
+  it("shows the upgrade action only for Ready Exact V1 while parish workflows stay hidden", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(false);
+      if (command === "migration_initiation_available") return Promise.resolve(true);
+      return Promise.reject(new Error("unexpected command"));
+    });
+    renderApp();
+
+    expect(
+      await screen.findByText("Parish workflows are unavailable for this database."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Prepare database upgrade" })).toBeEnabled();
+    expect(screen.queryByRole("navigation", { name: "Staff areas" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the migration action suppressed for Ready Exact V2", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(true);
+      if (command === "migration_initiation_available") return Promise.resolve(false);
+      if (command === "business_list_requests") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    renderApp();
+
+    expect(await screen.findByRole("navigation", { name: "Staff areas" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Prepare database upgrade" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("requests migration discovery without renderer-supplied authority", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("ready");
+      if (command === "business_features_available") return Promise.resolve(false);
+      if (command === "migration_initiation_available") return Promise.resolve(true);
+      if (command === "request_production_database_migration") return Promise.resolve("started");
+      return Promise.reject(new Error("unexpected command"));
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Prepare database upgrade" }));
+
+    expect(
+      mockedInvoke.mock.calls.filter(
+        ([command]) => command === "request_production_database_migration",
+      ),
+    ).toEqual([["request_production_database_migration"]]);
+    expect(document.body.textContent).not.toContain("Migration completed");
+  });
+
   it("requests only the argument-free native confirmation command", async () => {
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") {

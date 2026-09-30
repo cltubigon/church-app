@@ -598,7 +598,15 @@ Normal Ready Exact V2 now exposes a coarse capability flag and only the typed re
 
 The React product surface contains only Requests, Scheduling, and Cancellation Review. Requests supports create/list/detail, Pending draft add/edit/delete, schedule, Scheduled in-place reschedule, completion, cancellation-review submission, and a dedicated pending-review filter. Scheduling displays returned live occupancy. Cancellation Review supports approve/reject. A Pending review never changes the ordinary visible primary status or removes a Scheduled slot; no general cancellation-requested badge is shown. Date and time presentation is `MM/DD/YYYY` and 12-hour AM/PM while canonical IPC values remain `YYYY-MM-DD` and `HH:MM`. Manual Windows workflow validation and any fixes discovered by it remain required before release readiness.
 
-## 39. Links
+## 39. Reachable Exact-V1 migration initiation
+
+Normal Ready Exact V1 now exposes a coarse Rust-owned migration-initiation capability while keeping all parish workflows unavailable. The React shell shows one `Prepare database upgrade` action only when that capability is true. Its argument-free `request_production_database_migration` IPC request can only reserve the existing canonical discovery worker; React supplies no confirmation, opportunity, path, version, key, identity, recovery fact, or migration parameter.
+
+Successful discovery still performs fresh Exact-V1 restart classification, evidence correspondence, freshness validation, final installation observation, and canonical opportunity construction before Rust installs the existing process-local `Pending` context. Rust then dispatches a Win32 confirmation on the main thread with the real `main` window `HWND`. Confirm continues only through the existing revalidation and authorization transition. Cancel consumes and closes the pending opportunity, retains no stale authority, returns to Ready Exact V1, and permits a later fresh discovery. Exact V2, inconsistent, unsupported-newer, non-Ready, unavailable, concurrent, and stale requests remain fail closed.
+
+This bridge changes no migration semantics. Migration exclusivity, full-integrity validation, encrypted backup staging, custody, both independently verified recovery sets, final aggregate Layer D verification, fresh post-recovery execution confirmation, writable V1 preparation, fixed transactional V1-to-V2 execution, and restart-required completion remain unchanged. The native initial confirmation and complete migration/recovery ceremony still require manual Windows validation; no migration has been run against a real parish database.
+
+## 40. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)

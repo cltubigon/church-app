@@ -349,7 +349,7 @@ pub(super) enum ProductionDatabaseMigrationShutdownOwnership {
 }
 
 #[allow(clippy::large_enum_variant)]
-enum ProductionDatabaseMigrationCancellationOutcome {
+pub(super) enum ProductionDatabaseMigrationCancellationOutcome {
     PendingRevoked(ProductionDatabaseMigrationPendingContext),
     RevalidationRevocationRequested,
     Rejected,
@@ -566,7 +566,7 @@ impl ProductionDatabaseMigrationConfirmation {
     }
 
     #[allow(dead_code)]
-    fn cancel(&mut self) -> ProductionDatabaseMigrationCancellationOutcome {
+    pub(super) fn cancel(&mut self) -> ProductionDatabaseMigrationCancellationOutcome {
         let prior = std::mem::replace(
             &mut self.state,
             ProductionDatabaseMigrationConfirmationState::Revoked,
@@ -589,6 +589,17 @@ impl ProductionDatabaseMigrationConfirmation {
                 ProductionDatabaseMigrationCancellationOutcome::Rejected
             }
         }
+    }
+
+    pub(super) fn reset_after_cancelled_pending_closed(&mut self) -> bool {
+        if !matches!(
+            self.state,
+            ProductionDatabaseMigrationConfirmationState::Revoked
+        ) {
+            return false;
+        }
+        self.state = ProductionDatabaseMigrationConfirmationState::NotOffered;
+        true
     }
 
     pub(super) fn invalidate_for_shutdown(
@@ -1197,6 +1208,42 @@ mod ownership_tests {
         assert!(confirmation.begin_revalidation().is_err());
         close(returned);
         root.assert_exact_cleanup();
+    }
+
+    #[test]
+    fn cancelled_pending_can_reset_only_after_its_owner_is_closed() {
+        let mut confirmation = ProductionDatabaseMigrationConfirmation::new();
+        let (first_root, first) = genuine_production_database_migration_opportunity_for_test();
+        confirmation
+            .establish_pending(pending(first_root.path(), first))
+            .unwrap();
+        let ProductionDatabaseMigrationCancellationOutcome::PendingRevoked(cancelled) =
+            confirmation.cancel()
+        else {
+            panic!("pending owner must be returned");
+        };
+        assert!(matches!(
+            cancelled.close(),
+            ProductionDatabaseConnectionCloseOutcome::Closed
+        ));
+        assert!(confirmation.reset_after_cancelled_pending_closed());
+        assert_eq!(
+            confirmation.state_for_test(),
+            ProductionDatabaseMigrationConfirmationStateForTest::NotOffered
+        );
+
+        let (second_root, second) = genuine_production_database_migration_opportunity_for_test();
+        confirmation
+            .establish_pending(pending(second_root.path(), second))
+            .expect("a fresh discovery may establish a new pending owner after safe cancellation");
+        let ProductionDatabaseMigrationCancellationOutcome::PendingRevoked(second) =
+            confirmation.cancel()
+        else {
+            unreachable!()
+        };
+        close(second);
+        first_root.assert_exact_cleanup();
+        second_root.assert_exact_cleanup();
     }
 
     #[test]

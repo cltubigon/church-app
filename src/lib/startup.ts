@@ -42,12 +42,18 @@ export type PostRecoveryMigrationExecutionConfirmationRequestResult =
   | "notAllowed"
   | "unavailable";
 
+export type ProductionDatabaseMigrationRequestResult = "started" | "notAllowed" | "unavailable";
+
 const postRecoveryMigrationExecutionConfirmationRequestResults =
   new Set<PostRecoveryMigrationExecutionConfirmationRequestResult>([
     "started",
     "notAllowed",
     "unavailable",
   ]);
+
+const productionDatabaseMigrationRequestResults = new Set<ProductionDatabaseMigrationRequestResult>(
+  ["started", "notAllowed", "unavailable"],
+);
 
 const firstTimeSetupRequestResults = new Set<FirstTimeSetupRequestResult>([
   "started",
@@ -63,6 +69,28 @@ export async function getStartupStatus(): Promise<StartupStatus> {
     const status = await invoke<unknown>("startup_status");
     return typeof status === "string" && startupStatuses.has(status as StartupStatus)
       ? (status as StartupStatus)
+      : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export async function getMigrationInitiationAvailable(): Promise<boolean> {
+  try {
+    return (await invoke<unknown>("migration_initiation_available")) === true;
+  } catch {
+    return false;
+  }
+}
+
+export async function requestProductionDatabaseMigration(): Promise<ProductionDatabaseMigrationRequestResult> {
+  try {
+    const result = await invoke<unknown>("request_production_database_migration");
+    return typeof result === "string" &&
+      productionDatabaseMigrationRequestResults.has(
+        result as ProductionDatabaseMigrationRequestResult,
+      )
+      ? (result as ProductionDatabaseMigrationRequestResult)
       : "unavailable";
   } catch {
     return "unavailable";

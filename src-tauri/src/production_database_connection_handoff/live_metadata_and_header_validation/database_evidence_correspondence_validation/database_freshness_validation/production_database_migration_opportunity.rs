@@ -865,7 +865,7 @@ mod tests {
             .split_once("fn complete_migration_discovery(")
             .unwrap()
             .1
-            .split_once("fn complete_migration_discovery_candidate_close(")
+            .split_once("fn dispatch_production_database_migration_confirmation(")
             .unwrap()
             .0;
         assert!(completion.contains("matches!(inner.state, LifecycleState::Ready(_))"));
@@ -882,11 +882,13 @@ mod tests {
             assert!(!frontend_source.contains(OFFER));
         }
 
-        assert_eq!(lifecycle_production.matches("#[tauri::command]").count(), 3);
+        assert_eq!(lifecycle_production.matches("#[tauri::command]").count(), 5);
         for command in [
             "health_check,",
             "startup_status,",
             "request_first_time_setup,",
+            "migration_initiation_available,",
+            "request_production_database_migration,",
             "request_post_recovery_migration_execution_confirmation,",
         ] {
             assert!(BOOTSTRAP.contains(command));
