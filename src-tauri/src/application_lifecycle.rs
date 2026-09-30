@@ -190,6 +190,8 @@ pub(crate) enum StartupStatus {
     SetupRestartRequired,
     Stopping,
     ShutdownIncomplete,
+    MigrationRecoveryKeyCustodyInProgress,
+    MigrationRecoveryKeyCustodyAwaitingRetry,
     TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
     MigrationExecutionConfirmedAwaitingWritablePreparation,
     WritableV1MigrationPreparedAwaitingTransaction,
@@ -199,6 +201,7 @@ pub(crate) enum StartupStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CoarseStartupFailure {
+    FirstTimeSetupAvailable,
     StartupUnavailable,
     StartupInterrupted,
 }
@@ -256,12 +259,13 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
 
     fn reserve_setup(&mut self) -> FirstTimeSetupRequestOutcome {
         match self {
-            Self::Failed(_) => {
+            Self::Failed(CoarseStartupFailure::FirstTimeSetupAvailable) => {
                 *self = Self::SetupInProgress;
                 FirstTimeSetupRequestOutcome::Started
             }
             Self::NotStarted | Self::Starting => FirstTimeSetupRequestOutcome::StartupInProgress,
-            Self::Ready(_)
+            Self::Failed(_)
+            | Self::Ready(_)
             | Self::Stopping
             | Self::CloseRetryRequired(_)
             | Self::StartupCloseRetryRequired => FirstTimeSetupRequestOutcome::NotAllowed,
@@ -273,7 +277,7 @@ impl<Operational, CloseFailure> LifecycleState<Operational, CloseFailure> {
 
     fn rollback_setup_reservation(&mut self) {
         if matches!(self, Self::SetupInProgress) {
-            *self = Self::Failed(CoarseStartupFailure::StartupUnavailable);
+            *self = Self::Failed(CoarseStartupFailure::FirstTimeSetupAvailable);
         }
     }
 
@@ -482,6 +486,7 @@ enum MigrationPreparationState {
 enum MigrationWorkerCommand {
     Shutdown,
     CustodyCompleted(NativeMigrationRecoveryKeyCustodyOutcome),
+    RetryCustodyBeforeExposure,
     SelectFirstRecoveryVolume,
     FirstRecoveryVolumeSelectionCompleted(NativeRecoveryVolumeSelectionOutcome),
     SelectSecondRecoveryVolume,
@@ -619,7 +624,8 @@ fn observe_pre_custody_dispatch_control(
         Ok(MigrationWorkerCommand::CustodyCompleted(_)) => {
             PreCustodyDispatchControl::ImpossibleCustodyCompleted
         }
-        Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+        Ok(MigrationWorkerCommand::RetryCustodyBeforeExposure)
+        | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
         | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
         | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
         | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_))
@@ -797,6 +803,14 @@ pub(crate) enum PostRecoveryMigrationExecutionConfirmationRequestResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) enum MigrationRecoveryKeyCustodyRetryRequestResult {
+    Started,
+    NotAllowed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum ProductionDatabaseMigrationRequestResult {
     Started,
     NotAllowed,
@@ -934,6 +948,7 @@ struct LifecycleInner {
     migration_worker: Option<thread::JoinHandle<()>>,
     migration_control: Option<std::sync::mpsc::Sender<MigrationWorkerCommand>>,
     migration_preparation: MigrationPreparationState,
+    migration_custody_retry_outstanding: bool,
     first_recovery_volume_selection_outstanding: bool,
     second_recovery_volume_selection_outstanding: bool,
     recovery_key_reentry_outstanding: bool,
@@ -965,6 +980,7 @@ impl ApplicationLifecycle {
                 migration_worker: None,
                 migration_control: None,
                 migration_preparation: MigrationPreparationState::Inactive,
+                migration_custody_retry_outstanding: false,
                 first_recovery_volume_selection_outstanding: false,
                 second_recovery_volume_selection_outstanding: false,
                 recovery_key_reentry_outstanding: false,
@@ -1297,6 +1313,38 @@ impl ApplicationLifecycle {
         }
     }
 
+    #[cfg(windows)]
+    fn request_migration_recovery_key_custody_retry(
+        &self,
+    ) -> MigrationRecoveryKeyCustodyRetryRequestResult {
+        let control = {
+            let mut inner = self.lock();
+            if !matches!(
+                inner.migration_preparation,
+                MigrationPreparationState::CustodyInterruptedBeforeExposure
+                    | MigrationPreparationState::CustodyUnavailableBeforeExposure
+            ) || inner.migration_custody_retry_outstanding
+                || inner.migration_shutdown_requested
+            {
+                return MigrationRecoveryKeyCustodyRetryRequestResult::NotAllowed;
+            }
+            let Some(control) = inner.migration_control.clone() else {
+                return MigrationRecoveryKeyCustodyRetryRequestResult::Unavailable;
+            };
+            inner.migration_custody_retry_outstanding = true;
+            control
+        };
+        if control
+            .send(MigrationWorkerCommand::RetryCustodyBeforeExposure)
+            .is_ok()
+        {
+            MigrationRecoveryKeyCustodyRetryRequestResult::Started
+        } else {
+            self.lock().migration_custody_retry_outstanding = false;
+            MigrationRecoveryKeyCustodyRetryRequestResult::Unavailable
+        }
+    }
+
     pub(crate) fn status(&self) -> StartupStatus {
         let inner = self.lock();
         if inner.migration_confirmation.has_retained_close_failure() {
@@ -1305,6 +1353,15 @@ impl ApplicationLifecycle {
             inner.state.status()
         } else {
             match inner.migration_preparation {
+                MigrationPreparationState::CustodyPrepared
+                | MigrationPreparationState::CustodyDispatchPending
+                | MigrationPreparationState::CustodyRunning => {
+                    StartupStatus::MigrationRecoveryKeyCustodyInProgress
+                }
+                MigrationPreparationState::CustodyInterruptedBeforeExposure
+                | MigrationPreparationState::CustodyUnavailableBeforeExposure => {
+                    StartupStatus::MigrationRecoveryKeyCustodyAwaitingRetry
+                }
                 MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution => {
                     StartupStatus::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
                 }
@@ -1340,6 +1397,17 @@ impl ApplicationLifecycle {
             && inner.migration_discovery == ProductionDatabaseMigrationDiscoveryState::NotAttempted
             && inner.migration_confirmation.is_not_offered()
             && inner.migration_work_resolved
+            && !inner.migration_shutdown_requested
+    }
+
+    pub(crate) fn first_time_setup_available(&self) -> bool {
+        let inner = self.lock();
+        matches!(
+            inner.state,
+            LifecycleState::Failed(CoarseStartupFailure::FirstTimeSetupAvailable)
+        ) && inner.migration_preparation == MigrationPreparationState::Inactive
+            && inner.migration_work_resolved
+            && inner.migration_confirmation.is_not_offered()
             && !inner.migration_shutdown_requested
     }
 
@@ -1454,6 +1522,13 @@ impl ApplicationLifecycle {
         });
 
         let mut inner = self.lock();
+        if inner.migration_preparation != MigrationPreparationState::Inactive
+            || !inner.migration_work_resolved
+            || !inner.migration_confirmation.is_not_offered()
+            || inner.migration_shutdown_requested
+        {
+            return FirstTimeSetupRequestOutcome::NotAllowed;
+        }
         let reservation = inner.state.reserve_setup();
         if reservation != FirstTimeSetupRequestOutcome::Started {
             return reservation;
@@ -2185,7 +2260,8 @@ impl ApplicationLifecycle {
                     }
                     return;
                 }
-                Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
+                Ok(MigrationWorkerCommand::RetryCustodyBeforeExposure)
+                | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
                 | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
                 | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
                 | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_))
@@ -2336,6 +2412,7 @@ impl ApplicationLifecycle {
                     return;
                 }
                 Ok(MigrationWorkerCommand::CustodyCompleted(_))
+                | Ok(MigrationWorkerCommand::RetryCustodyBeforeExposure)
                 | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
                 | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
                 | Ok(MigrationWorkerCommand::SecondRecoveryVolumeSelectionCompleted(_))
@@ -2593,6 +2670,7 @@ impl ApplicationLifecycle {
                     return;
                 }
                 Ok(MigrationWorkerCommand::CustodyCompleted(_))
+                | Ok(MigrationWorkerCommand::RetryCustodyBeforeExposure)
                 | Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)
                 | Ok(MigrationWorkerCommand::FirstRecoveryVolumeSelectionCompleted(_))
                 | Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
@@ -3058,6 +3136,26 @@ impl ApplicationLifecycle {
         loop {
             match control.recv() {
                 Ok(MigrationWorkerCommand::Shutdown) => {}
+                Ok(MigrationWorkerCommand::RetryCustodyBeforeExposure) => {
+                    let prepared = match owner {
+                        MigrationWorkerParkedOwnership::Interrupted(interruption) => {
+                            interruption.retry()
+                        }
+                        MigrationWorkerParkedOwnership::Unavailable(prepared) => prepared,
+                        _ => std::process::abort(),
+                    };
+                    let control_sender = {
+                        let mut inner = self.lock();
+                        inner.migration_custody_retry_outstanding = false;
+                        inner.migration_preparation = MigrationPreparationState::CustodyPrepared;
+                        inner
+                            .migration_control
+                            .clone()
+                            .unwrap_or_else(|| std::process::abort())
+                    };
+                    self.run_custody_dispatch(prepared, control_sender, control, exclusivity, app);
+                    return;
+                }
                 Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume) => {
                     let MigrationWorkerParkedOwnership::Verified(source) = owner else {
                         std::process::abort()
@@ -4889,8 +4987,8 @@ fn run_production_startup(
     if lifecycle.shutdown_pending() {
         return interrupted();
     }
-    if !is_initialized_with_expected_storage(&early_installation_evidence) {
-        return unavailable();
+    if let Some(failure) = initial_installation_evidence_failure(early_installation_evidence) {
+        return StartupWorkerResult::Failed(failure);
     }
 
     let trusted_assessment =
@@ -5160,6 +5258,23 @@ fn is_initialized_with_expected_storage(evidence: &InstallationEvidence) -> bool
 }
 
 #[cfg(windows)]
+const fn initial_installation_evidence_failure(
+    evidence: InstallationEvidence,
+) -> Option<CoarseStartupFailure> {
+    match evidence {
+        InstallationEvidence::Initialized(ExpectedStorageEvidence::Present) => None,
+        InstallationEvidence::NeverInitialized => {
+            Some(CoarseStartupFailure::FirstTimeSetupAvailable)
+        }
+        InstallationEvidence::Initialized(
+            ExpectedStorageEvidence::Missing | ExpectedStorageEvidence::Unavailable,
+        )
+        | InstallationEvidence::Inconsistent
+        | InstallationEvidence::Unavailable => Some(CoarseStartupFailure::StartupUnavailable),
+    }
+}
+
+#[cfg(windows)]
 fn close_protected_unavailable_owner<T>(
     owner: T,
     lifecycle: &ApplicationLifecycle,
@@ -5269,6 +5384,13 @@ pub(crate) fn startup_status(state: tauri::State<'_, Arc<ApplicationLifecycle>>)
 }
 
 #[tauri::command]
+pub(crate) fn first_time_setup_available(
+    state: tauri::State<'_, Arc<ApplicationLifecycle>>,
+) -> bool {
+    state.first_time_setup_available()
+}
+
+#[tauri::command]
 pub(crate) fn migration_initiation_available(
     state: tauri::State<'_, Arc<ApplicationLifecycle>>,
 ) -> bool {
@@ -5334,6 +5456,20 @@ pub(crate) fn request_post_recovery_migration_execution_confirmation(
     {
         let _ = state;
         PostRecoveryMigrationExecutionConfirmationRequestResult::Unavailable
+    }
+}
+
+#[tauri::command]
+pub(crate) fn retry_migration_recovery_key_custody(
+    state: tauri::State<'_, Arc<ApplicationLifecycle>>,
+) -> MigrationRecoveryKeyCustodyRetryRequestResult {
+    #[cfg(windows)]
+    return state.request_migration_recovery_key_custody_retry();
+
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        MigrationRecoveryKeyCustodyRetryRequestResult::Unavailable
     }
 }
 
@@ -5413,6 +5549,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn only_never_initialized_exposes_first_time_setup_capability() {
+        assert_eq!(
+            initial_installation_evidence_failure(InstallationEvidence::NeverInitialized),
+            Some(CoarseStartupFailure::FirstTimeSetupAvailable)
+        );
+        assert_eq!(
+            initial_installation_evidence_failure(InstallationEvidence::Initialized(
+                ExpectedStorageEvidence::Present,
+            )),
+            None
+        );
+        for unavailable in [
+            InstallationEvidence::Initialized(ExpectedStorageEvidence::Missing),
+            InstallationEvidence::Initialized(ExpectedStorageEvidence::Unavailable),
+            InstallationEvidence::Inconsistent,
+            InstallationEvidence::Unavailable,
+        ] {
+            assert_eq!(
+                initial_installation_evidence_failure(unavailable),
+                Some(CoarseStartupFailure::StartupUnavailable)
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn every_final_change_away_from_present_blocks_authorization_including_staging() {
         let early = InstallationEvidence::Initialized(ExpectedStorageEvidence::Present);
         assert!(is_initialized_with_expected_storage(&early));
@@ -5456,7 +5618,7 @@ mod tests {
 
         let early_observation = worker.find("let early_installation_evidence").unwrap();
         let early_gate = worker
-            .find("is_initialized_with_expected_storage(&early_installation_evidence)")
+            .find("initial_installation_evidence_failure(early_installation_evidence)")
             .unwrap();
         let trust_chain = worker
             .find("load_trusted_current_installation_evidence_assessment")
@@ -5944,9 +6106,9 @@ mod tests {
     }
 
     #[test]
-    fn setup_reservation_accepts_only_failed_and_rejects_every_locked_state() {
+    fn setup_reservation_accepts_only_setup_eligible_failure_and_rejects_every_locked_state() {
         let mut failed = LifecycleState::<TestOwner, TestCloseFailure>::Failed(
-            CoarseStartupFailure::StartupUnavailable,
+            CoarseStartupFailure::FirstTimeSetupAvailable,
         );
         assert_eq!(
             failed.reserve_setup(),
@@ -5966,6 +6128,14 @@ mod tests {
             (
                 LifecycleState::Starting,
                 FirstTimeSetupRequestOutcome::StartupInProgress,
+            ),
+            (
+                LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable),
+                FirstTimeSetupRequestOutcome::NotAllowed,
+            ),
+            (
+                LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted),
+                FirstTimeSetupRequestOutcome::NotAllowed,
             ),
             (
                 LifecycleState::Ready(TestOwner(1)),
@@ -6017,6 +6187,34 @@ mod tests {
         ));
         assert!(matches!(state, LifecycleState::Failed(_)));
         assert_eq!(state.status(), StartupStatus::Unavailable);
+    }
+
+    #[test]
+    fn setup_capability_is_rust_owned_and_narrower_than_unavailable_status() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            lifecycle.lock().state =
+                LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable);
+        }
+        assert_eq!(lifecycle.status(), StartupStatus::Unavailable);
+        assert!(!lifecycle.first_time_setup_available());
+
+        lifecycle.lock().state =
+            LifecycleState::Failed(CoarseStartupFailure::FirstTimeSetupAvailable);
+        assert_eq!(lifecycle.status(), StartupStatus::Unavailable);
+        assert!(lifecycle.first_time_setup_available());
+
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_preparation =
+                MigrationPreparationState::CustodyInterruptedBeforeExposure;
+            inner.migration_work_resolved = false;
+        }
+        assert_eq!(
+            lifecycle.status(),
+            StartupStatus::MigrationRecoveryKeyCustodyAwaitingRetry
+        );
+        assert!(!lifecycle.first_time_setup_available());
     }
 
     #[test]
@@ -6090,7 +6288,7 @@ mod tests {
         let lifecycle = ApplicationLifecycle::new();
         {
             let mut inner = lifecycle.lock();
-            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable);
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::FirstTimeSetupAvailable);
             inner.startup_work_resolved = true;
         }
         lifecycle
@@ -6273,7 +6471,7 @@ mod tests {
             .0;
         assert_eq!(
             startup_status,
-            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
+            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
         );
 
         let request_result = SOURCE
@@ -7833,6 +8031,142 @@ mod tests {
         };
         assert_eq!(owner, TestOwner(7));
         assert!(matches!(escrow, CustodyDispatchEscrow::TakenByMainThread));
+    }
+
+    #[test]
+    fn pre_exposure_custody_states_map_only_to_retryable_coarse_status() {
+        let lifecycle = ApplicationLifecycle::new();
+        lifecycle.lock().state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+
+        for state in [
+            MigrationPreparationState::CustodyPrepared,
+            MigrationPreparationState::CustodyDispatchPending,
+            MigrationPreparationState::CustodyRunning,
+        ] {
+            lifecycle.lock().migration_preparation = state;
+            assert_eq!(
+                lifecycle.status(),
+                StartupStatus::MigrationRecoveryKeyCustodyInProgress
+            );
+            assert_ne!(lifecycle.status(), StartupStatus::Unavailable);
+            assert_ne!(lifecycle.status(), StartupStatus::Ready);
+            assert!(!lifecycle.first_time_setup_available());
+        }
+
+        for state in [
+            MigrationPreparationState::CustodyInterruptedBeforeExposure,
+            MigrationPreparationState::CustodyUnavailableBeforeExposure,
+        ] {
+            lifecycle.lock().migration_preparation = state;
+            assert_eq!(
+                lifecycle.status(),
+                StartupStatus::MigrationRecoveryKeyCustodyAwaitingRetry
+            );
+            assert_ne!(lifecycle.status(), StartupStatus::Unavailable);
+            assert_ne!(lifecycle.status(), StartupStatus::Ready);
+            assert!(!lifecycle.first_time_setup_available());
+        }
+
+        lifecycle.lock().migration_preparation = MigrationPreparationState::CustodyTerminalFailure;
+        assert_eq!(lifecycle.status(), StartupStatus::Unavailable);
+        assert_ne!(
+            lifecycle.status(),
+            StartupStatus::MigrationRecoveryKeyCustodyAwaitingRetry
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn custody_retry_request_is_single_outstanding_and_shutdown_guarded() {
+        let lifecycle = ApplicationLifecycle::new();
+        let (sender, receiver) = mpsc::channel();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.migration_control = Some(sender);
+            inner.migration_preparation =
+                MigrationPreparationState::CustodyInterruptedBeforeExposure;
+        }
+
+        assert_eq!(
+            lifecycle.request_migration_recovery_key_custody_retry(),
+            MigrationRecoveryKeyCustodyRetryRequestResult::Started
+        );
+        assert_eq!(
+            lifecycle.request_migration_recovery_key_custody_retry(),
+            MigrationRecoveryKeyCustodyRetryRequestResult::NotAllowed
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            MigrationWorkerCommand::RetryCustodyBeforeExposure
+        ));
+
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_custody_retry_outstanding = false;
+            inner.migration_preparation =
+                MigrationPreparationState::CustodyUnavailableBeforeExposure;
+        }
+        assert_eq!(
+            lifecycle.request_migration_recovery_key_custody_retry(),
+            MigrationRecoveryKeyCustodyRetryRequestResult::Started
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            MigrationWorkerCommand::RetryCustodyBeforeExposure
+        ));
+
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_custody_retry_outstanding = false;
+            inner.migration_preparation =
+                MigrationPreparationState::CustodyInterruptedBeforeExposure;
+            inner.migration_shutdown_requested = true;
+        }
+        assert_eq!(
+            lifecycle.request_migration_recovery_key_custody_retry(),
+            MigrationRecoveryKeyCustodyRetryRequestResult::NotAllowed
+        );
+    }
+
+    #[test]
+    fn custody_retry_reuses_only_the_retained_prepared_owner() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let retry_dispatch = SOURCE
+            .split_once("Ok(MigrationWorkerCommand::RetryCustodyBeforeExposure) =>")
+            .unwrap()
+            .1
+            .split_once("Ok(MigrationWorkerCommand::SelectFirstRecoveryVolume)")
+            .unwrap()
+            .0;
+        assert!(
+            retry_dispatch.contains("MigrationWorkerParkedOwnership::Interrupted(interruption)")
+        );
+        assert!(retry_dispatch.contains("interruption.retry()"));
+        assert!(
+            retry_dispatch
+                .contains("MigrationWorkerParkedOwnership::Unavailable(prepared) => prepared")
+        );
+        assert!(retry_dispatch.contains("_ => std::process::abort()"));
+        assert!(retry_dispatch.contains("self.run_custody_dispatch("));
+        assert!(
+            retry_dispatch
+                .contains("migration_preparation = MigrationPreparationState::CustodyPrepared")
+        );
+        for forbidden in [
+            "prepare_authorized_production_database_migration",
+            "stage_encrypted_production_database_migration_backup",
+            "verify_production_database_migration_recovery_envelope",
+            "prepare_migration_recovery_key_custody",
+            "request_native_production_database_migration_confirmation",
+            "generate_",
+            "seal",
+        ] {
+            assert!(
+                !retry_dispatch.contains(forbidden),
+                "retry performed {forbidden}"
+            );
+        }
     }
 
     #[test]

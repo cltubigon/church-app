@@ -121,9 +121,11 @@ pub fn run() {
     scoped_panic_output_suppression::install_before_worker_threads();
 
     use application_lifecycle::{
-        ApplicationLifecycle, lifecycle_from_app, migration_initiation_available,
-        request_first_time_setup, request_post_recovery_migration_execution_confirmation,
-        request_production_database_migration, startup_status,
+        ApplicationLifecycle, first_time_setup_available, lifecycle_from_app,
+        migration_initiation_available, request_first_time_setup,
+        request_post_recovery_migration_execution_confirmation,
+        request_production_database_migration, retry_migration_recovery_key_custody,
+        startup_status,
     };
 
     #[cfg(windows)]
@@ -152,10 +154,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health_check,
             startup_status,
+            first_time_setup_available,
             request_first_time_setup,
             migration_initiation_available,
             request_production_database_migration,
             request_post_recovery_migration_execution_confirmation,
+            retry_migration_recovery_key_custody,
             business_features_available,
             business_create_request,
             business_list_requests,
@@ -178,10 +182,12 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         health_check,
         startup_status,
+        first_time_setup_available,
         request_first_time_setup,
         migration_initiation_available,
         request_production_database_migration,
-        request_post_recovery_migration_execution_confirmation
+        request_post_recovery_migration_execution_confirmation,
+        retry_migration_recovery_key_custody
     ]);
 
     builder

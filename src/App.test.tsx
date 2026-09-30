@@ -127,6 +127,10 @@ describe("application foundation", () => {
     ["stopping", "The application is stopping."],
     ["shutdownIncomplete", "The application could not complete shutdown."],
     [
+      "migrationRecoveryKeyCustodyInProgress",
+      "The protected recovery-key ceremony is in progress.",
+    ],
+    [
       "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
       "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
     ],
@@ -165,16 +169,74 @@ describe("application foundation", () => {
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
   });
 
-  it("offers one explicit first-time setup action only on the unavailable surface", async () => {
-    mockedInvoke.mockResolvedValue("unavailable");
+  it("offers one explicit first-time setup action only when Rust reports setup eligibility", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "first_time_setup_available") return Promise.resolve(true);
+      return Promise.reject(new Error("unexpected command"));
+    });
     renderApp();
 
     expect(await screen.findByText("The application is unavailable.")).toBeInTheDocument();
     expect(
-      screen.getByText("Use this only to set up Church App for the first time."),
+      await screen.findByText("Use this only to set up Church App for the first time."),
     ).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Set up Church App" })).toHaveLength(1);
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("does not infer first-time setup eligibility from generic unavailable", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "first_time_setup_available") return Promise.resolve(false);
+      return Promise.reject(new Error("unexpected command"));
+    });
+    renderApp();
+
+    expect(await screen.findByText("The application is unavailable.")).toBeInTheDocument();
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith("first_time_setup_available"));
+    expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
+  });
+
+  it("renders the pre-exposure custody retry without setup or business workflows", async () => {
+    mockedInvoke.mockImplementation((command) =>
+      command === "startup_status"
+        ? Promise.resolve("migrationRecoveryKeyCustodyAwaitingRetry")
+        : Promise.reject(new Error("unexpected command")),
+    );
+    renderApp();
+
+    expect(
+      await screen.findByText(
+        "Database upgrade preparation was paused before the recovery key was shown.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume recovery-key ceremony" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Staff areas" })).not.toBeInTheDocument();
+  });
+
+  it("requests custody retry only through the argument-free command and remains retryable", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") {
+        return Promise.resolve("migrationRecoveryKeyCustodyAwaitingRetry");
+      }
+      if (command === "retry_migration_recovery_key_custody") return Promise.resolve("started");
+      return Promise.reject(new Error("unexpected command"));
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Resume recovery-key ceremony" }));
+
+    expect(
+      mockedInvoke.mock.calls.filter(
+        ([command]) => command === "retry_migration_recovery_key_custody",
+      ),
+    ).toEqual([["retry_migration_recovery_key_custody"]]);
+    expect(
+      await screen.findByRole("button", { name: "Resume recovery-key ceremony" }),
+    ).toBeEnabled();
   });
 
   it("offers migration confirmation only in the exact post-recovery awaiting state", async () => {
@@ -311,6 +373,7 @@ describe("application foundation", () => {
   it("requests setup once without arguments and promptly re-checks startup status", async () => {
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "first_time_setup_available") return Promise.resolve(true);
       if (command === "request_first_time_setup") return Promise.resolve("started");
       return Promise.reject(new Error("unexpected command"));
     });
@@ -334,6 +397,7 @@ describe("application foundation", () => {
     let finishSetup: ((result: "started") => void) | undefined;
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "first_time_setup_available") return Promise.resolve(true);
       if (command === "request_first_time_setup") {
         return new Promise((resolve) => {
           finishSetup = resolve;
@@ -360,6 +424,7 @@ describe("application foundation", () => {
     async (result) => {
       mockedInvoke.mockImplementation((command) => {
         if (command === "startup_status") return Promise.resolve("unavailable");
+        if (command === "first_time_setup_available") return Promise.resolve(true);
         if (command === "request_first_time_setup") return Promise.resolve(result);
         return Promise.reject(new Error("unexpected command"));
       });
@@ -384,6 +449,7 @@ describe("application foundation", () => {
         startupReadCount += 1;
         return Promise.resolve(startupReadCount === 1 ? "unavailable" : "setupRestartRequired");
       }
+      if (command === "first_time_setup_available") return Promise.resolve(true);
       if (command === "request_first_time_setup") return Promise.resolve("restartRequired");
       return Promise.reject(new Error("unexpected command"));
     });
@@ -398,6 +464,7 @@ describe("application foundation", () => {
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
     expect(mockedInvoke.mock.calls.map(([command]) => command)).toEqual([
       "startup_status",
+      "first_time_setup_available",
       "request_first_time_setup",
       "startup_status",
     ]);
@@ -410,6 +477,7 @@ describe("application foundation", () => {
   ])("shows only a coarse setup failure for %s", async (_case, getSetupOutcome) => {
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "first_time_setup_available") return Promise.resolve(true);
       if (command === "request_first_time_setup") return getSetupOutcome();
       return Promise.reject(new Error("unexpected command"));
     });

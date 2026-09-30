@@ -9,11 +9,13 @@ import {
 import { HealthPanel } from "./components/HealthPanel";
 import { getBusinessFeaturesAvailable } from "./lib/business";
 import {
+  getFirstTimeSetupAvailable,
   getMigrationInitiationAvailable,
   getStartupStatus,
   requestFirstTimeSetup,
   requestProductionDatabaseMigration,
   requestPostRecoveryMigrationExecutionConfirmation,
+  retryMigrationRecoveryKeyCustody,
   type StartupStatus,
 } from "./lib/startup";
 
@@ -51,9 +53,13 @@ function UnknownRoute() {
 }
 
 interface StartupBoundaryProps {
+  custodyRetryError: string | null;
+  custodyRetryPending: boolean;
+  firstTimeSetupAvailable: boolean;
   migrationConfirmationError: string | null;
   migrationConfirmationPending: boolean;
   onRequestMigrationConfirmation: () => void;
+  onRetryCustody: () => void;
   onRequestSetup: () => void;
   setupError: string | null;
   setupRequestPending: boolean;
@@ -61,9 +67,13 @@ interface StartupBoundaryProps {
 }
 
 function StartupBoundary({
+  custodyRetryError,
+  custodyRetryPending,
+  firstTimeSetupAvailable,
   migrationConfirmationError,
   migrationConfirmationPending,
   onRequestMigrationConfirmation,
+  onRetryCustody,
   onRequestSetup,
   setupError,
   setupRequestPending,
@@ -76,6 +86,9 @@ function StartupBoundary({
     setupRestartRequired: "First-time setup is complete. Restart the application to continue.",
     stopping: "The application is stopping.",
     shutdownIncomplete: "The application could not complete shutdown.",
+    migrationRecoveryKeyCustodyInProgress: "The protected recovery-key ceremony is in progress.",
+    migrationRecoveryKeyCustodyAwaitingRetry:
+      "Database upgrade preparation was paused before the recovery key was shown.",
     twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution:
       "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
     migrationExecutionConfirmedAwaitingWritablePreparation:
@@ -92,13 +105,24 @@ function StartupBoundary({
       <section aria-live="polite" className={styles.panel}>
         <h1>Church App</h1>
         <p>{content}</p>
-        {status === "unavailable" && (
+        {status === "unavailable" && firstTimeSetupAvailable && (
           <div aria-busy={setupRequestPending} className={styles.setupAction}>
             <p>Use this only to set up Church App for the first time.</p>
             <button disabled={setupRequestPending} onClick={onRequestSetup} type="button">
               {setupRequestPending ? "Starting first-time setup…" : "Set up Church App"}
             </button>
             {setupError !== null && <p role="alert">{setupError}</p>}
+          </div>
+        )}
+        {status === "migrationRecoveryKeyCustodyAwaitingRetry" && (
+          <div aria-busy={custodyRetryPending} className={styles.setupAction}>
+            <p>The protected recovery-key ceremony can be resumed without regenerating it.</p>
+            <button disabled={custodyRetryPending} onClick={onRetryCustody} type="button">
+              {custodyRetryPending
+                ? "Opening recovery-key ceremony…"
+                : "Resume recovery-key ceremony"}
+            </button>
+            {custodyRetryError !== null && <p role="alert">{custodyRetryError}</p>}
           </div>
         )}
         {status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" && (
@@ -128,6 +152,9 @@ export function App() {
   const [statusRefreshKey, setStatusRefreshKey] = useState(0);
   const [setupRequestPending, setSetupRequestPending] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const [firstTimeSetupAvailable, setFirstTimeSetupAvailable] = useState(false);
+  const [custodyRetryPending, setCustodyRetryPending] = useState(false);
+  const [custodyRetryError, setCustodyRetryError] = useState<string | null>(null);
   const [migrationConfirmationPending, setMigrationConfirmationPending] = useState(false);
   const [migrationConfirmationError, setMigrationConfirmationError] = useState<string | null>(null);
   const [businessFeaturesAvailable, setBusinessFeaturesAvailable] = useState<boolean | null>(null);
@@ -150,6 +177,8 @@ export function App() {
         status === "starting" ||
         status === "ready" ||
         status === "setupInProgress" ||
+        status === "migrationRecoveryKeyCustodyInProgress" ||
+        status === "migrationRecoveryKeyCustodyAwaitingRetry" ||
         status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" ||
         status === "writableV1MigrationPreparedAwaitingTransaction" ||
         status === "stopping"
@@ -167,9 +196,28 @@ export function App() {
 
   useEffect(() => {
     if (startupStatus !== "unavailable") setSetupError(null);
+    if (startupStatus !== "migrationRecoveryKeyCustodyAwaitingRetry") {
+      setCustodyRetryError(null);
+    }
     if (startupStatus !== "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution") {
       setMigrationConfirmationError(null);
     }
+  }, [startupStatus]);
+
+  useEffect(() => {
+    let active = true;
+    if (startupStatus !== "unavailable") {
+      setFirstTimeSetupAvailable(false);
+      return () => {
+        active = false;
+      };
+    }
+    void getFirstTimeSetupAvailable().then((available) => {
+      if (active) setFirstTimeSetupAvailable(available);
+    });
+    return () => {
+      active = false;
+    };
   }, [startupStatus]);
 
   useEffect(() => {
@@ -225,6 +273,19 @@ export function App() {
     setMigrationConfirmationPending(false);
   }
 
+  async function retryCustody() {
+    if (custodyRetryPending) return;
+
+    setCustodyRetryPending(true);
+    setCustodyRetryError(null);
+    const result = await retryMigrationRecoveryKeyCustody();
+    if (result === "unavailable") {
+      setCustodyRetryError("The recovery-key ceremony could not be opened.");
+    }
+    setStatusRefreshKey((key) => key + 1);
+    setCustodyRetryPending(false);
+  }
+
   async function requestMigrationInitiation() {
     if (migrationInitiationPending) return;
 
@@ -241,9 +302,13 @@ export function App() {
   if (startupStatus !== "ready") {
     return (
       <StartupBoundary
+        custodyRetryError={custodyRetryError}
+        custodyRetryPending={custodyRetryPending}
+        firstTimeSetupAvailable={firstTimeSetupAvailable}
         migrationConfirmationError={migrationConfirmationError}
         migrationConfirmationPending={migrationConfirmationPending}
         onRequestMigrationConfirmation={() => void requestMigrationConfirmation()}
+        onRetryCustody={() => void retryCustody()}
         onRequestSetup={() => void requestSetup()}
         setupError={setupError}
         setupRequestPending={setupRequestPending}

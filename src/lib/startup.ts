@@ -8,6 +8,8 @@ export type StartupStatus =
   | "setupRestartRequired"
   | "stopping"
   | "shutdownIncomplete"
+  | "migrationRecoveryKeyCustodyInProgress"
+  | "migrationRecoveryKeyCustodyAwaitingRetry"
   | "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
   | "migrationExecutionConfirmedAwaitingWritablePreparation"
   | "writableV1MigrationPreparedAwaitingTransaction"
@@ -30,6 +32,8 @@ const startupStatuses = new Set<StartupStatus>([
   "setupRestartRequired",
   "stopping",
   "shutdownIncomplete",
+  "migrationRecoveryKeyCustodyInProgress",
+  "migrationRecoveryKeyCustodyAwaitingRetry",
   "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
   "migrationExecutionConfirmedAwaitingWritablePreparation",
   "writableV1MigrationPreparedAwaitingTransaction",
@@ -44,6 +48,11 @@ export type PostRecoveryMigrationExecutionConfirmationRequestResult =
 
 export type ProductionDatabaseMigrationRequestResult = "started" | "notAllowed" | "unavailable";
 
+export type MigrationRecoveryKeyCustodyRetryRequestResult =
+  | "started"
+  | "notAllowed"
+  | "unavailable";
+
 const postRecoveryMigrationExecutionConfirmationRequestResults =
   new Set<PostRecoveryMigrationExecutionConfirmationRequestResult>([
     "started",
@@ -54,6 +63,9 @@ const postRecoveryMigrationExecutionConfirmationRequestResults =
 const productionDatabaseMigrationRequestResults = new Set<ProductionDatabaseMigrationRequestResult>(
   ["started", "notAllowed", "unavailable"],
 );
+
+const migrationRecoveryKeyCustodyRetryRequestResults =
+  new Set<MigrationRecoveryKeyCustodyRetryRequestResult>(["started", "notAllowed", "unavailable"]);
 
 const firstTimeSetupRequestResults = new Set<FirstTimeSetupRequestResult>([
   "started",
@@ -83,6 +95,14 @@ export async function getMigrationInitiationAvailable(): Promise<boolean> {
   }
 }
 
+export async function getFirstTimeSetupAvailable(): Promise<boolean> {
+  try {
+    return (await invoke<unknown>("first_time_setup_available")) === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function requestProductionDatabaseMigration(): Promise<ProductionDatabaseMigrationRequestResult> {
   try {
     const result = await invoke<unknown>("request_production_database_migration");
@@ -103,6 +123,20 @@ export async function requestFirstTimeSetup(): Promise<FirstTimeSetupRequestResu
     return typeof result === "string" &&
       firstTimeSetupRequestResults.has(result as FirstTimeSetupRequestResult)
       ? (result as FirstTimeSetupRequestResult)
+      : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export async function retryMigrationRecoveryKeyCustody(): Promise<MigrationRecoveryKeyCustodyRetryRequestResult> {
+  try {
+    const result = await invoke<unknown>("retry_migration_recovery_key_custody");
+    return typeof result === "string" &&
+      migrationRecoveryKeyCustodyRetryRequestResults.has(
+        result as MigrationRecoveryKeyCustodyRetryRequestResult,
+      )
+      ? (result as MigrationRecoveryKeyCustodyRetryRequestResult)
       : "unavailable";
   } catch {
     return "unavailable";

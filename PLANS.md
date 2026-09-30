@@ -606,7 +606,15 @@ Successful discovery still performs fresh Exact-V1 restart classification, evide
 
 This bridge changes no migration semantics. Migration exclusivity, full-integrity validation, encrypted backup staging, custody, both independently verified recovery sets, final aggregate Layer D verification, fresh post-recovery execution confirmation, writable V1 preparation, fixed transactional V1-to-V2 execution, and restart-required completion remain unchanged. The native initial confirmation and complete migration/recovery ceremony still require manual Windows validation; no migration has been run against a real parish database.
 
-## 40. Links
+## 40. Retryable pre-exposure recovery-key custody
+
+The Windows manual test found that cancelling the custody Intro screen before disclosure preserved the exact prepared owner but fell through to generic `Unavailable`, where the renderer misleadingly offered first-time setup. The lifecycle now maps both pre-exposure interruption and native unavailability to `MigrationRecoveryKeyCustodyAwaitingRetry`. React shows one `Resume recovery-key ceremony` action and no setup or parish workflow surface.
+
+The new argument-free retry request is accepted only while the migration worker parks exact `Interrupted` or pre-exposure `Unavailable` ownership, shutdown has not won, and no retry request is already outstanding. The worker reuses the same prepared authority through the existing main-thread custody dispatch. It does not rerun confirmation, preparation, backup staging, envelope verification/sealing, key generation, or migration-source selection. Repeated pre-exposure cancellation remains retryable; post-disclosure outcomes remain terminal and unchanged. Migration exclusivity stays held until canonical resolution, and no restart persistence or reconstruction is added.
+
+First-time setup is now independently gated by the Rust-owned canonical `NeverInitialized` startup failure. Generic `Unavailable` no longer implies setup capability, and the setup request itself rejects every other failed or migration-preparation state.
+
+## 41. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)
