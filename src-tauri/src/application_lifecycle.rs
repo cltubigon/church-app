@@ -1686,7 +1686,7 @@ impl ApplicationLifecycle {
                     .retain_discovery_close_failure(failure);
             }
         }
-        if self.may_exit()
+        if self.migration_shutdown_requested_and_may_exit()
             && let Some(app) = app
         {
             app.exit(0);
@@ -1791,7 +1791,7 @@ impl ApplicationLifecycle {
             }
         }
         drop(inner);
-        if self.may_exit()
+        if self.migration_shutdown_requested_and_may_exit()
             && let Some(app) = app
         {
             app.exit(0);
@@ -1816,7 +1816,7 @@ impl ApplicationLifecycle {
             }
         }
         drop(inner);
-        if self.may_exit()
+        if self.migration_shutdown_requested_and_may_exit()
             && let Some(app) = app
         {
             app.exit(0);
@@ -1946,7 +1946,7 @@ impl ApplicationLifecycle {
         );
         if let ProductionDatabaseMigrationRevalidationCompletion::Revoked(source) = completion {
             self.complete_migration_source_close(source.close(), app);
-        } else if self.may_exit()
+        } else if self.migration_shutdown_requested_and_may_exit()
             && let Some(app) = app
         {
             app.exit(0);
@@ -3456,7 +3456,7 @@ impl ApplicationLifecycle {
                 inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
             }
         }
-        if self.may_exit()
+        if self.migration_shutdown_requested_and_may_exit()
             && let Some(app) = app
         {
             app.exit(0);
@@ -3483,7 +3483,7 @@ impl ApplicationLifecycle {
                 }
             }
         }
-        if self.may_exit()
+        if self.migration_shutdown_requested_and_may_exit()
             && let Some(app) = app
         {
             app.exit(0);
@@ -3721,6 +3721,11 @@ impl ApplicationLifecycle {
             && inner.migration_work_resolved
             && matches!(inner.state, LifecycleState::Failed(_))
             && inner.migration_confirmation.ownership_resolved_for_exit()
+    }
+
+    fn migration_shutdown_requested_and_may_exit(&self) -> bool {
+        let shutdown_requested = self.lock().migration_shutdown_requested;
+        shutdown_requested && self.may_exit()
     }
 
     pub(crate) fn join_workers(&self) {
@@ -6215,6 +6220,90 @@ mod tests {
             StartupStatus::MigrationRecoveryKeyCustodyAwaitingRetry
         );
         assert!(!lifecycle.first_time_setup_available());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolved_migration_preparation_failure_stays_open_and_unavailable_without_shutdown() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.startup_work_resolved = true;
+            inner.close_work_resolved = true;
+            inner.setup_work_resolved = true;
+            inner.migration_work_resolved = false;
+            inner.migration_preparation = MigrationPreparationState::Preparing;
+        }
+
+        lifecycle.finish_migration_preparation_worker(None);
+
+        let inner = lifecycle.lock();
+        assert!(inner.migration_work_resolved);
+        assert_eq!(
+            inner.migration_preparation,
+            MigrationPreparationState::Inactive
+        );
+        assert!(inner.migration_control.is_none());
+        drop(inner);
+        assert!(lifecycle.may_exit());
+        assert!(!lifecycle.migration_shutdown_requested_and_may_exit());
+        assert_eq!(lifecycle.status(), StartupStatus::Unavailable);
+        assert!(!lifecycle.first_time_setup_available());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolved_migration_work_allows_exit_only_after_requested_shutdown_fully_drains() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.startup_work_resolved = true;
+            inner.close_work_resolved = false;
+            inner.setup_work_resolved = true;
+            inner.migration_work_resolved = false;
+            inner.migration_preparation = MigrationPreparationState::CloseRetryRequired;
+            inner.migration_shutdown_requested = true;
+        }
+
+        assert!(!lifecycle.migration_shutdown_requested_and_may_exit());
+        lifecycle.finish_migration_preparation_worker(None);
+        assert!(lifecycle.lock().migration_work_resolved);
+        assert!(!lifecycle.migration_shutdown_requested_and_may_exit());
+
+        lifecycle.lock().close_work_resolved = true;
+        assert!(lifecycle.may_exit());
+        assert!(lifecycle.migration_shutdown_requested_and_may_exit());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_completion_exit_contract_requires_shutdown_intent_in_addition_to_safety() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let completion = SOURCE
+            .split_once("fn finish_migration_preparation_worker")
+            .unwrap()
+            .1
+            .split_once("fn complete_migration_source_close")
+            .unwrap()
+            .0;
+        assert!(completion.contains("migration_shutdown_requested_and_may_exit"));
+        assert!(!completion.contains("if self.may_exit()"));
+
+        let gate = SOURCE
+            .split_once("fn migration_shutdown_requested_and_may_exit")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn join_workers")
+            .unwrap()
+            .0;
+        assert!(gate.contains("migration_shutdown_requested"));
+        assert!(gate.contains("self.may_exit()"));
+        assert!(
+            gate.find("migration_shutdown_requested").unwrap()
+                < gate.find("self.may_exit()").unwrap()
+        );
     }
 
     #[test]

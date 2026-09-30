@@ -614,7 +614,15 @@ The new argument-free retry request is accepted only while the migration worker 
 
 First-time setup is now independently gated by the Rust-owned canonical `NeverInitialized` startup failure. Generic `Unavailable` no longer implies setup capability, and the setup request itself rejects every other failed or migration-preparation state.
 
-## 41. Links
+## 41. Migration-preparation failure process lifetime
+
+Real Windows testing exposed a lifecycle defect after the native initial migration confirmation: a fail-closed preparation error could resolve all privileged migration ownership, make `may_exit()` true, and cause the migration completion path to initiate `app.exit(0)` even though the user had not requested shutdown. The completion path now treats `may_exit()` only as a safety predicate. Migration resolution can initiate process exit only when the existing canonical migration shutdown intent is also recorded.
+
+An ordinary resolved preparation failure leaves Church App running in the existing coarse `Unavailable` state. The independently Rust-owned first-time-setup capability remains false, so the shell exposes neither `Set up Church App` nor an immediate migration retry. A genuine close request still records shutdown intent, waits for all startup, setup, connection, confirmation, migration, and exclusivity ownership to resolve, and exits once `may_exit()` becomes true.
+
+The observed existing `production-database-migration-backup.stage` conflict remains fail closed under the canonical create-new policy. This change adds no deletion, overwrite, truncation, rename, adoption, resume, inspection-as-complete, repair, or automatic retry behavior. It does not establish that the full migration ceremony passes manual Windows validation.
+
+## 42. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)

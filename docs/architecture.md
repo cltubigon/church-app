@@ -655,6 +655,10 @@ When the modal returns `Confirmed` and shutdown has not won, Rust consumes the f
 
 This boundary itself performs no database open, key recovery, SQL, transaction, schema or metadata mutation, replacement, cleanup, restore, or artifact mutation. The bounded writable-preparation boundary below is separately gated.
 
+## Migration resolution and shutdown intent
+
+Migration-worker completion and source-close completion resolve only lifecycle and ownership accounting. They do not create shutdown intent. Their process-exit boundary requires both the canonical `migration_shutdown_requested` state and the existing conjunctive `may_exit()` safety predicate. Consequently, ordinary fail-closed preparation resolution leaves the process running in coarse `Unavailable`, while an explicit close still drains every retained owner and exits once the same safety predicate becomes true. The create-new migration-stage policy is unchanged; an existing fixed stage remains a terminal preparation conflict and is not deleted, overwritten, adopted, resumed, or repaired.
+
 ## Writable V1 migration-preparation boundary
 
 Exact confirmed ownership is consumed once into the preparation transition. The retained final proof is freshly revalidated, the existing generation-bound key loader supplies execution-only key authority, and the retained read-only SQLite source is detached and closed before any writable open. Ambiguous close retains the canonical close-only owner; only close retry is available, and writable access cannot coexist with that unresolved ownership.
