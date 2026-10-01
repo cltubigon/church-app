@@ -37,7 +37,8 @@ use super::{
     RetainedVolumeSinglePhysicalDeviceObservation, RetainedVolumeTopologyError,
     observe_retained_volume_single_physical_device,
     windows_external_recovery_device_eligibility::{
-        PhysicalDeviceSeparationError, RecoveryDeviceSeparatedFromProductionStorage,
+        PhysicalDeviceSeparationError, RecoveryDeviceEligibilityError,
+        RecoveryDeviceSeparatedFromProductionStorage,
         RetainedExternalDisconnectableRecoveryDeviceObservation,
         TwoRecoveryDevicesSeparatedFromProductionStorage,
         observe_retained_external_disconnectable_recovery_device,
@@ -256,6 +257,8 @@ pub(super) enum RetainedEligibleNtfsRecoveryVolumeRootError {
     RootObservationUnavailable,
     InvalidOrUnsupportedRoot,
     UnsupportedFilesystem,
+    TopologyIneligible,
+    UsbHotplugIneligible,
     EligibilityUnavailableOrChanged,
 }
 
@@ -265,6 +268,8 @@ impl fmt::Debug for RetainedEligibleNtfsRecoveryVolumeRootError {
             Self::RootObservationUnavailable => "RootObservationUnavailable",
             Self::InvalidOrUnsupportedRoot => "InvalidOrUnsupportedRoot",
             Self::UnsupportedFilesystem => "UnsupportedFilesystem",
+            Self::TopologyIneligible => "TopologyIneligible",
+            Self::UsbHotplugIneligible => "UsbHotplugIneligible",
             Self::EligibilityUnavailableOrChanged => "EligibilityUnavailableOrChanged",
         })
     }
@@ -617,12 +622,12 @@ pub(super) fn retain_eligible_ntfs_recovery_volume_root(
     let selected_root = open_selected_root(selection)?;
     let initial_root = query_root_facts(&selected_root)?;
     observe_ntfs(&selected_root)?;
-    let topology = require_eligibility(observe_retained_volume_single_physical_device(
-        &selected_root,
-    ))?;
-    let eligible_device = require_eligibility(
-        observe_retained_external_disconnectable_recovery_device(topology),
-    )?;
+    let topology = observe_retained_volume_single_physical_device(&selected_root)
+        .map_err(|_| RetainedEligibleNtfsRecoveryVolumeRootError::TopologyIneligible)?;
+    let eligible_device = observe_retained_external_disconnectable_recovery_device(topology)
+        .map_err(|_: RecoveryDeviceEligibilityError| {
+            RetainedEligibleNtfsRecoveryVolumeRootError::UsbHotplugIneligible
+        })?;
     let confirmed_root = query_root_facts(&selected_root)?;
     require_same_root(&initial_root, &confirmed_root)?;
     observe_ntfs(&selected_root)?;
@@ -668,13 +673,73 @@ pub(super) fn separate_recovery_volume_root_from_production_storage(
     })
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum FirstRecoveryVolumePreparationError {
+    VolumeRootInvalidOrUnavailable,
+    FilesystemIneligible,
+    TopologyIneligible,
+    UsbHotplugIneligible,
+    ProductionStorageNotSeparated,
+}
+
+impl fmt::Debug for FirstRecoveryVolumePreparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::VolumeRootInvalidOrUnavailable => "VolumeRootInvalidOrUnavailable",
+            Self::FilesystemIneligible => "FilesystemIneligible",
+            Self::TopologyIneligible => "TopologyIneligible",
+            Self::UsbHotplugIneligible => "UsbHotplugIneligible",
+            Self::ProductionStorageNotSeparated => "ProductionStorageNotSeparated",
+        })
+    }
+}
+
+fn map_first_root_retention_error(
+    error: RetainedEligibleNtfsRecoveryVolumeRootError,
+) -> FirstRecoveryVolumePreparationError {
+    match error {
+        RetainedEligibleNtfsRecoveryVolumeRootError::RootObservationUnavailable
+        | RetainedEligibleNtfsRecoveryVolumeRootError::InvalidOrUnsupportedRoot => {
+            FirstRecoveryVolumePreparationError::VolumeRootInvalidOrUnavailable
+        }
+        RetainedEligibleNtfsRecoveryVolumeRootError::UnsupportedFilesystem => {
+            FirstRecoveryVolumePreparationError::FilesystemIneligible
+        }
+        RetainedEligibleNtfsRecoveryVolumeRootError::TopologyIneligible => {
+            FirstRecoveryVolumePreparationError::TopologyIneligible
+        }
+        RetainedEligibleNtfsRecoveryVolumeRootError::UsbHotplugIneligible
+        | RetainedEligibleNtfsRecoveryVolumeRootError::EligibilityUnavailableOrChanged => {
+            FirstRecoveryVolumePreparationError::UsbHotplugIneligible
+        }
+    }
+}
+
+fn map_first_root_separation_error(
+    error: RecoveryVolumeRootProductionSeparationError,
+) -> FirstRecoveryVolumePreparationError {
+    match error {
+        RecoveryVolumeRootProductionSeparationError::RecoveryRootUnavailableOrChanged => {
+            FirstRecoveryVolumePreparationError::VolumeRootInvalidOrUnavailable
+        }
+        RecoveryVolumeRootProductionSeparationError::SamePhysicalDevice => {
+            FirstRecoveryVolumePreparationError::ProductionStorageNotSeparated
+        }
+        RecoveryVolumeRootProductionSeparationError::ProductionObservationUnavailable
+        | RecoveryVolumeRootProductionSeparationError::TopologyChangedOrInconsistent => {
+            FirstRecoveryVolumePreparationError::TopologyIneligible
+        }
+    }
+}
+
 pub(crate) fn retain_and_separate_first_recovery_volume(
     production_topology: RetainedVolumeSinglePhysicalDeviceObservation,
     selection: NativeSelectedRecoveryVolumeRoot,
-) -> Result<RecoveryVolumeRootSeparatedFromProductionStorage, ()> {
-    let retained_root = retain_eligible_ntfs_recovery_volume_root(selection).map_err(|_| ())?;
+) -> Result<RecoveryVolumeRootSeparatedFromProductionStorage, FirstRecoveryVolumePreparationError> {
+    let retained_root = retain_eligible_ntfs_recovery_volume_root(selection)
+        .map_err(map_first_root_retention_error)?;
     separate_recovery_volume_root_from_production_storage(production_topology, retained_root)
-        .map_err(|_| ())
+        .map_err(map_first_root_separation_error)
 }
 
 pub(crate) fn retain_and_separate_second_recovery_volume(
@@ -876,6 +941,56 @@ mod tests {
         fn from_test_path(selected: PathBuf) -> Self {
             Self { selected }
         }
+    }
+
+    #[test]
+    fn first_volume_diagnostic_mapping_preserves_each_coarse_boundary() {
+        for (error, expected) in [
+            (
+                RetainedEligibleNtfsRecoveryVolumeRootError::RootObservationUnavailable,
+                FirstRecoveryVolumePreparationError::VolumeRootInvalidOrUnavailable,
+            ),
+            (
+                RetainedEligibleNtfsRecoveryVolumeRootError::InvalidOrUnsupportedRoot,
+                FirstRecoveryVolumePreparationError::VolumeRootInvalidOrUnavailable,
+            ),
+            (
+                RetainedEligibleNtfsRecoveryVolumeRootError::UnsupportedFilesystem,
+                FirstRecoveryVolumePreparationError::FilesystemIneligible,
+            ),
+            (
+                RetainedEligibleNtfsRecoveryVolumeRootError::TopologyIneligible,
+                FirstRecoveryVolumePreparationError::TopologyIneligible,
+            ),
+            (
+                RetainedEligibleNtfsRecoveryVolumeRootError::UsbHotplugIneligible,
+                FirstRecoveryVolumePreparationError::UsbHotplugIneligible,
+            ),
+        ] {
+            assert_eq!(map_first_root_retention_error(error), expected);
+        }
+
+        assert_eq!(
+            map_first_root_separation_error(
+                RecoveryVolumeRootProductionSeparationError::SamePhysicalDevice
+            ),
+            FirstRecoveryVolumePreparationError::ProductionStorageNotSeparated
+        );
+        for error in [
+            RecoveryVolumeRootProductionSeparationError::ProductionObservationUnavailable,
+            RecoveryVolumeRootProductionSeparationError::TopologyChangedOrInconsistent,
+        ] {
+            assert_eq!(
+                map_first_root_separation_error(error),
+                FirstRecoveryVolumePreparationError::TopologyIneligible
+            );
+        }
+        assert_eq!(
+            map_first_root_separation_error(
+                RecoveryVolumeRootProductionSeparationError::RecoveryRootUnavailableOrChanged
+            ),
+            FirstRecoveryVolumePreparationError::VolumeRootInvalidOrUnavailable
+        );
     }
 
     fn valid_root() -> [u16; VOLUME_GUID_ROOT_UNITS] {

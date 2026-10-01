@@ -41,7 +41,7 @@ pub(crate) use windows_retained_eligible_ntfs_recovery_volume_root::{
     FirstRecoverySetRecoveredKeyVerificationFailure,
     FirstRecoverySetRecoveredKeyVerificationOutcome,
     FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
-    FirstRecoverySetRecoveredKeyVerified,
+    FirstRecoverySetRecoveredKeyVerified, FirstRecoveryVolumePreparationError,
     MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
     NativeRecoveryVolumeSelectionOutcome, ProductionDatabaseV1ToV2MigrationCloseFailure,
     ProductionDatabaseV1ToV2MigrationOutcome,

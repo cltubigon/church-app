@@ -30,6 +30,7 @@ const STANDARD_DIALOG_CANCELLATION: HRESULT = HRESULT::from_win32(ERROR_CANCELLE
 pub(crate) enum NativeRecoveryVolumeSelectionOutcome {
     Selected(NativeSelectedRecoveryVolumeRoot),
     Cancelled,
+    InvalidOrUnavailableRoot,
     Unavailable,
 }
 
@@ -38,6 +39,9 @@ impl fmt::Debug for NativeRecoveryVolumeSelectionOutcome {
         formatter.write_str(match self {
             Self::Selected(_) => "NativeRecoveryVolumeSelectionOutcome::Selected([REDACTED])",
             Self::Cancelled => "NativeRecoveryVolumeSelectionOutcome::Cancelled",
+            Self::InvalidOrUnavailableRoot => {
+                "NativeRecoveryVolumeSelectionOutcome::InvalidOrUnavailableRoot"
+            }
             Self::Unavailable => "NativeRecoveryVolumeSelectionOutcome::Unavailable",
         })
     }
@@ -153,7 +157,7 @@ fn run_initialized_picker(parent: HWND) -> NativeRecoveryVolumeSelectionOutcome 
     // the immediately following exact mount-point-root query.
     let selected_units = unsafe { selected_path.0.as_wide() };
     let Some(volume_guid_root) = exact_volume_guid_root_for_selected_path(selected_units) else {
-        return NativeRecoveryVolumeSelectionOutcome::Unavailable;
+        return NativeRecoveryVolumeSelectionOutcome::InvalidOrUnavailableRoot;
     };
 
     NativeRecoveryVolumeSelectionOutcome::Selected(
@@ -345,6 +349,13 @@ mod tests {
         assert_eq!(
             format!("{:?}", NativeRecoveryVolumeSelectionOutcome::Unavailable),
             "NativeRecoveryVolumeSelectionOutcome::Unavailable"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                NativeRecoveryVolumeSelectionOutcome::InvalidOrUnavailableRoot
+            ),
+            "NativeRecoveryVolumeSelectionOutcome::InvalidOrUnavailableRoot"
         );
 
         let parent = include_str!("../windows_retained_eligible_ntfs_recovery_volume_root.rs");

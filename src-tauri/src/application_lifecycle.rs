@@ -133,7 +133,7 @@ use crate::{
         FirstRecoverySetRecoveredKeyVerificationFailure,
         FirstRecoverySetRecoveredKeyVerificationOutcome,
         FirstRecoverySetRecoveredKeyVerificationVerifierCloseFailure,
-        FirstRecoverySetRecoveredKeyVerified,
+        FirstRecoverySetRecoveredKeyVerified, FirstRecoveryVolumePreparationError,
         MigrationExecutionConfirmedTwoCompleteRecoverySetsVerifiedProductionDatabaseMigrationBackup,
         NativeRecoveryVolumeSelectionOutcome, ProductionDatabaseV1ToV2MigrationCloseFailure,
         ProductionDatabaseV1ToV2MigrationOutcome,
@@ -3796,6 +3796,70 @@ fn close_authorized_migration_for_shutdown(
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirstRecoveryVolumeSelectionDiagnosticOutcome {
+    PickerCancelledOrUnavailable,
+    VolumeRootInvalidOrUnavailable,
+    FilesystemIneligible,
+    TopologyIneligible,
+    UsbHotplugIneligible,
+    ProductionStorageNotSeparated,
+    FirstRecoveryVolumeAccepted,
+}
+
+#[cfg(windows)]
+impl FirstRecoveryVolumeSelectionDiagnosticOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PickerCancelledOrUnavailable => "PickerCancelledOrUnavailable",
+            Self::VolumeRootInvalidOrUnavailable => "VolumeRootInvalidOrUnavailable",
+            Self::FilesystemIneligible => "FilesystemIneligible",
+            Self::TopologyIneligible => "TopologyIneligible",
+            Self::UsbHotplugIneligible => "UsbHotplugIneligible",
+            Self::ProductionStorageNotSeparated => "ProductionStorageNotSeparated",
+            Self::FirstRecoveryVolumeAccepted => "FirstRecoveryVolumeAccepted",
+        }
+    }
+}
+
+#[cfg(windows)]
+impl From<FirstRecoveryVolumePreparationError> for FirstRecoveryVolumeSelectionDiagnosticOutcome {
+    fn from(error: FirstRecoveryVolumePreparationError) -> Self {
+        match error {
+            FirstRecoveryVolumePreparationError::VolumeRootInvalidOrUnavailable => {
+                Self::VolumeRootInvalidOrUnavailable
+            }
+            FirstRecoveryVolumePreparationError::FilesystemIneligible => Self::FilesystemIneligible,
+            FirstRecoveryVolumePreparationError::TopologyIneligible => Self::TopologyIneligible,
+            FirstRecoveryVolumePreparationError::UsbHotplugIneligible => Self::UsbHotplugIneligible,
+            FirstRecoveryVolumePreparationError::ProductionStorageNotSeparated => {
+                Self::ProductionStorageNotSeparated
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn first_recovery_volume_selection_diagnostic_line(
+    outcome: FirstRecoveryVolumeSelectionDiagnosticOutcome,
+) -> String {
+    format!(
+        r#"event="recovery_first_volume_selection" outcome="{}""#,
+        outcome.label()
+    )
+}
+
+#[cfg(windows)]
+fn emit_first_recovery_volume_selection_diagnostic(
+    outcome: FirstRecoveryVolumeSelectionDiagnosticOutcome,
+) {
+    eprintln!(
+        "{}",
+        first_recovery_volume_selection_diagnostic_line(outcome)
+    );
+}
+
+#[cfg(windows)]
 fn prepare_first_recovery_volume(
     source: RecoveryKeyCustodyVerifiedProductionDatabaseMigrationBackup,
     outcome: NativeRecoveryVolumeSelectionOutcome,
@@ -3804,18 +3868,38 @@ fn prepare_first_recovery_volume(
         NativeRecoveryVolumeSelectionOutcome::Selected(selection) => selection,
         NativeRecoveryVolumeSelectionOutcome::Cancelled
         | NativeRecoveryVolumeSelectionOutcome::Unavailable => {
+            emit_first_recovery_volume_selection_diagnostic(
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::PickerCancelledOrUnavailable,
+            );
+            return MigrationWorkerParkedOwnership::Verified(source);
+        }
+        NativeRecoveryVolumeSelectionOutcome::InvalidOrUnavailableRoot => {
+            emit_first_recovery_volume_selection_diagnostic(
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::VolumeRootInvalidOrUnavailable,
+            );
             return MigrationWorkerParkedOwnership::Verified(source);
         }
     };
     let production_topology = match source.observe_retained_production_single_physical_device() {
         Ok(production_topology) => production_topology,
-        Err(_) => return MigrationWorkerParkedOwnership::Verified(source),
+        Err(_) => {
+            emit_first_recovery_volume_selection_diagnostic(
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::TopologyIneligible,
+            );
+            return MigrationWorkerParkedOwnership::Verified(source);
+        }
     };
     match retain_and_separate_first_recovery_volume(production_topology, selection) {
         Ok(first_root) => {
+            emit_first_recovery_volume_selection_diagnostic(
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::FirstRecoveryVolumeAccepted,
+            );
             MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { source, first_root }
         }
-        Err(_) => MigrationWorkerParkedOwnership::Verified(source),
+        Err(error) => {
+            emit_first_recovery_volume_selection_diagnostic(error.into());
+            MigrationWorkerParkedOwnership::Verified(source)
+        }
     }
 }
 
@@ -3828,6 +3912,7 @@ fn prepare_second_recovery_volume(
     let selection = match outcome {
         NativeRecoveryVolumeSelectionOutcome::Selected(selection) => selection,
         NativeRecoveryVolumeSelectionOutcome::Cancelled
+        | NativeRecoveryVolumeSelectionOutcome::InvalidOrUnavailableRoot
         | NativeRecoveryVolumeSelectionOutcome::Unavailable => {
             return MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared {
                 source,
@@ -9172,6 +9257,123 @@ mod tests {
         assert!(!cancel_armed_first_recovery_volume_selection_dispatch(
             &taken
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_recovery_volume_diagnostic_is_fixed_complete_and_redacted() {
+        let cases = [
+            (
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::PickerCancelledOrUnavailable,
+                "PickerCancelledOrUnavailable",
+            ),
+            (
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::VolumeRootInvalidOrUnavailable,
+                "VolumeRootInvalidOrUnavailable",
+            ),
+            (
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::FilesystemIneligible,
+                "FilesystemIneligible",
+            ),
+            (
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::TopologyIneligible,
+                "TopologyIneligible",
+            ),
+            (
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::UsbHotplugIneligible,
+                "UsbHotplugIneligible",
+            ),
+            (
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::ProductionStorageNotSeparated,
+                "ProductionStorageNotSeparated",
+            ),
+            (
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::FirstRecoveryVolumeAccepted,
+                "FirstRecoveryVolumeAccepted",
+            ),
+        ];
+
+        for (outcome, label) in cases {
+            let line = first_recovery_volume_selection_diagnostic_line(outcome);
+            assert_eq!(
+                line,
+                format!(r#"event="recovery_first_volume_selection" outcome="{label}""#)
+            );
+            for forbidden in [
+                r"E:\",
+                "Volume{01234567",
+                "disk_number",
+                "device_number",
+                "native error",
+                "KEY-SYNTHETIC",
+                "migration_identifier",
+            ] {
+                assert!(!line.contains(forbidden));
+            }
+        }
+
+        for (error, expected) in [
+            (
+                FirstRecoveryVolumePreparationError::VolumeRootInvalidOrUnavailable,
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::VolumeRootInvalidOrUnavailable,
+            ),
+            (
+                FirstRecoveryVolumePreparationError::FilesystemIneligible,
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::FilesystemIneligible,
+            ),
+            (
+                FirstRecoveryVolumePreparationError::TopologyIneligible,
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::TopologyIneligible,
+            ),
+            (
+                FirstRecoveryVolumePreparationError::UsbHotplugIneligible,
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::UsbHotplugIneligible,
+            ),
+            (
+                FirstRecoveryVolumePreparationError::ProductionStorageNotSeparated,
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::ProductionStorageNotSeparated,
+            ),
+        ] {
+            assert_eq!(
+                FirstRecoveryVolumeSelectionDiagnosticOutcome::from(error),
+                expected
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_recovery_volume_diagnostic_preserves_ownership_and_stops_before_publication() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let preparation = SOURCE
+            .split_once("fn prepare_first_recovery_volume")
+            .unwrap()
+            .1
+            .split_once("fn prepare_second_recovery_volume")
+            .unwrap()
+            .0;
+
+        assert_eq!(
+            preparation
+                .matches("MigrationWorkerParkedOwnership::Verified(source)")
+                .count(),
+            4
+        );
+        assert!(preparation.contains(
+            "MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { source, first_root }"
+        ));
+        assert!(preparation.contains("FirstRecoveryVolumeAccepted"));
+        assert!(preparation.contains("PickerCancelledOrUnavailable"));
+        assert!(preparation.contains("VolumeRootInvalidOrUnavailable"));
+        for forbidden in [
+            "migration_work_resolved = true",
+            "drop(exclusivity)",
+            "publish_",
+            "prepare_second_recovery_volume(",
+            "create_recovery_set_directories",
+        ] {
+            assert!(!preparation.contains(forbidden));
+        }
     }
 
     #[cfg(windows)]
