@@ -190,6 +190,7 @@ pub(crate) enum StartupStatus {
     SetupRestartRequired,
     Stopping,
     ShutdownIncomplete,
+    MigrationPreparationInProgress,
     MigrationRecoveryKeyCustodyInProgress,
     MigrationRecoveryKeyCustodyAwaitingRetry,
     FirstRecoveryVolumeAcceptedAwaitingSecondDevice,
@@ -1361,6 +1362,9 @@ impl ApplicationLifecycle {
             inner.state.status()
         } else {
             match inner.migration_preparation {
+                MigrationPreparationState::Preparing => {
+                    StartupStatus::MigrationPreparationInProgress
+                }
                 MigrationPreparationState::CustodyPrepared
                 | MigrationPreparationState::CustodyDispatchPending
                 | MigrationPreparationState::CustodyRunning => {
@@ -6670,7 +6674,7 @@ mod tests {
             .0;
         assert_eq!(
             startup_status,
-            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    FirstRecoveryVolumeAcceptedAwaitingSecondDevice,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
+            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationPreparationInProgress,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    FirstRecoveryVolumeAcceptedAwaitingSecondDevice,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
         );
 
         let request_result = SOURCE
@@ -9630,6 +9634,32 @@ mod tests {
         );
         assert_ne!(lifecycle.status(), StartupStatus::Unavailable);
         assert!(!lifecycle.first_time_setup_available());
+    }
+
+    #[test]
+    fn active_migration_preparation_precedes_interrupted_startup_failure() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupInterrupted);
+            inner.migration_preparation = MigrationPreparationState::Preparing;
+            inner.migration_work_resolved = false;
+        }
+
+        assert_eq!(
+            lifecycle.status(),
+            StartupStatus::MigrationPreparationInProgress
+        );
+        assert_ne!(lifecycle.status(), StartupStatus::Unavailable);
+        assert_ne!(lifecycle.status(), StartupStatus::Ready);
+        assert!(!lifecycle.first_time_setup_available());
+
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_preparation = MigrationPreparationState::Inactive;
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable);
+        }
+        assert_eq!(lifecycle.status(), StartupStatus::Unavailable);
     }
 
     #[test]

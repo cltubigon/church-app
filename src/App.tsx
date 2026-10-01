@@ -93,6 +93,7 @@ function StartupBoundary({
     setupRestartRequired: "First-time setup is complete. Restart the application to continue.",
     stopping: "The application is stopping.",
     shutdownIncomplete: "The application could not complete shutdown.",
+    migrationPreparationInProgress: "The protected database upgrade is being prepared.",
     migrationRecoveryKeyCustodyInProgress: "The protected recovery-key ceremony is in progress.",
     migrationRecoveryKeyCustodyAwaitingRetry:
       "Database upgrade preparation was paused before the recovery key was shown.",
@@ -203,6 +204,7 @@ export function App() {
         status === "starting" ||
         status === "ready" ||
         status === "setupInProgress" ||
+        status === "migrationPreparationInProgress" ||
         status === "migrationRecoveryKeyCustodyInProgress" ||
         status === "migrationRecoveryKeyCustodyAwaitingRetry" ||
         status === "firstRecoveryVolumeAcceptedAwaitingSecondDevice" ||

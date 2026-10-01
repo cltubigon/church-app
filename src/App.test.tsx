@@ -126,6 +126,7 @@ describe("application foundation", () => {
     ["setupRestartRequired", "First-time setup is complete. Restart the application to continue."],
     ["stopping", "The application is stopping."],
     ["shutdownIncomplete", "The application could not complete shutdown."],
+    ["migrationPreparationInProgress", "The protected database upgrade is being prepared."],
     [
       "migrationRecoveryKeyCustodyInProgress",
       "The protected recovery-key ceremony is in progress.",
@@ -271,6 +272,54 @@ describe("application foundation", () => {
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("Migration completed");
     expect(document.body.textContent).not.toContain("Recovery complete");
+  });
+
+  it("keeps polling through migration preparation until first-volume acceptance is visible", async () => {
+    let startupReadCount = 0;
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") {
+        startupReadCount += 1;
+        return Promise.resolve(
+          startupReadCount === 1
+            ? "migrationPreparationInProgress"
+            : "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
+        );
+      }
+      return Promise.reject(new Error("unexpected command"));
+    });
+    renderApp();
+
+    expect(
+      await screen.findByText("The protected database upgrade is being prepared."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Staff areas" })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Migration completed");
+
+    expect(
+      await screen.findByText(
+        "The first recovery destination was accepted. Select a second independent recovery destination to continue.",
+        {},
+        { timeout: 1_500 },
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select second recovery device" })).toBeEnabled();
+    expect(startupReadCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps ordinary unavailable terminal for automatic status polling", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") return Promise.resolve("unavailable");
+      if (command === "first_time_setup_available") return Promise.resolve(false);
+      return Promise.reject(new Error("unexpected command"));
+    });
+    renderApp();
+
+    expect(await screen.findByText("The application is unavailable.")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(
+      mockedInvoke.mock.calls.filter(([command]) => command === "startup_status"),
+    ).toHaveLength(1);
   });
 
   it("requests second recovery-device selection without renderer-supplied authority", async () => {

@@ -8,6 +8,7 @@ export type StartupStatus =
   | "setupRestartRequired"
   | "stopping"
   | "shutdownIncomplete"
+  | "migrationPreparationInProgress"
   | "migrationRecoveryKeyCustodyInProgress"
   | "migrationRecoveryKeyCustodyAwaitingRetry"
   | "firstRecoveryVolumeAcceptedAwaitingSecondDevice"
@@ -33,6 +34,7 @@ const startupStatuses = new Set<StartupStatus>([
   "setupRestartRequired",
   "stopping",
   "shutdownIncomplete",
+  "migrationPreparationInProgress",
   "migrationRecoveryKeyCustodyInProgress",
   "migrationRecoveryKeyCustodyAwaitingRetry",
   "firstRecoveryVolumeAcceptedAwaitingSecondDevice",

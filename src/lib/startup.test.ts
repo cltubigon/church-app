@@ -1,12 +1,29 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { requestFirstTimeSetup, requestSecondRecoveryVolumeSelection } from "./startup";
+import {
+  getStartupStatus,
+  requestFirstTimeSetup,
+  requestSecondRecoveryVolumeSelection,
+} from "./startup";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
 const mockedInvoke = vi.mocked(invoke);
+
+describe("getStartupStatus", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it("recognizes active migration preparation", async () => {
+    mockedInvoke.mockResolvedValue("migrationPreparationInProgress");
+
+    await expect(getStartupStatus()).resolves.toBe("migrationPreparationInProgress");
+    expect(mockedInvoke).toHaveBeenCalledWith("startup_status");
+  });
+});
 
 describe("requestFirstTimeSetup", () => {
   beforeEach(() => {

@@ -628,7 +628,13 @@ Successful first recovery-volume preparation now maps to the coarse `FirstRecove
 
 The request is accepted only while the migration worker retains exact `FirstRecoveryVolumePrepared` ownership. It reuses the existing main-thread native picker, canonical retained-root eligibility validation, and canonical physical-device separation transition. Cancellation, picker unavailability, and pre-consumption second-root retention failure preserve the exact first-root owner for retry. Shutdown continues through the existing first-root abandonment and custody source-close path. Opening the picker starts neither publication nor migration; no migration or publication completion is claimed by this reachability change. Real Windows validation must select a different eligible second device and stop after observing the second-selection result.
 
-## 43. Links
+## 43. Observable active migration preparation
+
+Active `MigrationPreparationState::Preparing` now maps to the explicit coarse nonterminal `MigrationPreparationInProgress` status before the underlying startup lifecycle is considered. React recognizes that status, truthfully reports that the protected database upgrade is being prepared, and continues the existing `startup_status` polling loop so later migration lifecycle transitions remain observable. Generic `Unavailable` remains terminal for genuine unavailable startup states.
+
+This observability correction changes no migration, custody, publication, or recovery-device authority. First recovery-device acceptance remains reachable as `FirstRecoveryVolumeAcceptedAwaitingSecondDevice`, and selection of a physically separate second device remains a distinct required step. The complete migration ceremony still requires fresh manual Windows validation.
+
+## 44. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)
