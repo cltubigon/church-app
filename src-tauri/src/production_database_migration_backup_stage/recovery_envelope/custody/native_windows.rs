@@ -1,13 +1,14 @@
 //! Private Win32 adapter for the unwired migration recovery-key custody ceremony.
 
 use std::{
+    ffi::c_void,
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{null, null_mut},
 };
 
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM},
     UI::{
         Controls::EM_SETLIMITTEXT,
         Input::KeyboardAndMouse::{
@@ -18,10 +19,10 @@ use windows_sys::Win32::{
             DS_MODALFRAME, DestroyWindow, DialogBoxIndirectParamW, ES_AUTOVSCROLL, ES_MULTILINE,
             ES_WANTRETURN, EndDialog, GWLP_USERDATA, GWLP_WNDPROC, GetWindowLongPtrW,
             GetWindowTextLengthW, GetWindowTextW, IDCANCEL, IDOK, IsWindow, SW_HIDE, SW_SHOW,
-            SendMessageW, SetWindowLongPtrW, SetWindowTextW, ShowWindow, WM_CLOSE, WM_COMMAND,
-            WM_CONTEXTMENU, WM_COPY, WM_CUT, WM_INITDIALOG, WM_KEYDOWN, WM_NCDESTROY, WM_PASTE,
-            WNDPROC, WS_BORDER, WS_CAPTION, WS_CHILD, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
-            WS_VSCROLL,
+            SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos,
+            SetWindowTextW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CUT,
+            WM_GETFONT, WM_INITDIALOG, WM_KEYDOWN, WM_NCDESTROY, WM_PASTE, WNDPROC, WS_BORDER,
+            WS_CAPTION, WS_CHILD, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
         },
     },
 };
@@ -45,6 +46,40 @@ const CONTROL_DISPLAY_TWO: i32 = 1004;
 const CONTROL_READBACK_TWO: i32 = 1005;
 const DIALOG_FINISHED: isize = 1;
 const STATIC_NO_PREFIX: u32 = 0x80;
+const STATIC_LEFT_NO_WORD_WRAP: u32 = 0x0c;
+const REVEAL_LINE_COUNT: usize = 5;
+const REVEAL_LONGEST_LINE_UNITS: usize = 68;
+const CONTROL_LEFT: i32 = 16;
+const CONTROL_WIDTH: i32 = 448;
+const DISPLAY_TOP: i32 = 54;
+const DISPLAY_HEIGHT: i32 = 190;
+const PRIMARY_LEFT: i32 = 272;
+const CANCEL_LEFT: i32 = 372;
+const BUTTON_TOP: i32 = 258;
+const TEXT_EXTENT_PADDING: i32 = 8;
+
+type NativeDeviceContext = *mut c_void;
+type NativeGdiObject = *mut c_void;
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetDC(window: HWND) -> NativeDeviceContext;
+    fn ReleaseDC(window: HWND, device_context: NativeDeviceContext) -> i32;
+}
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn GetTextExtentPoint32W(
+        device_context: NativeDeviceContext,
+        text: *const u16,
+        length: i32,
+        size: *mut SIZE,
+    ) -> i32;
+    fn SelectObject(
+        device_context: NativeDeviceContext,
+        object: NativeGdiObject,
+    ) -> NativeGdiObject;
+}
 
 #[must_use = "the native custody outcome owns migration custody state"]
 pub(crate) enum NativeMigrationRecoveryKeyCustodyOutcome {
@@ -126,6 +161,8 @@ struct DialogContext {
     owner: CustodyOwner,
     outcome: Option<NativeMigrationRecoveryKeyCustodyOutcome>,
     controls: DialogControls,
+    reveal_width_growth: i32,
+    reveal_height_growth: i32,
 }
 
 impl DialogContext {
@@ -136,6 +173,8 @@ impl DialogContext {
             owner: CustodyOwner::Prepared(prepared),
             outcome: None,
             controls: DialogControls::empty(),
+            reveal_width_growth: 0,
+            reveal_height_growth: 0,
         }
     }
 
@@ -314,21 +353,112 @@ impl DialogContext {
         Ok(())
     }
 
-    fn display_current_record(&self, control: HWND) -> Result<(), ()> {
-        let operation = |bytes: &[u8; DISPLAY_SOURCE_LENGTH]| {
-            let display = NativeDisplayBuffer::from_canonical(bytes)?;
-            // SAFETY: `control` is a live STATIC and `display` is explicitly NUL-terminated.
-            let changed = unsafe { SetWindowTextW(control, display.as_ptr()) } != 0;
-            drop(display);
-            changed.then_some(()).ok_or(())
-        };
-        match &self.owner {
-            CustodyOwner::Disclosed(owner) => owner.encoded.with_native_display_bytes(operation),
+    fn display_current_record(&mut self, control: HWND) -> Result<(), ()> {
+        let convert =
+            |bytes: &[u8; DISPLAY_SOURCE_LENGTH]| NativeDisplayBuffer::from_canonical(bytes);
+        let display = match &self.owner {
+            CustodyOwner::Disclosed(owner) => owner.encoded.with_native_display_bytes(convert),
             CustodyOwner::FirstCopyVerified(owner) => {
-                owner.encoded.with_native_display_bytes(operation)
+                owner.encoded.with_native_display_bytes(convert)
             }
             CustodyOwner::Prepared(_) | CustodyOwner::Empty => Err(()),
+        }?;
+        let metrics = measure_reveal_text(control, &display)?;
+        let layout = RevealLayout::from_metrics(metrics)?;
+        self.apply_reveal_layout(layout)?;
+        // SAFETY: `control` is a live STATIC and `display` is explicitly NUL-terminated.
+        let changed = unsafe { SetWindowTextW(control, display.as_ptr()) } != 0;
+        drop(display);
+        changed.then_some(()).ok_or(())
+    }
+
+    fn apply_reveal_layout(&mut self, layout: RevealLayout) -> Result<(), ()> {
+        let width_growth = self.reveal_width_growth.max(layout.width_growth);
+        let height_growth = self.reveal_height_growth.max(layout.height_growth);
+        let width_delta = width_growth
+            .checked_sub(self.reveal_width_growth)
+            .ok_or(())?;
+        let height_delta = height_growth
+            .checked_sub(self.reveal_height_growth)
+            .ok_or(())?;
+        if width_delta == 0 && height_delta == 0 {
+            return Ok(());
         }
+
+        let mut dialog_bounds = RECT::default();
+        // SAFETY: `dialog` is the live modal dialog owned by this context.
+        if unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(
+                self.dialog,
+                &mut dialog_bounds,
+            )
+        } == 0
+        {
+            return Err(());
+        }
+        let dialog_width = dialog_bounds
+            .right
+            .checked_sub(dialog_bounds.left)
+            .and_then(|width| width.checked_add(width_delta))
+            .ok_or(())?;
+        let dialog_height = dialog_bounds
+            .bottom
+            .checked_sub(dialog_bounds.top)
+            .and_then(|height| height.checked_add(height_delta))
+            .ok_or(())?;
+        let dialog_left = dialog_bounds.left.checked_sub(width_delta / 2).ok_or(())?;
+        let dialog_top = dialog_bounds.top.checked_sub(height_delta / 2).ok_or(())?;
+        // SAFETY: the dialog remains topologically unchanged; only its pixel bounds change.
+        if unsafe {
+            SetWindowPos(
+                self.dialog,
+                null_mut(),
+                dialog_left,
+                dialog_top,
+                dialog_width,
+                dialog_height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        } == 0
+        {
+            return Err(());
+        }
+
+        let content_width = CONTROL_WIDTH.checked_add(width_growth).ok_or(())?;
+        let content_height = DISPLAY_HEIGHT.checked_add(height_growth).ok_or(())?;
+        position_control(self.controls.prompt, (CONTROL_LEFT, 14, content_width, 36))?;
+        for control in [
+            self.controls.display_one,
+            self.controls.readback_one,
+            self.controls.display_two,
+            self.controls.readback_two,
+        ] {
+            position_control(
+                control,
+                (CONTROL_LEFT, DISPLAY_TOP, content_width, content_height),
+            )?;
+        }
+        position_control(
+            self.controls.primary,
+            (
+                PRIMARY_LEFT.checked_add(width_growth).ok_or(())?,
+                BUTTON_TOP.checked_add(height_growth).ok_or(())?,
+                92,
+                28,
+            ),
+        )?;
+        position_control(
+            self.controls.cancel,
+            (
+                CANCEL_LEFT.checked_add(width_growth).ok_or(())?,
+                BUTTON_TOP.checked_add(height_growth).ok_or(())?,
+                92,
+                28,
+            ),
+        )?;
+        self.reveal_width_growth = width_growth;
+        self.reveal_height_growth = height_growth;
+        Ok(())
     }
 
     fn set_nonsecret_text(&self, prompt: *const u16, primary: *const u16) -> Result<(), ()> {
@@ -414,6 +544,136 @@ impl Drop for NativeDisplayBuffer {
     fn drop(&mut self) {
         self.units.zeroize();
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RevealTextMetrics {
+    maximum_line_width: i32,
+    total_line_height: i32,
+    line_count: usize,
+    longest_line_units: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RevealLayout {
+    width_growth: i32,
+    height_growth: i32,
+}
+
+impl RevealLayout {
+    fn from_metrics(metrics: RevealTextMetrics) -> Result<Self, ()> {
+        if metrics.maximum_line_width <= 0
+            || metrics.total_line_height <= 0
+            || metrics.line_count != REVEAL_LINE_COUNT
+            || metrics.longest_line_units != REVEAL_LONGEST_LINE_UNITS
+        {
+            return Err(());
+        }
+        let required_width = metrics
+            .maximum_line_width
+            .checked_add(TEXT_EXTENT_PADDING)
+            .ok_or(())?;
+        let required_height = metrics
+            .total_line_height
+            .checked_add(TEXT_EXTENT_PADDING)
+            .ok_or(())?;
+        Ok(Self {
+            width_growth: required_width.saturating_sub(CONTROL_WIDTH),
+            height_growth: required_height.saturating_sub(DISPLAY_HEIGHT),
+        })
+    }
+
+    fn display_width(self) -> Result<i32, ()> {
+        CONTROL_WIDTH.checked_add(self.width_growth).ok_or(())
+    }
+}
+
+fn measure_reveal_text(
+    control: HWND,
+    display: &NativeDisplayBuffer,
+) -> Result<RevealTextMetrics, ()> {
+    // SAFETY: `control` is a live Reveal STATIC; its DC uses the active window DPI.
+    let device_context = unsafe { GetDC(control) };
+    if device_context.is_null() {
+        return Err(());
+    }
+    // WM_GETFONT returns the exact font selected for the control, or null when it uses the DC's
+    // system font. In the latter case the freshly acquired DC already has that font selected.
+    let active_font = unsafe { SendMessageW(control, WM_GETFONT, 0, 0) } as NativeGdiObject;
+    let previous_font = if active_font.is_null() {
+        null_mut()
+    } else {
+        // SAFETY: both handles are live GDI objects for the duration of this measurement.
+        unsafe { SelectObject(device_context, active_font) }
+    };
+    let measurement = if !active_font.is_null() && previous_font.is_null() {
+        Err(())
+    } else {
+        measure_reveal_lines(device_context, &display.units[..NATIVE_TEXT_LIMIT])
+    };
+    if !previous_font.is_null() {
+        // SAFETY: restore the DC's original font before releasing it.
+        unsafe { SelectObject(device_context, previous_font) };
+    }
+    // SAFETY: release the DC acquired above exactly once.
+    let released = unsafe { ReleaseDC(control, device_context) } != 0;
+    if released { measurement } else { Err(()) }
+}
+
+fn measure_reveal_lines(
+    device_context: NativeDeviceContext,
+    units: &[u16],
+) -> Result<RevealTextMetrics, ()> {
+    let mut maximum_line_width = 0;
+    let mut total_line_height = 0_i32;
+    let mut line_count = 0;
+    let mut longest_line_units = 0;
+    let mut line_start = 0;
+    while line_start < units.len() {
+        let relative_end = units[line_start..]
+            .iter()
+            .position(|unit| *unit == b'\r' as u16 || *unit == b'\n' as u16)
+            .unwrap_or(units.len() - line_start);
+        let line_end = line_start.checked_add(relative_end).ok_or(())?;
+        let line = &units[line_start..line_end];
+        if line.is_empty() {
+            return Err(());
+        }
+        let mut extent = SIZE::default();
+        // SAFETY: the slice is live UTF-16 for the stated bounded length and extent is writable.
+        if unsafe {
+            GetTextExtentPoint32W(
+                device_context,
+                line.as_ptr(),
+                i32::try_from(line.len()).map_err(|_| ())?,
+                &mut extent,
+            )
+        } == 0
+            || extent.cx <= 0
+            || extent.cy <= 0
+        {
+            return Err(());
+        }
+        maximum_line_width = maximum_line_width.max(extent.cx);
+        total_line_height = total_line_height.checked_add(extent.cy).ok_or(())?;
+        line_count += 1;
+        longest_line_units = longest_line_units.max(line.len());
+        if line_end == units.len() {
+            break;
+        }
+        if units.get(line_end) != Some(&(b'\r' as u16))
+            || units.get(line_end + 1) != Some(&(b'\n' as u16))
+        {
+            return Err(());
+        }
+        line_start = line_end.checked_add(2).ok_or(())?;
+    }
+    Ok(RevealTextMetrics {
+        maximum_line_width,
+        total_line_height,
+        line_count,
+        longest_line_units,
+    })
 }
 
 struct ReadbackAscii {
@@ -589,8 +849,8 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
         create_control(
             windows_sys::w!("STATIC"),
             windows_sys::w!(""),
-            WS_CHILD | STATIC_NO_PREFIX,
-            (16, 54, 448, 190),
+            WS_CHILD | STATIC_NO_PREFIX | STATIC_LEFT_NO_WORD_WRAP,
+            (CONTROL_LEFT, DISPLAY_TOP, CONTROL_WIDTH, DISPLAY_HEIGHT),
             dialog,
             CONTROL_DISPLAY_ONE,
         )?
@@ -600,7 +860,7 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
             windows_sys::w!("EDIT"),
             windows_sys::w!(""),
             edit_style(),
-            (16, 54, 448, 190),
+            (CONTROL_LEFT, DISPLAY_TOP, CONTROL_WIDTH, DISPLAY_HEIGHT),
             dialog,
             CONTROL_READBACK_ONE,
         )?
@@ -609,8 +869,8 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
         create_control(
             windows_sys::w!("STATIC"),
             windows_sys::w!(""),
-            WS_CHILD | STATIC_NO_PREFIX,
-            (16, 54, 448, 190),
+            WS_CHILD | STATIC_NO_PREFIX | STATIC_LEFT_NO_WORD_WRAP,
+            (CONTROL_LEFT, DISPLAY_TOP, CONTROL_WIDTH, DISPLAY_HEIGHT),
             dialog,
             CONTROL_DISPLAY_TWO,
         )?
@@ -620,7 +880,7 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
             windows_sys::w!("EDIT"),
             windows_sys::w!(""),
             edit_style(),
-            (16, 54, 448, 190),
+            (CONTROL_LEFT, DISPLAY_TOP, CONTROL_WIDTH, DISPLAY_HEIGHT),
             dialog,
             CONTROL_READBACK_TWO,
         )?
@@ -630,7 +890,7 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
             windows_sys::w!("BUTTON"),
             windows_sys::w!("Begin"),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | (BS_DEFPUSHBUTTON as u32),
-            (272, 258, 92, 28),
+            (PRIMARY_LEFT, BUTTON_TOP, 92, 28),
             dialog,
             IDOK,
         )?
@@ -640,7 +900,7 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
             windows_sys::w!("BUTTON"),
             windows_sys::w!("Cancel"),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | (BS_PUSHBUTTON as u32),
-            (372, 258, 92, 28),
+            (CANCEL_LEFT, BUTTON_TOP, 92, 28),
             dialog,
             IDCANCEL,
         )?
@@ -719,6 +979,27 @@ unsafe fn create_control(
         )
     };
     (!control.is_null()).then_some(control).ok_or(())
+}
+
+fn position_control(control: HWND, bounds: (i32, i32, i32, i32)) -> Result<(), ()> {
+    if control.is_null() {
+        return Ok(());
+    }
+    let (x, y, width, height) = bounds;
+    // SAFETY: `control` is a live child of the active dialog; z-order and activation are unchanged.
+    (unsafe {
+        SetWindowPos(
+            control,
+            null_mut(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } != 0)
+        .then_some(())
+        .ok_or(())
 }
 
 unsafe fn subclass_control(
@@ -964,6 +1245,9 @@ mod tests {
     fn display_conversion_is_exact_fixed_crlf_and_zeroizable() {
         let source = canonical_record();
         let display = NativeDisplayBuffer::from_canonical(&source).unwrap();
+        assert_eq!(DISPLAY_SOURCE_LENGTH, 196);
+        assert_eq!(NATIVE_TEXT_LIMIT, 200);
+        assert_eq!(NATIVE_BUFFER_LENGTH, 201);
         assert_eq!(size_of::<NativeDisplayBuffer>(), NATIVE_BUFFER_LENGTH * 2);
         assert!(needs_drop::<NativeDisplayBuffer>());
         assert_eq!(display.units[NATIVE_TEXT_LIMIT], 0);
@@ -991,6 +1275,45 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[test]
+    fn reveal_layout_grows_from_measured_font_extent_for_the_complete_key_line() {
+        let measured_key_width = 684;
+        let layout = RevealLayout::from_metrics(RevealTextMetrics {
+            maximum_line_width: measured_key_width,
+            total_line_height: 100,
+            line_count: REVEAL_LINE_COUNT,
+            longest_line_units: REVEAL_LONGEST_LINE_UNITS,
+        })
+        .unwrap();
+        assert!(layout.display_width().unwrap() >= measured_key_width);
+        assert_eq!(layout.display_width().unwrap(), 692);
+        let wider_font_layout = RevealLayout::from_metrics(RevealTextMetrics {
+            maximum_line_width: 912,
+            total_line_height: 240,
+            line_count: REVEAL_LINE_COUNT,
+            longest_line_units: REVEAL_LONGEST_LINE_UNITS,
+        })
+        .unwrap();
+        assert_eq!(wider_font_layout.display_width().unwrap(), 920);
+        assert!(wider_font_layout.width_growth > layout.width_growth);
+        assert!(wider_font_layout.height_growth > 0);
+    }
+
+    #[test]
+    fn reveal_layout_rejects_a_record_without_the_canonical_five_line_shape() {
+        for (line_count, longest_line_units) in [(4, 68), (5, 67), (5, 69)] {
+            assert!(
+                RevealLayout::from_metrics(RevealTextMetrics {
+                    maximum_line_width: 700,
+                    total_line_height: 100,
+                    line_count,
+                    longest_line_units,
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1106,6 +1429,20 @@ mod tests {
         assert!(source.contains("IDOK"));
         assert!(source.contains("IDCANCEL"));
         assert!(source.contains("SetFocus"));
+    }
+
+    #[test]
+    fn both_reveals_share_the_font_measured_no_wrap_layout_path() {
+        let source = include_str!("native_windows.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        assert_eq!(source.matches("self.display_current_record(").count(), 2);
+        assert!(source.contains("measure_reveal_text(control, &display)"));
+        assert!(source.contains("WM_GETFONT"));
+        assert!(source.contains("GetTextExtentPoint32W"));
+        assert!(source.contains("STATIC_LEFT_NO_WORD_WRAP"));
+        assert!(source.contains("self.apply_reveal_layout(layout)"));
     }
 
     #[test]
