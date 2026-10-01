@@ -192,6 +192,7 @@ pub(crate) enum StartupStatus {
     ShutdownIncomplete,
     MigrationRecoveryKeyCustodyInProgress,
     MigrationRecoveryKeyCustodyAwaitingRetry,
+    FirstRecoveryVolumeAcceptedAwaitingSecondDevice,
     TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
     MigrationExecutionConfirmedAwaitingWritablePreparation,
     WritableV1MigrationPreparedAwaitingTransaction,
@@ -811,6 +812,14 @@ pub(crate) enum MigrationRecoveryKeyCustodyRetryRequestResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) enum SecondRecoveryVolumeSelectionRequestResult {
+    Started,
+    NotAllowed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum ProductionDatabaseMigrationRequestResult {
     Started,
     NotAllowed,
@@ -1123,11 +1132,10 @@ impl ApplicationLifecycle {
         })
     }
 
-    /// Private retry seam for an explicitly initiated second-volume selection
-    /// attempt. This is intentionally not exposed through IPC.
     #[cfg(windows)]
-    #[allow(dead_code)]
-    fn request_second_recovery_volume_selection(&self) -> bool {
+    fn request_second_recovery_volume_selection(
+        &self,
+    ) -> SecondRecoveryVolumeSelectionRequestResult {
         let control = {
             let mut inner = self.lock();
             if !matches!(
@@ -1136,10 +1144,10 @@ impl ApplicationLifecycle {
             ) || inner.second_recovery_volume_selection_outstanding
                 || inner.migration_shutdown_requested
             {
-                return false;
+                return SecondRecoveryVolumeSelectionRequestResult::NotAllowed;
             }
             let Some(control) = inner.migration_control.clone() else {
-                return false;
+                return SecondRecoveryVolumeSelectionRequestResult::Unavailable;
             };
             inner.second_recovery_volume_selection_outstanding = true;
             control
@@ -1148,10 +1156,10 @@ impl ApplicationLifecycle {
             .send(MigrationWorkerCommand::SelectSecondRecoveryVolume)
             .is_ok()
         {
-            true
+            SecondRecoveryVolumeSelectionRequestResult::Started
         } else {
             self.lock().second_recovery_volume_selection_outstanding = false;
-            false
+            SecondRecoveryVolumeSelectionRequestResult::Unavailable
         }
     }
 
@@ -1361,6 +1369,9 @@ impl ApplicationLifecycle {
                 MigrationPreparationState::CustodyInterruptedBeforeExposure
                 | MigrationPreparationState::CustodyUnavailableBeforeExposure => {
                     StartupStatus::MigrationRecoveryKeyCustodyAwaitingRetry
+                }
+                MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication => {
+                    StartupStatus::FirstRecoveryVolumeAcceptedAwaitingSecondDevice
                 }
                 MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution => {
                     StartupStatus::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
@@ -5550,6 +5561,20 @@ pub(crate) fn request_post_recovery_migration_execution_confirmation(
 }
 
 #[tauri::command]
+pub(crate) fn request_second_recovery_volume_selection(
+    state: tauri::State<'_, Arc<ApplicationLifecycle>>,
+) -> SecondRecoveryVolumeSelectionRequestResult {
+    #[cfg(windows)]
+    return state.request_second_recovery_volume_selection();
+
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        SecondRecoveryVolumeSelectionRequestResult::Unavailable
+    }
+}
+
+#[tauri::command]
 pub(crate) fn retry_migration_recovery_key_custody(
     state: tauri::State<'_, Arc<ApplicationLifecycle>>,
 ) -> MigrationRecoveryKeyCustodyRetryRequestResult {
@@ -6645,7 +6670,7 @@ mod tests {
             .0;
         assert_eq!(
             startup_status,
-            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
+            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    FirstRecoveryVolumeAcceptedAwaitingSecondDevice,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
         );
 
         let request_result = SOURCE
@@ -9530,7 +9555,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn explicit_second_recovery_selection_is_private_state_limited_and_one_shot() {
+    fn second_recovery_selection_request_is_state_limited_and_one_shot() {
         let lifecycle = ApplicationLifecycle::new();
         let (sender, receiver) = std::sync::mpsc::channel();
         {
@@ -9540,23 +9565,35 @@ mod tests {
                 MigrationPreparationState::CustodyVerifiedAwaitingPublication;
             inner.migration_work_resolved = false;
         }
-        assert!(!lifecycle.request_second_recovery_volume_selection());
+        assert_eq!(
+            lifecycle.request_second_recovery_volume_selection(),
+            SecondRecoveryVolumeSelectionRequestResult::NotAllowed
+        );
         assert!(receiver.try_recv().is_err());
 
         lifecycle.lock().migration_preparation =
             MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication;
-        assert!(lifecycle.request_second_recovery_volume_selection());
+        assert_eq!(
+            lifecycle.request_second_recovery_volume_selection(),
+            SecondRecoveryVolumeSelectionRequestResult::Started
+        );
         assert!(matches!(
             receiver.try_recv(),
             Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
         ));
-        assert!(!lifecycle.request_second_recovery_volume_selection());
+        assert_eq!(
+            lifecycle.request_second_recovery_volume_selection(),
+            SecondRecoveryVolumeSelectionRequestResult::NotAllowed
+        );
         assert!(receiver.try_recv().is_err());
 
         lifecycle
             .lock()
             .second_recovery_volume_selection_outstanding = false;
-        assert!(lifecycle.request_second_recovery_volume_selection());
+        assert_eq!(
+            lifecycle.request_second_recovery_volume_selection(),
+            SecondRecoveryVolumeSelectionRequestResult::Started
+        );
         assert!(matches!(
             receiver.try_recv(),
             Ok(MigrationWorkerCommand::SelectSecondRecoveryVolume)
@@ -9567,10 +9604,60 @@ mod tests {
             .lock()
             .second_recovery_volume_selection_outstanding = false;
         lifecycle.lock().migration_shutdown_requested = true;
-        assert!(!lifecycle.request_second_recovery_volume_selection());
+        assert_eq!(
+            lifecycle.request_second_recovery_volume_selection(),
+            SecondRecoveryVolumeSelectionRequestResult::NotAllowed
+        );
 
         const LIB: &str = include_str!("lib.rs");
-        assert!(!LIB.contains("request_second_recovery_volume_selection"));
+        assert!(LIB.contains("request_second_recovery_volume_selection,"));
+    }
+
+    #[test]
+    fn accepted_first_recovery_volume_maps_to_truthful_coarse_status_only() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable);
+            inner.migration_preparation =
+                MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication;
+            inner.migration_work_resolved = false;
+        }
+
+        assert_eq!(
+            lifecycle.status(),
+            StartupStatus::FirstRecoveryVolumeAcceptedAwaitingSecondDevice
+        );
+        assert_ne!(lifecycle.status(), StartupStatus::Unavailable);
+        assert!(!lifecycle.first_time_setup_available());
+    }
+
+    #[test]
+    fn second_recovery_volume_ipc_is_argument_free_and_coarse() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let command = SOURCE
+            .split_once(
+                "#[tauri::command]\npub(crate) fn request_second_recovery_volume_selection(",
+            )
+            .unwrap()
+            .1
+            .split_once("#[tauri::command]")
+            .unwrap()
+            .0;
+
+        assert!(command.contains("tauri::State<'_, Arc<ApplicationLifecycle>>"));
+        for forbidden in [
+            "Path",
+            "volume_id",
+            "disk_id",
+            "recovery_key",
+            "migration_id",
+            "recovery_set_id",
+            "HWND",
+        ] {
+            assert!(!command.contains(forbidden));
+        }
+        assert!(command.contains("SecondRecoveryVolumeSelectionRequestResult"));
     }
 
     #[test]

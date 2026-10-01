@@ -12,6 +12,12 @@ If the native recovery-key paper-copy ceremony is cancelled or unavailable befor
 
 First-time setup presentation is separately gated by a Rust-owned capability produced only by the canonical never-initialized startup observation. Generic unavailability and installed migration-preparation states do not expose setup.
 
+## Reachable second recovery-device selection
+
+After canonical first recovery-volume preparation succeeds, Rust reports `FirstRecoveryVolumeAcceptedAwaitingSecondDevice` instead of generic unavailability. The shell explains that the first destination remains retained and offers only `Select second recovery device`. Its argument-free request supplies no path, device identity, recovery secret, migration identity, or native authority.
+
+The existing worker-owned second-volume path remains authoritative: it retains the exact accepted first root while the canonical native picker runs, independently validates the second selection, and applies the existing production/first/second physical-device separation rules. Cancellation, picker unavailability, and pre-consumption retention failure preserve the first owner for retry; shutdown uses the existing abandonment chain. Opening the second picker starts neither recovery publication nor migration, and this state does not claim recovery or migration completion. A real Windows test must select a different eligible second device and stop after the second-selection result.
+
 ## Resolved migration-preparation failure
 
 Real Windows migration testing exposed that a fail-closed preparation error could resolve its privileged ownership and then close the whole application without a user shutdown request. Resolved migration work now permits process exit only when the existing Rust-owned shutdown intent is also present; `may_exit()` remains a safety check, not an instruction to exit. Without shutdown intent, Church App stays open in the coarse unavailable state, with first-time setup and immediate migration retry unavailable. The observed existing fixed-stage conflict still fails closed, and no stage cleanup, overwrite, adoption, resume, or repair behavior was added. The complete migration ceremony still requires manual Windows validation.

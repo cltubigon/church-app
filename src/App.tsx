@@ -15,6 +15,7 @@ import {
   requestFirstTimeSetup,
   requestProductionDatabaseMigration,
   requestPostRecoveryMigrationExecutionConfirmation,
+  requestSecondRecoveryVolumeSelection,
   retryMigrationRecoveryKeyCustody,
   type StartupStatus,
 } from "./lib/startup";
@@ -58,11 +59,14 @@ interface StartupBoundaryProps {
   firstTimeSetupAvailable: boolean;
   migrationConfirmationError: string | null;
   migrationConfirmationPending: boolean;
+  onRequestSecondRecoveryVolume: () => void;
   onRequestMigrationConfirmation: () => void;
   onRetryCustody: () => void;
   onRequestSetup: () => void;
   setupError: string | null;
   setupRequestPending: boolean;
+  secondRecoveryVolumeError: string | null;
+  secondRecoveryVolumePending: boolean;
   status: Exclude<StartupStatus, "ready">;
 }
 
@@ -72,11 +76,14 @@ function StartupBoundary({
   firstTimeSetupAvailable,
   migrationConfirmationError,
   migrationConfirmationPending,
+  onRequestSecondRecoveryVolume,
   onRequestMigrationConfirmation,
   onRetryCustody,
   onRequestSetup,
   setupError,
   setupRequestPending,
+  secondRecoveryVolumeError,
+  secondRecoveryVolumePending,
   status,
 }: StartupBoundaryProps) {
   const content = {
@@ -89,6 +96,8 @@ function StartupBoundary({
     migrationRecoveryKeyCustodyInProgress: "The protected recovery-key ceremony is in progress.",
     migrationRecoveryKeyCustodyAwaitingRetry:
       "Database upgrade preparation was paused before the recovery key was shown.",
+    firstRecoveryVolumeAcceptedAwaitingSecondDevice:
+      "The first recovery destination was accepted. Select a second independent recovery destination to continue.",
     twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution:
       "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
     migrationExecutionConfirmedAwaitingWritablePreparation:
@@ -125,6 +134,21 @@ function StartupBoundary({
             {custodyRetryError !== null && <p role="alert">{custodyRetryError}</p>}
           </div>
         )}
+        {status === "firstRecoveryVolumeAcceptedAwaitingSecondDevice" && (
+          <div aria-busy={secondRecoveryVolumePending} className={styles.setupAction}>
+            <p>The first recovery destination remains retained while you select the second.</p>
+            <button
+              disabled={secondRecoveryVolumePending}
+              onClick={onRequestSecondRecoveryVolume}
+              type="button"
+            >
+              {secondRecoveryVolumePending
+                ? "Opening recovery-device picker…"
+                : "Select second recovery device"}
+            </button>
+            {secondRecoveryVolumeError !== null && <p role="alert">{secondRecoveryVolumeError}</p>}
+          </div>
+        )}
         {status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" && (
           <div aria-busy={migrationConfirmationPending} className={styles.setupAction}>
             <p>Review the trusted Windows confirmation before authorizing the future migration.</p>
@@ -157,6 +181,8 @@ export function App() {
   const [custodyRetryError, setCustodyRetryError] = useState<string | null>(null);
   const [migrationConfirmationPending, setMigrationConfirmationPending] = useState(false);
   const [migrationConfirmationError, setMigrationConfirmationError] = useState<string | null>(null);
+  const [secondRecoveryVolumePending, setSecondRecoveryVolumePending] = useState(false);
+  const [secondRecoveryVolumeError, setSecondRecoveryVolumeError] = useState<string | null>(null);
   const [businessFeaturesAvailable, setBusinessFeaturesAvailable] = useState<boolean | null>(null);
   const [migrationInitiationAvailable, setMigrationInitiationAvailable] = useState<boolean | null>(
     null,
@@ -179,6 +205,7 @@ export function App() {
         status === "setupInProgress" ||
         status === "migrationRecoveryKeyCustodyInProgress" ||
         status === "migrationRecoveryKeyCustodyAwaitingRetry" ||
+        status === "firstRecoveryVolumeAcceptedAwaitingSecondDevice" ||
         status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" ||
         status === "writableV1MigrationPreparedAwaitingTransaction" ||
         status === "stopping"
@@ -201,6 +228,9 @@ export function App() {
     }
     if (startupStatus !== "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution") {
       setMigrationConfirmationError(null);
+    }
+    if (startupStatus !== "firstRecoveryVolumeAcceptedAwaitingSecondDevice") {
+      setSecondRecoveryVolumeError(null);
     }
   }, [startupStatus]);
 
@@ -286,6 +316,19 @@ export function App() {
     setCustodyRetryPending(false);
   }
 
+  async function requestSecondRecoveryVolume() {
+    if (secondRecoveryVolumePending) return;
+
+    setSecondRecoveryVolumePending(true);
+    setSecondRecoveryVolumeError(null);
+    const result = await requestSecondRecoveryVolumeSelection();
+    if (result === "unavailable") {
+      setSecondRecoveryVolumeError("The recovery-device picker could not be opened.");
+    }
+    setStatusRefreshKey((key) => key + 1);
+    setSecondRecoveryVolumePending(false);
+  }
+
   async function requestMigrationInitiation() {
     if (migrationInitiationPending) return;
 
@@ -307,11 +350,14 @@ export function App() {
         firstTimeSetupAvailable={firstTimeSetupAvailable}
         migrationConfirmationError={migrationConfirmationError}
         migrationConfirmationPending={migrationConfirmationPending}
+        onRequestSecondRecoveryVolume={() => void requestSecondRecoveryVolume()}
         onRequestMigrationConfirmation={() => void requestMigrationConfirmation()}
         onRetryCustody={() => void retryCustody()}
         onRequestSetup={() => void requestSetup()}
         setupError={setupError}
         setupRequestPending={setupRequestPending}
+        secondRecoveryVolumeError={secondRecoveryVolumeError}
+        secondRecoveryVolumePending={secondRecoveryVolumePending}
         status={startupStatus}
       />
     );

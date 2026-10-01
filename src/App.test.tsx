@@ -131,6 +131,10 @@ describe("application foundation", () => {
       "The protected recovery-key ceremony is in progress.",
     ],
     [
+      "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
+      "The first recovery destination was accepted. Select a second independent recovery destination to continue.",
+    ],
+    [
       "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
       "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
     ],
@@ -251,6 +255,44 @@ describe("application foundation", () => {
     expect(screen.getByRole("button", { name: "Confirm migration authorization" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("offers only second recovery-device selection after first-volume acceptance", async () => {
+    mockedInvoke.mockResolvedValue("firstRecoveryVolumeAcceptedAwaitingSecondDevice");
+    renderApp();
+
+    expect(
+      await screen.findByText(
+        "The first recovery destination was accepted. Select a second independent recovery destination to continue.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select second recovery device" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Migration completed");
+    expect(document.body.textContent).not.toContain("Recovery complete");
+  });
+
+  it("requests second recovery-device selection without renderer-supplied authority", async () => {
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") {
+        return Promise.resolve("firstRecoveryVolumeAcceptedAwaitingSecondDevice");
+      }
+      if (command === "request_second_recovery_volume_selection") {
+        return Promise.resolve("started");
+      }
+      return Promise.reject(new Error("unexpected command"));
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Select second recovery device" }));
+
+    expect(
+      mockedInvoke.mock.calls.filter(
+        ([command]) => command === "request_second_recovery_volume_selection",
+      ),
+    ).toEqual([["request_second_recovery_volume_selection"]]);
   });
 
   it("shows the upgrade action only for Ready Exact V1 while parish workflows stay hidden", async () => {

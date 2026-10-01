@@ -10,6 +10,7 @@ export type StartupStatus =
   | "shutdownIncomplete"
   | "migrationRecoveryKeyCustodyInProgress"
   | "migrationRecoveryKeyCustodyAwaitingRetry"
+  | "firstRecoveryVolumeAcceptedAwaitingSecondDevice"
   | "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
   | "migrationExecutionConfirmedAwaitingWritablePreparation"
   | "writableV1MigrationPreparedAwaitingTransaction"
@@ -34,6 +35,7 @@ const startupStatuses = new Set<StartupStatus>([
   "shutdownIncomplete",
   "migrationRecoveryKeyCustodyInProgress",
   "migrationRecoveryKeyCustodyAwaitingRetry",
+  "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
   "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
   "migrationExecutionConfirmedAwaitingWritablePreparation",
   "writableV1MigrationPreparedAwaitingTransaction",
@@ -53,6 +55,8 @@ export type MigrationRecoveryKeyCustodyRetryRequestResult =
   | "notAllowed"
   | "unavailable";
 
+export type SecondRecoveryVolumeSelectionRequestResult = "started" | "notAllowed" | "unavailable";
+
 const postRecoveryMigrationExecutionConfirmationRequestResults =
   new Set<PostRecoveryMigrationExecutionConfirmationRequestResult>([
     "started",
@@ -66,6 +70,9 @@ const productionDatabaseMigrationRequestResults = new Set<ProductionDatabaseMigr
 
 const migrationRecoveryKeyCustodyRetryRequestResults =
   new Set<MigrationRecoveryKeyCustodyRetryRequestResult>(["started", "notAllowed", "unavailable"]);
+
+const secondRecoveryVolumeSelectionRequestResults =
+  new Set<SecondRecoveryVolumeSelectionRequestResult>(["started", "notAllowed", "unavailable"]);
 
 const firstTimeSetupRequestResults = new Set<FirstTimeSetupRequestResult>([
   "started",
@@ -151,6 +158,20 @@ export async function requestPostRecoveryMigrationExecutionConfirmation(): Promi
         result as PostRecoveryMigrationExecutionConfirmationRequestResult,
       )
       ? (result as PostRecoveryMigrationExecutionConfirmationRequestResult)
+      : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export async function requestSecondRecoveryVolumeSelection(): Promise<SecondRecoveryVolumeSelectionRequestResult> {
+  try {
+    const result = await invoke<unknown>("request_second_recovery_volume_selection");
+    return typeof result === "string" &&
+      secondRecoveryVolumeSelectionRequestResults.has(
+        result as SecondRecoveryVolumeSelectionRequestResult,
+      )
+      ? (result as SecondRecoveryVolumeSelectionRequestResult)
       : "unavailable";
   } catch {
     return "unavailable";

@@ -622,7 +622,13 @@ An ordinary resolved preparation failure leaves Church App running in the existi
 
 The observed existing `production-database-migration-backup.stage` conflict remains fail closed under the canonical create-new policy. This change adds no deletion, overwrite, truncation, rename, adoption, resume, inspection-as-complete, repair, or automatic retry behavior. It does not establish that the full migration ceremony passes manual Windows validation.
 
-## 42. Links
+## 42. Reachable second recovery-device selection
+
+Successful first recovery-volume preparation now maps to the coarse `FirstRecoveryVolumeAcceptedAwaitingSecondDevice` state instead of generic `Unavailable`. The shell states that the first destination was accepted, exposes only `Select second recovery device`, and sends the argument-free `request_second_recovery_volume_selection` request. React receives no path, volume or disk identity, native handle, recovery secret, migration identity, or recovery-set identity. First-time setup and parish workflows remain unavailable in this state.
+
+The request is accepted only while the migration worker retains exact `FirstRecoveryVolumePrepared` ownership. It reuses the existing main-thread native picker, canonical retained-root eligibility validation, and canonical physical-device separation transition. Cancellation, picker unavailability, and pre-consumption second-root retention failure preserve the exact first-root owner for retry. Shutdown continues through the existing first-root abandonment and custody source-close path. Opening the picker starts neither publication nor migration; no migration or publication completion is claimed by this reachability change. Real Windows validation must select a different eligible second device and stop after observing the second-selection result.
+
+## 43. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)

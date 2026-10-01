@@ -124,8 +124,8 @@ pub fn run() {
         ApplicationLifecycle, first_time_setup_available, lifecycle_from_app,
         migration_initiation_available, request_first_time_setup,
         request_post_recovery_migration_execution_confirmation,
-        request_production_database_migration, retry_migration_recovery_key_custody,
-        startup_status,
+        request_production_database_migration, request_second_recovery_volume_selection,
+        retry_migration_recovery_key_custody, startup_status,
     };
 
     #[cfg(windows)]
@@ -159,6 +159,7 @@ pub fn run() {
             migration_initiation_available,
             request_production_database_migration,
             request_post_recovery_migration_execution_confirmation,
+            request_second_recovery_volume_selection,
             retry_migration_recovery_key_custody,
             business_features_available,
             business_create_request,
@@ -187,6 +188,7 @@ pub fn run() {
         migration_initiation_available,
         request_production_database_migration,
         request_post_recovery_migration_execution_confirmation,
+        request_second_recovery_volume_selection,
         retry_migration_recovery_key_custody
     ]);
 
