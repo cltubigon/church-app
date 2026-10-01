@@ -100,6 +100,8 @@ function StartupBoundary({
     migrationRecoveryKeyCustodyInProgress: "The protected recovery-key ceremony is in progress.",
     migrationRecoveryKeyCustodyAwaitingRetry:
       "Database upgrade preparation was paused before the recovery key was shown.",
+    migrationRecoveryKeyCustodyVerifiedAwaitingPublication:
+      "Recovery protection has been verified. Preparing the recovery destinations.",
     firstRecoveryVolumeAcceptedAwaitingSecondDevice:
       "The first recovery destination was accepted. Select a second independent recovery destination to continue.",
     twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution:
@@ -211,6 +213,7 @@ export function App() {
         status === "migrationPreparationInProgress" ||
         status === "migrationRecoveryKeyCustodyInProgress" ||
         status === "migrationRecoveryKeyCustodyAwaitingRetry" ||
+        status === "migrationRecoveryKeyCustodyVerifiedAwaitingPublication" ||
         status === "firstRecoveryVolumeAcceptedAwaitingSecondDevice" ||
         status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" ||
         status === "writableV1MigrationPreparedAwaitingTransaction" ||

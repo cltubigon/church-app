@@ -11,6 +11,7 @@ export type StartupStatus =
   | "migrationPreparationInProgress"
   | "migrationRecoveryKeyCustodyInProgress"
   | "migrationRecoveryKeyCustodyAwaitingRetry"
+  | "migrationRecoveryKeyCustodyVerifiedAwaitingPublication"
   | "firstRecoveryVolumeAcceptedAwaitingSecondDevice"
   | "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
   | "migrationExecutionConfirmedAwaitingWritablePreparation"
@@ -37,6 +38,7 @@ const startupStatuses = new Set<StartupStatus>([
   "migrationPreparationInProgress",
   "migrationRecoveryKeyCustodyInProgress",
   "migrationRecoveryKeyCustodyAwaitingRetry",
+  "migrationRecoveryKeyCustodyVerifiedAwaitingPublication",
   "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
   "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
   "migrationExecutionConfirmedAwaitingWritablePreparation",

@@ -132,6 +132,10 @@ describe("application foundation", () => {
       "The protected recovery-key ceremony is in progress.",
     ],
     [
+      "migrationRecoveryKeyCustodyVerifiedAwaitingPublication",
+      "Recovery protection has been verified. Preparing the recovery destinations.",
+    ],
+    [
       "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
       "The first recovery destination was accepted. Select a second independent recovery destination to continue.",
     ],
@@ -274,14 +278,14 @@ describe("application foundation", () => {
     expect(document.body.textContent).not.toContain("Recovery complete");
   });
 
-  it("keeps polling through migration preparation until first-volume acceptance is visible", async () => {
+  it("keeps polling after verified custody until first-volume acceptance is visible", async () => {
     let startupReadCount = 0;
     mockedInvoke.mockImplementation((command) => {
       if (command === "startup_status") {
         startupReadCount += 1;
         return Promise.resolve(
           startupReadCount === 1
-            ? "migrationPreparationInProgress"
+            ? "migrationRecoveryKeyCustodyVerifiedAwaitingPublication"
             : "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
         );
       }
@@ -290,11 +294,14 @@ describe("application foundation", () => {
     renderApp();
 
     expect(
-      await screen.findByText("The protected database upgrade is being prepared."),
+      await screen.findByText(
+        "Recovery protection has been verified. Preparing the recovery destinations.",
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Staff areas" })).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("Migration completed");
+    expect(document.body.textContent).not.toContain("Recovery complete");
 
     expect(
       await screen.findByText(

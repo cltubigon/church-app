@@ -23,6 +23,15 @@ describe("getStartupStatus", () => {
     await expect(getStartupStatus()).resolves.toBe("migrationPreparationInProgress");
     expect(mockedInvoke).toHaveBeenCalledWith("startup_status");
   });
+
+  it("recognizes verified custody awaiting recovery publication", async () => {
+    mockedInvoke.mockResolvedValue("migrationRecoveryKeyCustodyVerifiedAwaitingPublication");
+
+    await expect(getStartupStatus()).resolves.toBe(
+      "migrationRecoveryKeyCustodyVerifiedAwaitingPublication",
+    );
+    expect(mockedInvoke).toHaveBeenCalledWith("startup_status");
+  });
 });
 
 describe("requestFirstTimeSetup", () => {

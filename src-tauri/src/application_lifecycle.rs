@@ -193,6 +193,7 @@ pub(crate) enum StartupStatus {
     MigrationPreparationInProgress,
     MigrationRecoveryKeyCustodyInProgress,
     MigrationRecoveryKeyCustodyAwaitingRetry,
+    MigrationRecoveryKeyCustodyVerifiedAwaitingPublication,
     FirstRecoveryVolumeAcceptedAwaitingSecondDevice,
     TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
     MigrationExecutionConfirmedAwaitingWritablePreparation,
@@ -215,6 +216,9 @@ impl StartupStatus {
             Self::MigrationRecoveryKeyCustodyInProgress => "migrationRecoveryKeyCustodyInProgress",
             Self::MigrationRecoveryKeyCustodyAwaitingRetry => {
                 "migrationRecoveryKeyCustodyAwaitingRetry"
+            }
+            Self::MigrationRecoveryKeyCustodyVerifiedAwaitingPublication => {
+                "migrationRecoveryKeyCustodyVerifiedAwaitingPublication"
             }
             Self::FirstRecoveryVolumeAcceptedAwaitingSecondDevice => {
                 "firstRecoveryVolumeAcceptedAwaitingSecondDevice"
@@ -1503,6 +1507,9 @@ impl ApplicationLifecycle {
                 MigrationPreparationState::CustodyInterruptedBeforeExposure
                 | MigrationPreparationState::CustodyUnavailableBeforeExposure => {
                     StartupStatus::MigrationRecoveryKeyCustodyAwaitingRetry
+                }
+                MigrationPreparationState::CustodyVerifiedAwaitingPublication => {
+                    StartupStatus::MigrationRecoveryKeyCustodyVerifiedAwaitingPublication
                 }
                 MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication => {
                     StartupStatus::FirstRecoveryVolumeAcceptedAwaitingSecondDevice
@@ -5835,6 +5842,10 @@ mod tests {
                 "migrationRecoveryKeyCustodyAwaitingRetry",
             ),
             (
+                StartupStatus::MigrationRecoveryKeyCustodyVerifiedAwaitingPublication,
+                "migrationRecoveryKeyCustodyVerifiedAwaitingPublication",
+            ),
+            (
                 StartupStatus::FirstRecoveryVolumeAcceptedAwaitingSecondDevice,
                 "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
             ),
@@ -6945,7 +6956,7 @@ mod tests {
             .0;
         assert_eq!(
             startup_status,
-            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationPreparationInProgress,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    FirstRecoveryVolumeAcceptedAwaitingSecondDevice,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
+            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationPreparationInProgress,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    MigrationRecoveryKeyCustodyVerifiedAwaitingPublication,\n    FirstRecoveryVolumeAcceptedAwaitingSecondDevice,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
         );
 
         let request_result = SOURCE
@@ -9904,6 +9915,26 @@ mod tests {
             StartupStatus::FirstRecoveryVolumeAcceptedAwaitingSecondDevice
         );
         assert_ne!(lifecycle.status(), StartupStatus::Unavailable);
+        assert!(!lifecycle.first_time_setup_available());
+    }
+
+    #[test]
+    fn verified_custody_maps_to_truthful_nonterminal_coarse_status() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable);
+            inner.migration_preparation =
+                MigrationPreparationState::CustodyVerifiedAwaitingPublication;
+            inner.migration_work_resolved = false;
+        }
+
+        assert_eq!(
+            lifecycle.status(),
+            StartupStatus::MigrationRecoveryKeyCustodyVerifiedAwaitingPublication
+        );
+        assert_ne!(lifecycle.status(), StartupStatus::Unavailable);
+        assert!(!lifecycle.lock().migration_work_resolved);
         assert!(!lifecycle.first_time_setup_available());
     }
 
