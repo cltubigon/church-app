@@ -45,6 +45,28 @@ const startupStatuses = new Set<StartupStatus>([
   "migrationFailedRestartRequired",
 ]);
 
+type MigrationStatusTracePhase = "status_received" | "state_update" | "render";
+
+export function traceMigrationStatus(
+  phase: MigrationStatusTracePhase,
+  status: StartupStatus,
+): void {
+  if (import.meta.env.DEV) {
+    console.info(`[migration-status] phase=${phase} status=${status}`);
+  }
+}
+
+export function traceMigrationPollingDecision(
+  shouldContinue: boolean,
+  status: StartupStatus,
+): void {
+  if (import.meta.env.DEV) {
+    console.info(
+      `[migration-status] phase=polling_decision continue=${shouldContinue} status=${status}`,
+    );
+  }
+}
+
 export type PostRecoveryMigrationExecutionConfirmationRequestResult =
   | "started"
   | "notAllowed"
@@ -88,9 +110,12 @@ const firstTimeSetupRequestResults = new Set<FirstTimeSetupRequestResult>([
 export async function getStartupStatus(): Promise<StartupStatus> {
   try {
     const status = await invoke<unknown>("startup_status");
-    return typeof status === "string" && startupStatuses.has(status as StartupStatus)
-      ? (status as StartupStatus)
-      : "unavailable";
+    const receivedStatus =
+      typeof status === "string" && startupStatuses.has(status as StartupStatus)
+        ? (status as StartupStatus)
+        : "unavailable";
+    traceMigrationStatus("status_received", receivedStatus);
+    return receivedStatus;
   } catch {
     return "unavailable";
   }

@@ -201,6 +201,39 @@ pub(crate) enum StartupStatus {
     MigrationFailedRestartRequired,
 }
 
+impl StartupStatus {
+    const fn serialized_name(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Unavailable => "unavailable",
+            Self::SetupInProgress => "setupInProgress",
+            Self::SetupRestartRequired => "setupRestartRequired",
+            Self::Stopping => "stopping",
+            Self::ShutdownIncomplete => "shutdownIncomplete",
+            Self::MigrationPreparationInProgress => "migrationPreparationInProgress",
+            Self::MigrationRecoveryKeyCustodyInProgress => "migrationRecoveryKeyCustodyInProgress",
+            Self::MigrationRecoveryKeyCustodyAwaitingRetry => {
+                "migrationRecoveryKeyCustodyAwaitingRetry"
+            }
+            Self::FirstRecoveryVolumeAcceptedAwaitingSecondDevice => {
+                "firstRecoveryVolumeAcceptedAwaitingSecondDevice"
+            }
+            Self::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution => {
+                "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
+            }
+            Self::MigrationExecutionConfirmedAwaitingWritablePreparation => {
+                "migrationExecutionConfirmedAwaitingWritablePreparation"
+            }
+            Self::WritableV1MigrationPreparedAwaitingTransaction => {
+                "writableV1MigrationPreparedAwaitingTransaction"
+            }
+            Self::MigrationCommittedRestartRequired => "migrationCommittedRestartRequired",
+            Self::MigrationFailedRestartRequired => "migrationFailedRestartRequired",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CoarseStartupFailure {
     FirstTimeSetupAvailable,
@@ -483,6 +516,94 @@ enum MigrationPreparationState {
     CustodySourceCloseRetryRequired,
     CloseRetryRequired,
 }
+
+impl MigrationPreparationState {
+    #[cfg(debug_assertions)]
+    const fn fixed_name(self) -> &'static str {
+        match self {
+            Self::Inactive => "Inactive",
+            Self::Preparing => "Preparing",
+            Self::CustodyPrepared => "CustodyPrepared",
+            Self::CustodyDispatchPending => "CustodyDispatchPending",
+            Self::CustodyRunning => "CustodyRunning",
+            Self::CustodyInterruptedBeforeExposure => "CustodyInterruptedBeforeExposure",
+            Self::CustodyUnavailableBeforeExposure => "CustodyUnavailableBeforeExposure",
+            Self::CustodyVerifiedAwaitingPublication => "CustodyVerifiedAwaitingPublication",
+            Self::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication => {
+                "FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication"
+            }
+            Self::TwoRecoveryVolumesRetainedAndSeparatedAwaitingCapacity => {
+                "TwoRecoveryVolumesRetainedAndSeparatedAwaitingCapacity"
+            }
+            Self::RecoveryVolumesCapacityValidatedAwaitingDirectories => {
+                "RecoveryVolumesCapacityValidatedAwaitingDirectories"
+            }
+            Self::RecoverySetDirectoriesRetainedAwaitingFirstPublication => {
+                "RecoverySetDirectoriesRetainedAwaitingFirstPublication"
+            }
+            Self::FirstRecoveryDatabasePublishedAwaitingEnvelope => {
+                "FirstRecoveryDatabasePublishedAwaitingEnvelope"
+            }
+            Self::FirstRecoveryDatabaseAndEnvelopePublishedAwaitingManifest => {
+                "FirstRecoveryDatabaseAndEnvelopePublishedAwaitingManifest"
+            }
+            Self::FirstRecoveryManifestPublishedAwaitingVerification => {
+                "FirstRecoveryManifestPublishedAwaitingVerification"
+            }
+            Self::FirstRecoverySetVerificationFailed => "FirstRecoverySetVerificationFailed",
+            Self::FirstRecoverySetVerifierCloseRetryRequired => {
+                "FirstRecoverySetVerifierCloseRetryRequired"
+            }
+            Self::FirstCompleteRecoverySetVerificationRetryRequired => {
+                "FirstCompleteRecoverySetVerificationRetryRequired"
+            }
+            Self::FirstCompleteRecoverySetVerifiedAwaitingSecondPublication => {
+                "FirstCompleteRecoverySetVerifiedAwaitingSecondPublication"
+            }
+            Self::SecondRecoveryDatabasePublishedAwaitingEnvelope => {
+                "SecondRecoveryDatabasePublishedAwaitingEnvelope"
+            }
+            Self::SecondRecoveryDatabaseAndEnvelopePublishedAwaitingManifest => {
+                "SecondRecoveryDatabaseAndEnvelopePublishedAwaitingManifest"
+            }
+            Self::SecondRecoveryManifestPublishedAwaitingVerification => {
+                "SecondRecoveryManifestPublishedAwaitingVerification"
+            }
+            Self::SecondRecoverySetVerifierCloseRetryRequired => {
+                "SecondRecoverySetVerifierCloseRetryRequired"
+            }
+            Self::SecondCompleteRecoverySetVerifiedAwaitingAggregateVerification => {
+                "SecondCompleteRecoverySetVerifiedAwaitingAggregateVerification"
+            }
+            Self::FinalTwoSetVerificationRetryRequired => "FinalTwoSetVerificationRetryRequired",
+            Self::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution => {
+                "TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
+            }
+            Self::MigrationExecutionConfirmedAwaitingWritablePreparation => {
+                "MigrationExecutionConfirmedAwaitingWritablePreparation"
+            }
+            Self::WritableV1MigrationPreparedAwaitingTransaction => {
+                "WritableV1MigrationPreparedAwaitingTransaction"
+            }
+            Self::MigrationCommittedRestartRequired => "MigrationCommittedRestartRequired",
+            Self::MigrationFailedRestartRequired => "MigrationFailedRestartRequired",
+            Self::CustodyTerminalFailure => "CustodyTerminalFailure",
+            Self::CustodySourceCloseRetryRequired => "CustodySourceCloseRetryRequired",
+            Self::CloseRetryRequired => "CloseRetryRequired",
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+fn emit_migration_preparation_state_trace(state: MigrationPreparationState) {
+    eprintln!(
+        r#"event="migration_status_trace" phase="preparation_state" state="{}""#,
+        state.fixed_name()
+    );
+}
+
+#[cfg(not(debug_assertions))]
+fn emit_migration_preparation_state_trace(_: MigrationPreparationState) {}
 
 #[allow(clippy::large_enum_variant)]
 enum MigrationWorkerCommand {
@@ -972,6 +1093,15 @@ struct LifecycleInner {
     setup_shutdown_app: Option<AppHandle>,
 }
 
+impl LifecycleInner {
+    fn set_migration_preparation(&mut self, state: MigrationPreparationState) {
+        if self.migration_preparation != state {
+            emit_migration_preparation_state_trace(state);
+        }
+        self.migration_preparation = state;
+    }
+}
+
 pub(crate) struct ApplicationLifecycle {
     inner: Mutex<LifecycleInner>,
     custody_dispatch_boundary: Mutex<()>,
@@ -1356,7 +1486,7 @@ impl ApplicationLifecycle {
 
     pub(crate) fn status(&self) -> StartupStatus {
         let inner = self.lock();
-        if inner.migration_confirmation.has_retained_close_failure() {
+        let status = if inner.migration_confirmation.has_retained_close_failure() {
             StartupStatus::ShutdownIncomplete
         } else if inner.migration_shutdown_requested {
             inner.state.status()
@@ -1394,7 +1524,13 @@ impl ApplicationLifecycle {
                 }
                 _ => inner.state.status(),
             }
-        }
+        };
+        #[cfg(debug_assertions)]
+        eprintln!(
+            r#"event="migration_status_trace" phase="lifecycle_status" status="{}""#,
+            status.serialized_name()
+        );
+        status
     }
 
     #[cfg(windows)]
@@ -2065,8 +2201,8 @@ impl ApplicationLifecycle {
                 let pending_control = observe_pre_custody_dispatch_control(&control);
                 match decide_prepared_custody_dispatch(prepared, pending_control) {
                     PreparedCustodyDispatchDecision::Dispatch(prepared) => {
-                        self.lock().migration_preparation =
-                            MigrationPreparationState::CustodyPrepared;
+                        self.lock()
+                            .set_migration_preparation(MigrationPreparationState::CustodyPrepared);
                         self.run_custody_dispatch(
                             prepared,
                             control_sender,
@@ -2113,7 +2249,7 @@ impl ApplicationLifecycle {
             CustodyDispatchArm::Shutdown(prepared)
         } else {
             let dispatch = Arc::new(Mutex::new(CustodyDispatchEscrow::Pending(prepared)));
-            inner.migration_preparation = MigrationPreparationState::CustodyDispatchPending;
+            inner.set_migration_preparation(MigrationPreparationState::CustodyDispatchPending);
             CustodyDispatchArm::Armed(dispatch)
         }
     }
@@ -2156,7 +2292,9 @@ impl ApplicationLifecycle {
                 else {
                     return;
                 };
-                lifecycle.lock().migration_preparation = MigrationPreparationState::CustodyRunning;
+                lifecycle
+                    .lock()
+                    .set_migration_preparation(MigrationPreparationState::CustodyRunning);
 
                 let outcome = run_main_thread_owned_custody(
                     prepared,
@@ -2189,8 +2327,9 @@ impl ApplicationLifecycle {
         if scheduled.is_err() {
             let recovered = cancel_armed_custody_dispatch(&dispatch);
             if let Some(prepared) = recovered {
-                self.lock().migration_preparation =
-                    MigrationPreparationState::CustodyUnavailableBeforeExposure;
+                self.lock().set_migration_preparation(
+                    MigrationPreparationState::CustodyUnavailableBeforeExposure,
+                );
                 self.park_migration_worker(
                     MigrationWorkerParkedOwnership::Unavailable(prepared),
                     control,
@@ -2224,27 +2363,31 @@ impl ApplicationLifecycle {
                 Ok(MigrationWorkerCommand::CustodyCompleted(outcome)) => {
                     let owner = match outcome {
                         NativeMigrationRecoveryKeyCustodyOutcome::Verified(owner) => {
-                            self.lock().migration_preparation =
-                                MigrationPreparationState::CustodyVerifiedAwaitingPublication;
+                            self.lock().set_migration_preparation(
+                                MigrationPreparationState::CustodyVerifiedAwaitingPublication,
+                            );
                             MigrationWorkerParkedOwnership::Verified(owner)
                         }
                         NativeMigrationRecoveryKeyCustodyOutcome::InterruptedBeforeExposure(
                             owner,
                         ) => {
-                            self.lock().migration_preparation =
-                                MigrationPreparationState::CustodyInterruptedBeforeExposure;
+                            self.lock().set_migration_preparation(
+                                MigrationPreparationState::CustodyInterruptedBeforeExposure,
+                            );
                             MigrationWorkerParkedOwnership::Interrupted(owner)
                         }
                         NativeMigrationRecoveryKeyCustodyOutcome::UnavailableBeforeExposure(
                             owner,
                         ) => {
-                            self.lock().migration_preparation =
-                                MigrationPreparationState::CustodyUnavailableBeforeExposure;
+                            self.lock().set_migration_preparation(
+                                MigrationPreparationState::CustodyUnavailableBeforeExposure,
+                            );
                             MigrationWorkerParkedOwnership::Unavailable(owner)
                         }
                         NativeMigrationRecoveryKeyCustodyOutcome::FailedAfterExposure(owner) => {
-                            self.lock().migration_preparation =
-                                MigrationPreparationState::CustodyTerminalFailure;
+                            self.lock().set_migration_preparation(
+                                MigrationPreparationState::CustodyTerminalFailure,
+                            );
                             MigrationWorkerParkedOwnership::TerminalFailure(owner)
                         }
                     };
@@ -3048,7 +3191,7 @@ impl ApplicationLifecycle {
         exclusivity: ProductionDatabaseMigrationCrossProcessExclusivity,
         app: &AppHandle,
     ) {
-        self.lock().migration_preparation = match &owner {
+        let preparation_state = match &owner {
             MigrationWorkerParkedOwnership::Prepared(_) => {
                 MigrationPreparationState::CustodyPrepared
             }
@@ -3148,6 +3291,7 @@ impl ApplicationLifecycle {
             }
             _ => MigrationPreparationState::CloseRetryRequired,
         };
+        self.lock().set_migration_preparation(preparation_state);
         loop {
             match control.recv() {
                 Ok(MigrationWorkerCommand::Shutdown) => {}
@@ -3162,7 +3306,7 @@ impl ApplicationLifecycle {
                     let control_sender = {
                         let mut inner = self.lock();
                         inner.migration_custody_retry_outstanding = false;
-                        inner.migration_preparation = MigrationPreparationState::CustodyPrepared;
+                        inner.set_migration_preparation(MigrationPreparationState::CustodyPrepared);
                         inner
                             .migration_control
                             .clone()
@@ -3221,8 +3365,9 @@ impl ApplicationLifecycle {
                         self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
                         return;
                     }
-                    self.lock().migration_preparation =
-                        migration_verification_preparation_state(&owner);
+                    self.lock().set_migration_preparation(
+                        migration_verification_preparation_state(&owner),
+                    );
                     continue;
                 }
                 Ok(MigrationWorkerCommand::RetryFirstCompleteRecoverySetVerification) => {
@@ -3238,8 +3383,9 @@ impl ApplicationLifecycle {
                         self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
                         return;
                     }
-                    self.lock().migration_preparation =
-                        migration_verification_preparation_state(&owner);
+                    self.lock().set_migration_preparation(
+                        migration_verification_preparation_state(&owner),
+                    );
                     continue;
                 }
                 Ok(MigrationWorkerCommand::RetrySecondRecoverySetVerifierClose) => {
@@ -3256,8 +3402,9 @@ impl ApplicationLifecycle {
                         self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
                         return;
                     }
-                    self.lock().migration_preparation =
-                        migration_verification_preparation_state(&owner);
+                    self.lock().set_migration_preparation(
+                        migration_verification_preparation_state(&owner),
+                    );
                     continue;
                 }
                 Ok(MigrationWorkerCommand::RetryFinalTwoSetVerification) => {
@@ -3276,8 +3423,9 @@ impl ApplicationLifecycle {
                         self.finish_or_park_migration_shutdown(owner, control, exclusivity, app);
                         return;
                     }
-                    self.lock().migration_preparation =
-                        migration_verification_preparation_state(&owner);
+                    self.lock().set_migration_preparation(
+                        migration_verification_preparation_state(&owner),
+                    );
                     continue;
                 }
                 Ok(MigrationWorkerCommand::RequestPostRecoveryMigrationExecutionConfirmation) => {
@@ -3459,7 +3607,7 @@ impl ApplicationLifecycle {
     fn finish_migration_preparation_worker(&self, app: Option<&AppHandle>) {
         {
             let mut inner = self.lock();
-            inner.migration_preparation = MigrationPreparationState::Inactive;
+            inner.set_migration_preparation(MigrationPreparationState::Inactive);
             inner.first_recovery_volume_selection_outstanding = false;
             inner.second_recovery_volume_selection_outstanding = false;
             inner.recovery_key_reentry_outstanding = false;
@@ -3787,7 +3935,7 @@ fn claim_migration_preparation(inner: &mut LifecycleInner) -> MigrationPreparati
                 .expect("only the exact lifecycle Authorized state is consumed after shutdown"),
         );
     }
-    inner.migration_preparation = MigrationPreparationState::Preparing;
+    inner.set_migration_preparation(MigrationPreparationState::Preparing);
     let LifecycleState::Ready(operational) =
         std::mem::replace(&mut inner.state, LifecycleState::Stopping)
     else {
@@ -3908,6 +4056,12 @@ fn prepare_first_recovery_volume(
         Ok(first_root) => {
             emit_first_recovery_volume_selection_diagnostic(
                 FirstRecoveryVolumeSelectionDiagnosticOutcome::FirstRecoveryVolumeAccepted,
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                r#"event="migration_status_trace" phase="first_volume_accepted" state="{}""#,
+                MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication
+                    .fixed_name()
             );
             MigrationWorkerParkedOwnership::FirstRecoveryVolumePrepared { source, first_root }
         }
@@ -4660,8 +4814,9 @@ fn retry_migration_worker_ownership(
                     MigrationWorkerRetryOutcome::Resolved
                 }
                 MigrationRecoveryKeyCustodySourceCloseRetryOutcome::Failed(failure) => {
-                    lifecycle.lock().migration_preparation =
-                        MigrationPreparationState::CustodySourceCloseRetryRequired;
+                    lifecycle.lock().set_migration_preparation(
+                        MigrationPreparationState::CustodySourceCloseRetryRequired,
+                    );
                     MigrationWorkerRetryOutcome::Retained(
                         MigrationWorkerParkedOwnership::TerminalFailure(failure),
                     )
@@ -5485,7 +5640,15 @@ fn run_production_startup(
 
 #[tauri::command]
 pub(crate) fn startup_status(state: tauri::State<'_, Arc<ApplicationLifecycle>>) -> StartupStatus {
-    state.status()
+    #[cfg(debug_assertions)]
+    eprintln!(r#"event="migration_status_trace" phase="startup_status_request""#);
+    let status = state.status();
+    #[cfg(debug_assertions)]
+    eprintln!(
+        r#"event="migration_status_trace" phase="startup_status_response" status="{}""#,
+        status.serialized_name()
+    );
+    status
 }
 
 #[tauri::command]
@@ -5648,6 +5811,114 @@ mod tests {
 
     #[derive(Debug, Eq, PartialEq)]
     struct TestCloseFailure(u8);
+
+    #[test]
+    fn migration_status_trace_names_match_the_existing_serialized_status_contract() {
+        for (status, serialized_name) in [
+            (StartupStatus::Starting, "starting"),
+            (StartupStatus::Ready, "ready"),
+            (StartupStatus::Unavailable, "unavailable"),
+            (StartupStatus::SetupInProgress, "setupInProgress"),
+            (StartupStatus::SetupRestartRequired, "setupRestartRequired"),
+            (StartupStatus::Stopping, "stopping"),
+            (StartupStatus::ShutdownIncomplete, "shutdownIncomplete"),
+            (
+                StartupStatus::MigrationPreparationInProgress,
+                "migrationPreparationInProgress",
+            ),
+            (
+                StartupStatus::MigrationRecoveryKeyCustodyInProgress,
+                "migrationRecoveryKeyCustodyInProgress",
+            ),
+            (
+                StartupStatus::MigrationRecoveryKeyCustodyAwaitingRetry,
+                "migrationRecoveryKeyCustodyAwaitingRetry",
+            ),
+            (
+                StartupStatus::FirstRecoveryVolumeAcceptedAwaitingSecondDevice,
+                "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
+            ),
+            (
+                StartupStatus::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
+                "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
+            ),
+            (
+                StartupStatus::MigrationExecutionConfirmedAwaitingWritablePreparation,
+                "migrationExecutionConfirmedAwaitingWritablePreparation",
+            ),
+            (
+                StartupStatus::WritableV1MigrationPreparedAwaitingTransaction,
+                "writableV1MigrationPreparedAwaitingTransaction",
+            ),
+            (
+                StartupStatus::MigrationCommittedRestartRequired,
+                "migrationCommittedRestartRequired",
+            ),
+            (
+                StartupStatus::MigrationFailedRestartRequired,
+                "migrationFailedRestartRequired",
+            ),
+        ] {
+            assert_eq!(status.serialized_name(), serialized_name);
+        }
+    }
+
+    #[test]
+    fn migration_status_tracing_is_debug_only_redacted_and_at_the_return_boundaries() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let production = SOURCE.split_once("#[cfg(test)]\nmod tests").unwrap().0;
+        let lifecycle_status = production
+            .split_once("pub(crate) fn status(&self) -> StartupStatus")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn business_features_available")
+            .unwrap()
+            .0;
+        let command = production
+            .split_once(
+                "pub(crate) fn startup_status(state: tauri::State<'_, Arc<ApplicationLifecycle>>) -> StartupStatus",
+            )
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn first_time_setup_available")
+            .unwrap()
+            .0;
+
+        assert!(lifecycle_status.contains("phase=\"lifecycle_status\""));
+        assert!(lifecycle_status.contains("status.serialized_name()"));
+        assert!(
+            lifecycle_status.rfind("status\n").unwrap()
+                > lifecycle_status.find("eprintln!").unwrap()
+        );
+        assert!(command.contains("phase=\"startup_status_request\""));
+        assert!(command.contains("let status = state.status();"));
+        assert!(command.contains("phase=\"startup_status_response\""));
+        assert!(command.contains("status.serialized_name()"));
+        assert!(
+            command.rfind("status\n").unwrap() > command.find("startup_status_response").unwrap()
+        );
+        assert!(
+            production
+                .contains("#[cfg(debug_assertions)]\nfn emit_migration_preparation_state_trace")
+        );
+        assert!(production.contains("phase=\"first_volume_accepted\""));
+
+        for forbidden in [
+            "{:?}",
+            "drive_letter",
+            "volume_guid",
+            "disk_number",
+            "device_serial",
+            "native_handle",
+            "recovery_set_id",
+            "parish_id",
+            "installation_id",
+            "migration_id",
+        ] {
+            assert!(!lifecycle_status.contains(forbidden));
+            assert!(!command.contains(forbidden));
+        }
+    }
 
     #[cfg(windows)]
     #[test]
@@ -8354,7 +8625,7 @@ mod tests {
         assert!(retry_dispatch.contains("self.run_custody_dispatch("));
         assert!(
             retry_dispatch
-                .contains("migration_preparation = MigrationPreparationState::CustodyPrepared")
+                .contains("set_migration_preparation(MigrationPreparationState::CustodyPrepared)")
         );
         for forbidden in [
             "prepare_authorized_production_database_migration",

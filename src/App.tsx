@@ -17,6 +17,8 @@ import {
   requestPostRecoveryMigrationExecutionConfirmation,
   requestSecondRecoveryVolumeSelection,
   retryMigrationRecoveryKeyCustody,
+  traceMigrationPollingDecision,
+  traceMigrationStatus,
   type StartupStatus,
 } from "./lib/startup";
 
@@ -86,6 +88,7 @@ function StartupBoundary({
   secondRecoveryVolumePending,
   status,
 }: StartupBoundaryProps) {
+  traceMigrationStatus("render", status);
   const content = {
     starting: "Preparing the application securely. This may take some time.",
     unavailable: "The application is unavailable.",
@@ -199,8 +202,9 @@ export function App() {
     const refresh = async () => {
       const status = await getStartupStatus();
       if (!active) return;
+      traceMigrationStatus("state_update", status);
       setStartupStatus(status);
-      if (
+      const shouldContinuePolling =
         status === "starting" ||
         status === "ready" ||
         status === "setupInProgress" ||
@@ -210,8 +214,9 @@ export function App() {
         status === "firstRecoveryVolumeAcceptedAwaitingSecondDevice" ||
         status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" ||
         status === "writableV1MigrationPreparedAwaitingTransaction" ||
-        status === "stopping"
-      ) {
+        status === "stopping";
+      traceMigrationPollingDecision(shouldContinuePolling, status);
+      if (shouldContinuePolling) {
         timer = setTimeout(refresh, 500);
       }
     };
