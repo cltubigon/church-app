@@ -17,12 +17,13 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CallWindowProcW, CreateWindowExW, DS_CENTER,
             DS_MODALFRAME, DestroyWindow, DialogBoxIndirectParamW, ES_AUTOVSCROLL, ES_MULTILINE,
-            ES_WANTRETURN, EndDialog, GWLP_USERDATA, GWLP_WNDPROC, GetWindowLongPtrW,
-            GetWindowTextLengthW, GetWindowTextW, IDCANCEL, IDOK, IsWindow, SW_HIDE, SW_SHOW,
-            SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos,
-            SetWindowTextW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPY, WM_CUT,
-            WM_GETFONT, WM_INITDIALOG, WM_KEYDOWN, WM_NCDESTROY, WM_PASTE, WNDPROC, WS_BORDER,
-            WS_CAPTION, WS_CHILD, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+            ES_WANTRETURN, EndDialog, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect,
+            GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IDCANCEL, IDOK, IsWindow,
+            SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW,
+            SetWindowPos, SetWindowTextW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU,
+            WM_COPY, WM_CUT, WM_GETFONT, WM_INITDIALOG, WM_KEYDOWN, WM_NCDESTROY, WM_PASTE,
+            WNDPROC, WS_BORDER, WS_CAPTION, WS_CHILD, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+            WS_VSCROLL,
         },
     },
 };
@@ -53,10 +54,9 @@ const CONTROL_LEFT: i32 = 16;
 const CONTROL_WIDTH: i32 = 448;
 const DISPLAY_TOP: i32 = 54;
 const DISPLAY_HEIGHT: i32 = 190;
-const PRIMARY_LEFT: i32 = 272;
-const CANCEL_LEFT: i32 = 372;
 const BUTTON_TOP: i32 = 258;
 const TEXT_EXTENT_PADDING: i32 = 8;
+const PRIMARY_LABEL_COUNT: usize = 6;
 
 type NativeDeviceContext = *mut c_void;
 type NativeGdiObject = *mut c_void;
@@ -163,6 +163,10 @@ struct DialogContext {
     controls: DialogControls,
     reveal_width_growth: i32,
     reveal_height_growth: i32,
+    applied_width_growth: i32,
+    applied_height_growth: i32,
+    base_client: Option<PixelRect>,
+    button_metrics: Option<ButtonTextMetrics>,
 }
 
 impl DialogContext {
@@ -175,6 +179,10 @@ impl DialogContext {
             controls: DialogControls::empty(),
             reveal_width_growth: 0,
             reveal_height_growth: 0,
+            applied_width_growth: 0,
+            applied_height_growth: 0,
+            base_client: None,
+            button_metrics: None,
         }
     }
 
@@ -373,59 +381,94 @@ impl DialogContext {
     }
 
     fn apply_reveal_layout(&mut self, layout: RevealLayout) -> Result<(), ()> {
-        let width_growth = self.reveal_width_growth.max(layout.width_growth);
-        let height_growth = self.reveal_height_growth.max(layout.height_growth);
+        self.reveal_width_growth = self.reveal_width_growth.max(layout.width_growth);
+        self.reveal_height_growth = self.reveal_height_growth.max(layout.height_growth);
+        self.apply_current_layout()
+    }
+
+    fn initialize_layout(&mut self) -> Result<(), ()> {
+        self.base_client = Some(dialog_client_rect(self.dialog)?);
+        self.button_metrics = Some(measure_button_texts(
+            self.controls.primary,
+            self.controls.cancel,
+        )?);
+        self.apply_current_layout()
+    }
+
+    fn apply_current_layout(&mut self) -> Result<(), ()> {
+        let base_client = self.base_client.ok_or(())?;
+        let button_metrics = self.button_metrics.ok_or(())?;
+        let button_top = BUTTON_TOP
+            .checked_add(self.reveal_height_growth)
+            .ok_or(())?;
+        let minimum_client_width = button_metrics.minimum_client_width()?;
+        let minimum_client_height = button_metrics.minimum_client_height(button_top)?;
+        let width_growth = base_client
+            .width()?
+            .checked_add(self.reveal_width_growth)
+            .ok_or(())?
+            .max(minimum_client_width)
+            .checked_sub(base_client.width()?)
+            .ok_or(())?;
+        let height_growth = base_client
+            .height()?
+            .checked_add(self.reveal_height_growth)
+            .ok_or(())?
+            .max(minimum_client_height)
+            .checked_sub(base_client.height()?)
+            .ok_or(())?;
         let width_delta = width_growth
-            .checked_sub(self.reveal_width_growth)
+            .checked_sub(self.applied_width_growth)
             .ok_or(())?;
         let height_delta = height_growth
-            .checked_sub(self.reveal_height_growth)
+            .checked_sub(self.applied_height_growth)
             .ok_or(())?;
-        if width_delta == 0 && height_delta == 0 {
-            return Ok(());
-        }
 
-        let mut dialog_bounds = RECT::default();
-        // SAFETY: `dialog` is the live modal dialog owned by this context.
-        if unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(
-                self.dialog,
-                &mut dialog_bounds,
-            )
-        } == 0
-        {
-            return Err(());
-        }
-        let dialog_width = dialog_bounds
-            .right
-            .checked_sub(dialog_bounds.left)
-            .and_then(|width| width.checked_add(width_delta))
-            .ok_or(())?;
-        let dialog_height = dialog_bounds
-            .bottom
-            .checked_sub(dialog_bounds.top)
-            .and_then(|height| height.checked_add(height_delta))
-            .ok_or(())?;
-        let dialog_left = dialog_bounds.left.checked_sub(width_delta / 2).ok_or(())?;
-        let dialog_top = dialog_bounds.top.checked_sub(height_delta / 2).ok_or(())?;
-        // SAFETY: the dialog remains topologically unchanged; only its pixel bounds change.
-        if unsafe {
-            SetWindowPos(
-                self.dialog,
-                null_mut(),
-                dialog_left,
-                dialog_top,
-                dialog_width,
-                dialog_height,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            )
-        } == 0
-        {
-            return Err(());
+        if width_delta != 0 || height_delta != 0 {
+            let mut dialog_bounds = RECT::default();
+            // SAFETY: `dialog` is the live modal dialog owned by this context.
+            if unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(
+                    self.dialog,
+                    &mut dialog_bounds,
+                )
+            } == 0
+            {
+                return Err(());
+            }
+            let dialog_width = dialog_bounds
+                .right
+                .checked_sub(dialog_bounds.left)
+                .and_then(|width| width.checked_add(width_delta))
+                .ok_or(())?;
+            let dialog_height = dialog_bounds
+                .bottom
+                .checked_sub(dialog_bounds.top)
+                .and_then(|height| height.checked_add(height_delta))
+                .ok_or(())?;
+            let dialog_left = dialog_bounds.left.checked_sub(width_delta / 2).ok_or(())?;
+            let dialog_top = dialog_bounds.top.checked_sub(height_delta / 2).ok_or(())?;
+            // SAFETY: the dialog remains topologically unchanged; only its pixel bounds change.
+            if unsafe {
+                SetWindowPos(
+                    self.dialog,
+                    null_mut(),
+                    dialog_left,
+                    dialog_top,
+                    dialog_width,
+                    dialog_height,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            } == 0
+            {
+                return Err(());
+            }
         }
 
         let content_width = CONTROL_WIDTH.checked_add(width_growth).ok_or(())?;
-        let content_height = DISPLAY_HEIGHT.checked_add(height_growth).ok_or(())?;
+        let content_height = DISPLAY_HEIGHT
+            .checked_add(self.reveal_height_growth)
+            .ok_or(())?;
         position_control(self.controls.prompt, (CONTROL_LEFT, 14, content_width, 36))?;
         for control in [
             self.controls.display_one,
@@ -438,26 +481,12 @@ impl DialogContext {
                 (CONTROL_LEFT, DISPLAY_TOP, content_width, content_height),
             )?;
         }
-        position_control(
-            self.controls.primary,
-            (
-                PRIMARY_LEFT.checked_add(width_growth).ok_or(())?,
-                BUTTON_TOP.checked_add(height_growth).ok_or(())?,
-                92,
-                28,
-            ),
-        )?;
-        position_control(
-            self.controls.cancel,
-            (
-                CANCEL_LEFT.checked_add(width_growth).ok_or(())?,
-                BUTTON_TOP.checked_add(height_growth).ok_or(())?,
-                92,
-                28,
-            ),
-        )?;
-        self.reveal_width_growth = width_growth;
-        self.reveal_height_growth = height_growth;
+        let final_client = dialog_client_rect(self.dialog)?;
+        let button_row = ButtonRowLayout::from_metrics(final_client, button_top, button_metrics)?;
+        position_control(self.controls.primary, button_row.primary.as_tuple())?;
+        position_control(self.controls.cancel, button_row.cancel.as_tuple())?;
+        self.applied_width_growth = width_growth;
+        self.applied_height_growth = height_growth;
         Ok(())
     }
 
@@ -586,6 +615,250 @@ impl RevealLayout {
     fn display_width(self) -> Result<i32, ()> {
         CONTROL_WIDTH.checked_add(self.width_growth).ok_or(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PixelRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PixelRect {
+    fn width(self) -> Result<i32, ()> {
+        self.right
+            .checked_sub(self.left)
+            .filter(|width| *width > 0)
+            .ok_or(())
+    }
+
+    fn height(self) -> Result<i32, ()> {
+        self.bottom
+            .checked_sub(self.top)
+            .filter(|height| *height > 0)
+            .ok_or(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ControlBounds {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+impl ControlBounds {
+    fn right(self) -> Result<i32, ()> {
+        self.left.checked_add(self.width).ok_or(())
+    }
+
+    fn bottom(self) -> Result<i32, ()> {
+        self.top.checked_add(self.height).ok_or(())
+    }
+
+    fn as_tuple(self) -> (i32, i32, i32, i32) {
+        (self.left, self.top, self.width, self.height)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ButtonTextMetrics {
+    primary_label_widths: [i32; PRIMARY_LABEL_COUNT],
+    cancel_label_width: i32,
+    text_height: i32,
+}
+
+impl ButtonTextMetrics {
+    fn dimensions(self) -> Result<(i32, i32, i32, i32), ()> {
+        if self.text_height <= 0
+            || self.cancel_label_width <= 0
+            || self.primary_label_widths.iter().any(|width| *width <= 0)
+        {
+            return Err(());
+        }
+        let horizontal_padding = self.text_height.checked_mul(2).ok_or(())?;
+        let primary_width = self
+            .primary_label_widths
+            .iter()
+            .copied()
+            .max()
+            .ok_or(())?
+            .checked_add(horizontal_padding)
+            .ok_or(())?;
+        let cancel_width = self
+            .cancel_label_width
+            .checked_add(horizontal_padding)
+            .ok_or(())?;
+        let gap = self.text_height.checked_add(1).ok_or(())? / 2;
+        let button_height = self.text_height.checked_mul(2).ok_or(())?;
+        Ok((primary_width, cancel_width, gap, button_height))
+    }
+
+    fn minimum_client_width(self) -> Result<i32, ()> {
+        let (primary_width, cancel_width, gap, _) = self.dimensions()?;
+        primary_width
+            .checked_add(cancel_width)
+            .and_then(|width| width.checked_add(gap.checked_mul(3)?))
+            .ok_or(())
+    }
+
+    fn minimum_client_height(self, desired_top: i32) -> Result<i32, ()> {
+        let (_, _, margin, button_height) = self.dimensions()?;
+        desired_top
+            .checked_add(button_height)
+            .and_then(|bottom| bottom.checked_add(margin))
+            .ok_or(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ButtonRowLayout {
+    primary: ControlBounds,
+    cancel: ControlBounds,
+    gap: i32,
+}
+
+impl ButtonRowLayout {
+    fn from_metrics(
+        client: PixelRect,
+        desired_top: i32,
+        metrics: ButtonTextMetrics,
+    ) -> Result<Self, ()> {
+        let (primary_width, cancel_width, gap, button_height) = metrics.dimensions()?;
+        let available_width = client.width()?;
+        let required_width = metrics.minimum_client_width()?;
+        if available_width < required_width {
+            return Err(());
+        }
+        let minimum_top = client.top.checked_add(gap).ok_or(())?;
+        let maximum_top = client
+            .bottom
+            .checked_sub(gap)
+            .and_then(|bottom| bottom.checked_sub(button_height))
+            .ok_or(())?;
+        if maximum_top < minimum_top {
+            return Err(());
+        }
+        let top = desired_top.clamp(minimum_top, maximum_top);
+        let cancel_right = client.right.checked_sub(gap).ok_or(())?;
+        let cancel_left = cancel_right.checked_sub(cancel_width).ok_or(())?;
+        let primary_right = cancel_left.checked_sub(gap).ok_or(())?;
+        let primary_left = primary_right.checked_sub(primary_width).ok_or(())?;
+        let result = Self {
+            primary: ControlBounds {
+                left: primary_left,
+                top,
+                width: primary_width,
+                height: button_height,
+            },
+            cancel: ControlBounds {
+                left: cancel_left,
+                top,
+                width: cancel_width,
+                height: button_height,
+            },
+            gap,
+        };
+        if result.primary.left < client.left
+            || result.primary.right()? > client.right
+            || result.cancel.left < client.left
+            || result.cancel.right()? > client.right
+            || result.primary.right()? >= result.cancel.left
+            || result.primary.top < client.top
+            || result.primary.bottom()? > client.bottom
+            || result.cancel.top < client.top
+            || result.cancel.bottom()? > client.bottom
+        {
+            return Err(());
+        }
+        Ok(result)
+    }
+}
+
+fn dialog_client_rect(dialog: HWND) -> Result<PixelRect, ()> {
+    let mut client = RECT::default();
+    // SAFETY: `dialog` is the live modal dialog and `client` is writable.
+    if unsafe { GetClientRect(dialog, &mut client) } == 0 {
+        return Err(());
+    }
+    let result = PixelRect {
+        left: client.left,
+        top: client.top,
+        right: client.right,
+        bottom: client.bottom,
+    };
+    result.width()?;
+    result.height()?;
+    Ok(result)
+}
+
+fn measure_button_texts(primary: HWND, cancel: HWND) -> Result<ButtonTextMetrics, ()> {
+    let primary_labels = [
+        (windows_sys::w!("Begin"), 5),
+        (windows_sys::w!("Paper copy 1 written"), 20),
+        (windows_sys::w!("Verify paper copy 1"), 19),
+        (windows_sys::w!("Paper copy 2 written"), 20),
+        (windows_sys::w!("Verify paper copy 2"), 19),
+        (windows_sys::w!("Finish"), 6),
+    ];
+    let cancel_labels = [(windows_sys::w!("Cancel"), 6)];
+    let (primary_label_widths, primary_height) = measure_control_labels(primary, &primary_labels)?;
+    let (cancel_widths, cancel_height) = measure_control_labels(cancel, &cancel_labels)?;
+    Ok(ButtonTextMetrics {
+        primary_label_widths,
+        cancel_label_width: cancel_widths[0],
+        text_height: primary_height.max(cancel_height),
+    })
+}
+
+fn measure_control_labels<const N: usize>(
+    control: HWND,
+    labels: &[(*const u16, i32); N],
+) -> Result<([i32; N], i32), ()> {
+    // SAFETY: `control` is a live BUTTON; its DC uses the active window DPI.
+    let device_context = unsafe { GetDC(control) };
+    if device_context.is_null() {
+        return Err(());
+    }
+    // WM_GETFONT obtains the font actually assigned to this button. When null, the freshly
+    // acquired control DC already owns the active system font used to draw the label.
+    let active_font = unsafe { SendMessageW(control, WM_GETFONT, 0, 0) } as NativeGdiObject;
+    let previous_font = if active_font.is_null() {
+        null_mut()
+    } else {
+        // SAFETY: both handles are live GDI objects for the duration of this measurement.
+        unsafe { SelectObject(device_context, active_font) }
+    };
+    let measurement = if !active_font.is_null() && previous_font.is_null() {
+        Err(())
+    } else {
+        let mut widths = [0; N];
+        let mut text_height = 0;
+        let mut valid = true;
+        for (index, (label, length)) in labels.iter().copied().enumerate() {
+            let mut extent = SIZE::default();
+            // SAFETY: every label is a static UTF-16 string with the stated non-NUL length.
+            if unsafe { GetTextExtentPoint32W(device_context, label, length, &mut extent) } == 0
+                || extent.cx <= 0
+                || extent.cy <= 0
+            {
+                valid = false;
+                break;
+            }
+            widths[index] = extent.cx;
+            text_height = text_height.max(extent.cy);
+        }
+        valid.then_some((widths, text_height)).ok_or(())
+    };
+    if !previous_font.is_null() {
+        // SAFETY: restore the DC's original font before releasing it.
+        unsafe { SelectObject(device_context, previous_font) };
+    }
+    // SAFETY: release the DC acquired above exactly once.
+    let released = unsafe { ReleaseDC(control, device_context) } != 0;
+    if released { measurement } else { Err(()) }
 }
 
 fn measure_reveal_text(
@@ -890,7 +1163,7 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
             windows_sys::w!("BUTTON"),
             windows_sys::w!("Begin"),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | (BS_DEFPUSHBUTTON as u32),
-            (PRIMARY_LEFT, BUTTON_TOP, 92, 28),
+            (0, 0, 1, 1),
             dialog,
             IDOK,
         )?
@@ -900,7 +1173,7 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
             windows_sys::w!("BUTTON"),
             windows_sys::w!("Cancel"),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | (BS_PUSHBUTTON as u32),
-            (CANCEL_LEFT, BUTTON_TOP, 92, 28),
+            (0, 0, 1, 1),
             dialog,
             IDCANCEL,
         )?
@@ -909,6 +1182,7 @@ unsafe fn create_controls(context: &mut DialogContext) -> Result<(), ()> {
         // SAFETY: each handle is a live EDIT; this sets its hard UTF-16 input cap.
         unsafe { SendMessageW(edit, EM_SETLIMITTEXT, NATIVE_TEXT_LIMIT, 0) };
     }
+    context.initialize_layout()?;
     context.controls.display_one_previous = unsafe {
         subclass_control(
             context.controls.display_one,
@@ -1316,6 +1590,85 @@ mod tests {
         }
     }
 
+    fn button_metrics() -> ButtonTextMetrics {
+        ButtonTextMetrics {
+            primary_label_widths: [40, 160, 152, 160, 152, 48],
+            cancel_label_width: 50,
+            text_height: 16,
+        }
+    }
+
+    #[test]
+    fn measured_button_row_accommodates_every_label_and_cancel() {
+        let metrics = button_metrics();
+        let client = PixelRect {
+            left: 0,
+            top: 0,
+            right: 500,
+            bottom: 340,
+        };
+        let layout = ButtonRowLayout::from_metrics(client, BUTTON_TOP, metrics).unwrap();
+        for measured_label_width in metrics.primary_label_widths {
+            assert!(layout.primary.width > measured_label_width);
+        }
+        assert!(layout.cancel.width > metrics.cancel_label_width);
+        assert_eq!(layout.gap, (metrics.text_height + 1) / 2);
+        assert!(layout.gap > 0);
+    }
+
+    #[test]
+    fn measured_button_row_is_right_aligned_contained_and_non_overlapping() {
+        let metrics = button_metrics();
+        let client = PixelRect {
+            left: 0,
+            top: 0,
+            right: 500,
+            bottom: 340,
+        };
+        let layout = ButtonRowLayout::from_metrics(client, BUTTON_TOP, metrics).unwrap();
+        assert!(layout.primary.left >= client.left);
+        assert!(layout.primary.right().unwrap() <= client.right);
+        assert!(layout.cancel.left >= client.left);
+        assert!(layout.cancel.right().unwrap() <= client.right);
+        assert!(layout.primary.right().unwrap() < layout.cancel.left);
+        assert_eq!(layout.cancel.right().unwrap(), client.right - layout.gap);
+        assert!(layout.primary.top >= client.top);
+        assert!(layout.primary.bottom().unwrap() <= client.bottom);
+        assert!(layout.cancel.top >= client.top);
+        assert!(layout.cancel.bottom().unwrap() <= client.bottom);
+    }
+
+    #[test]
+    fn button_row_remains_valid_for_wider_display_and_larger_font_extents() {
+        let reveal = RevealLayout::from_metrics(RevealTextMetrics {
+            maximum_line_width: 912,
+            total_line_height: 240,
+            line_count: REVEAL_LINE_COUNT,
+            longest_line_units: REVEAL_LONGEST_LINE_UNITS,
+        })
+        .unwrap();
+        let metrics = ButtonTextMetrics {
+            primary_label_widths: [80, 320, 304, 320, 304, 96],
+            cancel_label_width: 100,
+            text_height: 32,
+        };
+        let client = PixelRect {
+            left: 0,
+            top: 0,
+            right: CONTROL_LEFT + reveal.display_width().unwrap() + 32,
+            bottom: BUTTON_TOP + reveal.height_growth + 96,
+        };
+        let layout =
+            ButtonRowLayout::from_metrics(client, BUTTON_TOP + reveal.height_growth, metrics)
+                .unwrap();
+        assert!(layout.primary.width > 320);
+        assert!(layout.cancel.width > 100);
+        assert_eq!(layout.gap, 16);
+        assert!(layout.primary.right().unwrap() < layout.cancel.left);
+        assert!(layout.cancel.right().unwrap() <= client.right);
+        assert!(layout.cancel.bottom().unwrap() <= client.bottom);
+    }
+
     #[test]
     fn display_conversion_rejects_impossible_noncanonical_shapes() {
         let mut wrong_separator_count = canonical_record();
@@ -1443,6 +1796,32 @@ mod tests {
         assert!(source.contains("GetTextExtentPoint32W"));
         assert!(source.contains("STATIC_LEFT_NO_WORD_WRAP"));
         assert!(source.contains("self.apply_reveal_layout(layout)"));
+    }
+
+    #[test]
+    fn all_pages_share_active_font_measured_final_client_button_layout() {
+        let source = include_str!("native_windows.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        for label in [
+            "Begin",
+            "Paper copy 1 written",
+            "Verify paper copy 1",
+            "Paper copy 2 written",
+            "Verify paper copy 2",
+            "Finish",
+            "Cancel",
+        ] {
+            assert!(source.contains(label), "unmeasured label: {label}");
+        }
+        assert!(source.contains("measure_button_texts("));
+        assert!(source.contains("measure_control_labels("));
+        assert!(source.contains("SendMessageW(control, WM_GETFONT"));
+        assert!(source.contains("GetClientRect(dialog"));
+        assert!(source.contains("ButtonRowLayout::from_metrics(final_client"));
+        assert!(!source.contains("(PRIMARY_LEFT, BUTTON_TOP, 92, 28)"));
+        assert!(!source.contains("(CANCEL_LEFT, BUTTON_TOP, 92, 28)"));
     }
 
     #[test]
