@@ -882,7 +882,7 @@ mod tests {
             assert!(!frontend_source.contains(OFFER));
         }
 
-        assert_eq!(lifecycle_production.matches("#[tauri::command]").count(), 8);
+        assert_eq!(lifecycle_production.matches("#[tauri::command]").count(), 9);
         for command in [
             "health_check,",
             "startup_status,",
@@ -892,6 +892,7 @@ mod tests {
             "request_production_database_migration,",
             "request_post_recovery_migration_execution_confirmation,",
             "request_second_recovery_volume_selection,",
+            "request_first_recovery_key_reentry,",
             "retry_migration_recovery_key_custody,",
         ] {
             assert!(BOOTSTRAP.contains(command));

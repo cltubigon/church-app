@@ -357,6 +357,12 @@ The frontend sees only a Rust-owned Boolean capability and coarse request result
 
 Rust retains the pending opportunity throughout the native initial confirmation. The modal uses the real main-window `HWND` on the main thread; only its Rust result may start canonical revalidation. Cancellation consumes and closes pending authority, and a fresh request is permitted only after that close resolves. Exact V2 and inconsistent or unsupported-newer states remain fail closed. The recovery, Layer D, post-recovery confirmation, writable preparation, transaction, checked-close, and restart gates are unchanged. Real dialog modality, accessibility, shutdown interaction, real recovery media, and end-to-end migration remain manually unvalidated.
 
+## First recovery-set verification reachability boundary
+
+The renderer receives only the fixed `MigrationRecoveryKeyReentryAwaitingVerification` status and one coarse first-re-entry request result. Its IPC request has no payload: no recovery record, recovery key, path, volume or disk identity, device serial, native handle, migration identity, recovery envelope, database key, or ownership object crosses the trust boundary.
+
+Rust accepts the request only at exact `FirstRecoveryManifestPublishedAwaitingVerification`, with no outstanding re-entry request, no shutdown intent, and an available migration control channel. It reuses the existing worker command and native dialog; the recovery record and all derived secret material remain bounded to the existing Rust-owned verification path. The shell gains no retry authority for later verifier-close, complete-set, second-set, or aggregate failure states.
+
 ## Pre-exposure custody retry boundary
 
 `InterruptedBeforeExposure` and `UnavailableBeforeExposure` retain the exact undisclosed prepared custody authority on the migration worker while cross-process migration exclusivity remains held. Rust exposes only the coarse `MigrationRecoveryKeyCustodyAwaitingRetry` status. An argument-free renderer request may enqueue one retry only from those exact parked states and only before shutdown wins; a concurrent request is rejected. The worker converts an interruption through its consuming canonical `retry()` operation or directly reuses the unavailable prepared owner, then redispatches it through the existing main-thread native custody path. No preparation stage, confirmation, key generation, envelope sealing, backup staging, or source selection is repeated.

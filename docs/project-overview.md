@@ -18,6 +18,12 @@ After canonical first recovery-volume preparation succeeds, Rust reports `FirstR
 
 The existing worker-owned second-volume path remains authoritative: it retains the exact accepted first root while the canonical native picker runs, independently validates the second selection, and applies the existing production/first/second physical-device separation rules. Cancellation, picker unavailability, and pre-consumption retention failure preserve the first owner for retry; shutdown uses the existing abandonment chain. Opening the second picker starts neither recovery publication nor migration, and this state does not claim recovery or migration completion. A real Windows test must select a different eligible second device and stop after the second-selection result.
 
+## Reachable first recovery-set verification
+
+After the first recovery manifest is published, Rust reports the nonterminal `MigrationRecoveryKeyReentryAwaitingVerification` status instead of generic unavailability. The shell explains that recovery-key verification is required and offers only `Verify recovery key`, which invokes an argument-free command and then continues observing the existing startup-status polling chain.
+
+The command reuses the existing guarded first-set re-entry request, native Windows dialog, recovered-key verification, and complete-set verification. React receives only the coarse status and `started`, `notAllowed`, or `unavailable`; recovery records, keys, paths, device identities, native handles, and migration identities remain Rust/native-owned. First verifier-close retry, first complete-set retry, second-set re-entry, later retries, and final aggregate retry remain outside this reachability slice. Manual Windows validation must stop after observing the existing native re-entry dialog unless further progress is separately authorized.
+
 ## Observable active migration preparation
 
 While protected migration preparation is active, Rust reports the explicit coarse nonterminal `MigrationPreparationInProgress` status even when the underlying startup lifecycle is temporarily interrupted. The shell states only that the protected database upgrade is being prepared and keeps using the existing `startup_status` polling loop, allowing the later accepted-first-volume state and its separate second-device selection step to become visible. Genuine generic `Unavailable` remains terminal. No custody, publication, device-selection, migration transaction, or database semantics changed, and the complete migration ceremony remains manually unvalidated.

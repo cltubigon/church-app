@@ -634,7 +634,13 @@ Active `MigrationPreparationState::Preparing` now maps to the explicit coarse no
 
 This observability correction changes no migration, custody, publication, or recovery-device authority. First recovery-device acceptance remains reachable as `FirstRecoveryVolumeAcceptedAwaitingSecondDevice`, and selection of a physically separate second device remains a distinct required step. The complete migration ceremony still requires fresh manual Windows validation.
 
-## 44. Links
+## 44. Reachable first recovery-set verification
+
+Exact `FirstRecoveryManifestPublishedAwaitingVerification` now maps to the coarse nonterminal `MigrationRecoveryKeyReentryAwaitingVerification` status. The shell presents one `Verify recovery key` action and sends only the argument-free `request_first_recovery_key_reentry` command. It continues the existing status polling chain while this boundary remains active; ordinary `Unavailable` remains terminal.
+
+The command preserves the existing exact-state, one-outstanding-request, shutdown, and control-channel guards and reuses `MigrationWorkerCommand::RequestFirstRecoveryKeyReentry`. The existing native Rust dialog and canonical recovered-key plus first complete-set verification paths remain authoritative. Only coarse status/result cross IPC; recovery material, paths, device identities, native handles, migration identities, and ownership remain outside React. First verifier-close retry, first complete-set retry, second-set re-entry and retries, final aggregate retry, and later migration behavior remain unexposed by this slice. Fresh manual Windows validation must stop after observing the native re-entry dialog/result unless continuation is separately approved.
+
+## 45. Links
 
 - [Project overview](docs/project-overview.md)
 - [Architecture](docs/architecture.md)

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getStartupStatus,
+  requestFirstRecoveryKeyReentry,
   requestFirstTimeSetup,
   requestSecondRecoveryVolumeSelection,
 } from "./startup";
@@ -29,6 +30,15 @@ describe("getStartupStatus", () => {
 
     await expect(getStartupStatus()).resolves.toBe(
       "migrationRecoveryKeyCustodyVerifiedAwaitingPublication",
+    );
+    expect(mockedInvoke).toHaveBeenCalledWith("startup_status");
+  });
+
+  it("recognizes first recovery-key re-entry awaiting verification", async () => {
+    mockedInvoke.mockResolvedValue("migrationRecoveryKeyReentryAwaitingVerification");
+
+    await expect(getStartupStatus()).resolves.toBe(
+      "migrationRecoveryKeyReentryAwaitingVerification",
     );
     expect(mockedInvoke).toHaveBeenCalledWith("startup_status");
   });
@@ -92,5 +102,33 @@ describe("requestSecondRecoveryVolumeSelection", () => {
   it("fails closed when invocation rejects", async () => {
     mockedInvoke.mockRejectedValue(new Error("sensitive backend detail"));
     await expect(requestSecondRecoveryVolumeSelection()).resolves.toBe("unavailable");
+  });
+});
+
+describe("requestFirstRecoveryKeyReentry", () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+  });
+
+  it.each(["started", "notAllowed", "unavailable"] as const)(
+    "accepts the known %s result without renderer arguments",
+    async (result) => {
+      mockedInvoke.mockResolvedValue(result);
+      await expect(requestFirstRecoveryKeyReentry()).resolves.toBe(result);
+      expect(mockedInvoke).toHaveBeenCalledWith("request_first_recovery_key_reentry");
+    },
+  );
+
+  it.each(["unknown", { result: "started" }, null])(
+    "fails closed for an unknown backend result",
+    async (result) => {
+      mockedInvoke.mockResolvedValue(result);
+      await expect(requestFirstRecoveryKeyReentry()).resolves.toBe("unavailable");
+    },
+  );
+
+  it("fails closed when invocation rejects", async () => {
+    mockedInvoke.mockRejectedValue(new Error("sensitive backend detail"));
+    await expect(requestFirstRecoveryKeyReentry()).resolves.toBe("unavailable");
   });
 });

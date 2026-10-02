@@ -195,6 +195,7 @@ pub(crate) enum StartupStatus {
     MigrationRecoveryKeyCustodyAwaitingRetry,
     MigrationRecoveryKeyCustodyVerifiedAwaitingPublication,
     FirstRecoveryVolumeAcceptedAwaitingSecondDevice,
+    MigrationRecoveryKeyReentryAwaitingVerification,
     TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
     MigrationExecutionConfirmedAwaitingWritablePreparation,
     WritableV1MigrationPreparedAwaitingTransaction,
@@ -222,6 +223,9 @@ impl StartupStatus {
             }
             Self::FirstRecoveryVolumeAcceptedAwaitingSecondDevice => {
                 "firstRecoveryVolumeAcceptedAwaitingSecondDevice"
+            }
+            Self::MigrationRecoveryKeyReentryAwaitingVerification => {
+                "migrationRecoveryKeyReentryAwaitingVerification"
             }
             Self::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution => {
                 "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
@@ -946,6 +950,14 @@ pub(crate) enum SecondRecoveryVolumeSelectionRequestResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) enum FirstRecoveryKeyReentryRequestResult {
+    Started,
+    NotAllowed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum ProductionDatabaseMigrationRequestResult {
     Started,
     NotAllowed,
@@ -1298,11 +1310,10 @@ impl ApplicationLifecycle {
         }
     }
 
-    /// Private seam for an explicitly initiated first-set recovery-key
-    /// re-entry attempt. It is intentionally unreachable through IPC.
+    /// Narrow seam for an explicitly initiated first-set recovery-key
+    /// re-entry attempt. Only its coarse result is exposed through IPC.
     #[cfg(windows)]
-    #[allow(dead_code)]
-    fn request_first_recovery_key_reentry(&self) -> bool {
+    fn request_first_recovery_key_reentry(&self) -> FirstRecoveryKeyReentryRequestResult {
         let control = {
             let mut inner = self.lock();
             if !matches!(
@@ -1311,10 +1322,10 @@ impl ApplicationLifecycle {
             ) || inner.recovery_key_reentry_outstanding
                 || inner.migration_shutdown_requested
             {
-                return false;
+                return FirstRecoveryKeyReentryRequestResult::NotAllowed;
             }
             let Some(control) = inner.migration_control.clone() else {
-                return false;
+                return FirstRecoveryKeyReentryRequestResult::Unavailable;
             };
             inner.recovery_key_reentry_outstanding = true;
             control
@@ -1323,10 +1334,10 @@ impl ApplicationLifecycle {
             .send(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry)
             .is_ok()
         {
-            true
+            FirstRecoveryKeyReentryRequestResult::Started
         } else {
             self.lock().recovery_key_reentry_outstanding = false;
-            false
+            FirstRecoveryKeyReentryRequestResult::Unavailable
         }
     }
 
@@ -1513,6 +1524,9 @@ impl ApplicationLifecycle {
                 }
                 MigrationPreparationState::FirstRecoveryVolumeRetainedAndSeparatedAwaitingPublication => {
                     StartupStatus::FirstRecoveryVolumeAcceptedAwaitingSecondDevice
+                }
+                MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification => {
+                    StartupStatus::MigrationRecoveryKeyReentryAwaitingVerification
                 }
                 MigrationPreparationState::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution => {
                     StartupStatus::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution
@@ -5749,6 +5763,20 @@ pub(crate) fn request_second_recovery_volume_selection(
 }
 
 #[tauri::command]
+pub(crate) fn request_first_recovery_key_reentry(
+    state: tauri::State<'_, Arc<ApplicationLifecycle>>,
+) -> FirstRecoveryKeyReentryRequestResult {
+    #[cfg(windows)]
+    return state.request_first_recovery_key_reentry();
+
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        FirstRecoveryKeyReentryRequestResult::Unavailable
+    }
+}
+
+#[tauri::command]
 pub(crate) fn retry_migration_recovery_key_custody(
     state: tauri::State<'_, Arc<ApplicationLifecycle>>,
 ) -> MigrationRecoveryKeyCustodyRetryRequestResult {
@@ -5848,6 +5876,10 @@ mod tests {
             (
                 StartupStatus::FirstRecoveryVolumeAcceptedAwaitingSecondDevice,
                 "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
+            ),
+            (
+                StartupStatus::MigrationRecoveryKeyReentryAwaitingVerification,
+                "migrationRecoveryKeyReentryAwaitingVerification",
             ),
             (
                 StartupStatus::TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,
@@ -6956,7 +6988,7 @@ mod tests {
             .0;
         assert_eq!(
             startup_status,
-            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationPreparationInProgress,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    MigrationRecoveryKeyCustodyVerifiedAwaitingPublication,\n    FirstRecoveryVolumeAcceptedAwaitingSecondDevice,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
+            "\n    Starting,\n    Ready,\n    Unavailable,\n    SetupInProgress,\n    SetupRestartRequired,\n    Stopping,\n    ShutdownIncomplete,\n    MigrationPreparationInProgress,\n    MigrationRecoveryKeyCustodyInProgress,\n    MigrationRecoveryKeyCustodyAwaitingRetry,\n    MigrationRecoveryKeyCustodyVerifiedAwaitingPublication,\n    FirstRecoveryVolumeAcceptedAwaitingSecondDevice,\n    MigrationRecoveryKeyReentryAwaitingVerification,\n    TwoCompleteRecoverySetsVerifiedAwaitingMigrationExecution,\n    MigrationExecutionConfirmedAwaitingWritablePreparation,\n    WritableV1MigrationPreparedAwaitingTransaction,\n    MigrationCommittedRestartRequired,\n    MigrationFailedRestartRequired,"
         );
 
         let request_result = SOURCE
@@ -10769,28 +10801,119 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn first_recovery_key_reentry_is_private_explicit_and_one_shot() {
+    fn first_recovery_key_reentry_request_is_state_limited_one_shot_and_reuses_worker_command() {
         const LIB: &str = include_str!("lib.rs");
         let lifecycle = ApplicationLifecycle::new();
         let (sender, receiver) = std::sync::mpsc::channel();
         {
             let mut inner = lifecycle.lock();
-            inner.migration_preparation =
-                MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification;
             inner.migration_control = Some(sender);
+            inner.migration_preparation = MigrationPreparationState::Preparing;
             inner.migration_work_resolved = false;
         }
 
-        assert!(lifecycle.request_first_recovery_key_reentry());
+        assert_eq!(
+            lifecycle.request_first_recovery_key_reentry(),
+            FirstRecoveryKeyReentryRequestResult::NotAllowed
+        );
+        assert!(receiver.try_recv().is_err());
+
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_preparation =
+                MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification;
+        }
+
+        assert_eq!(
+            lifecycle.request_first_recovery_key_reentry(),
+            FirstRecoveryKeyReentryRequestResult::Started
+        );
         assert!(matches!(
             receiver.try_recv(),
             Ok(MigrationWorkerCommand::RequestFirstRecoveryKeyReentry)
         ));
-        assert!(!lifecycle.request_first_recovery_key_reentry());
+        assert_eq!(
+            lifecycle.request_first_recovery_key_reentry(),
+            FirstRecoveryKeyReentryRequestResult::NotAllowed
+        );
+        assert!(receiver.try_recv().is_err());
         assert!(!lifecycle.lock().migration_work_resolved);
-        assert!(!LIB.contains("request_first_recovery_key_reentry"));
+
+        {
+            let mut inner = lifecycle.lock();
+            inner.recovery_key_reentry_outstanding = false;
+            inner.migration_shutdown_requested = true;
+        }
+        assert_eq!(
+            lifecycle.request_first_recovery_key_reentry(),
+            FirstRecoveryKeyReentryRequestResult::NotAllowed
+        );
+
+        {
+            let mut inner = lifecycle.lock();
+            inner.migration_shutdown_requested = false;
+            inner.migration_control = None;
+        }
+        assert_eq!(
+            lifecycle.request_first_recovery_key_reentry(),
+            FirstRecoveryKeyReentryRequestResult::Unavailable
+        );
+
+        assert!(LIB.contains("request_first_recovery_key_reentry,"));
         assert!(!LIB.contains("NativeRecoveryKeyReentryOutcome"));
         assert!(!LIB.contains("ReenteredMigrationRecoveryKeyCustodyV1"));
+    }
+
+    #[test]
+    fn first_recovery_manifest_maps_to_truthful_nonterminal_coarse_status() {
+        let lifecycle = ApplicationLifecycle::new();
+        {
+            let mut inner = lifecycle.lock();
+            inner.state = LifecycleState::Failed(CoarseStartupFailure::StartupUnavailable);
+            inner.migration_preparation =
+                MigrationPreparationState::FirstRecoveryManifestPublishedAwaitingVerification;
+            inner.migration_work_resolved = false;
+        }
+
+        assert_eq!(
+            lifecycle.status(),
+            StartupStatus::MigrationRecoveryKeyReentryAwaitingVerification
+        );
+        assert_eq!(
+            lifecycle.status().serialized_name(),
+            "migrationRecoveryKeyReentryAwaitingVerification"
+        );
+        assert_ne!(lifecycle.status(), StartupStatus::Unavailable);
+        assert!(!lifecycle.first_time_setup_available());
+    }
+
+    #[test]
+    fn first_recovery_key_reentry_ipc_is_argument_free_and_coarse() {
+        const SOURCE: &str = include_str!("application_lifecycle.rs");
+        let command = SOURCE
+            .split_once("#[tauri::command]\npub(crate) fn request_first_recovery_key_reentry(")
+            .unwrap()
+            .1
+            .split_once("#[tauri::command]")
+            .unwrap()
+            .0;
+        let parameters = command.split_once(") ->").unwrap().0;
+
+        assert!(command.contains("tauri::State<'_, Arc<ApplicationLifecycle>>"));
+        assert!(command.contains("FirstRecoveryKeyReentryRequestResult"));
+        for forbidden in [
+            "Path",
+            "record",
+            "recovery_key",
+            "volume",
+            "disk",
+            "device",
+            "serial",
+            "migration_id",
+            "HWND",
+        ] {
+            assert!(!parameters.contains(forbidden));
+        }
     }
 
     #[cfg(windows)]

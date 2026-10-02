@@ -13,6 +13,7 @@ export type StartupStatus =
   | "migrationRecoveryKeyCustodyAwaitingRetry"
   | "migrationRecoveryKeyCustodyVerifiedAwaitingPublication"
   | "firstRecoveryVolumeAcceptedAwaitingSecondDevice"
+  | "migrationRecoveryKeyReentryAwaitingVerification"
   | "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution"
   | "migrationExecutionConfirmedAwaitingWritablePreparation"
   | "writableV1MigrationPreparedAwaitingTransaction"
@@ -40,6 +41,7 @@ const startupStatuses = new Set<StartupStatus>([
   "migrationRecoveryKeyCustodyAwaitingRetry",
   "migrationRecoveryKeyCustodyVerifiedAwaitingPublication",
   "firstRecoveryVolumeAcceptedAwaitingSecondDevice",
+  "migrationRecoveryKeyReentryAwaitingVerification",
   "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
   "migrationExecutionConfirmedAwaitingWritablePreparation",
   "writableV1MigrationPreparedAwaitingTransaction",
@@ -83,6 +85,8 @@ export type MigrationRecoveryKeyCustodyRetryRequestResult =
 
 export type SecondRecoveryVolumeSelectionRequestResult = "started" | "notAllowed" | "unavailable";
 
+export type FirstRecoveryKeyReentryRequestResult = "started" | "notAllowed" | "unavailable";
+
 const postRecoveryMigrationExecutionConfirmationRequestResults =
   new Set<PostRecoveryMigrationExecutionConfirmationRequestResult>([
     "started",
@@ -99,6 +103,12 @@ const migrationRecoveryKeyCustodyRetryRequestResults =
 
 const secondRecoveryVolumeSelectionRequestResults =
   new Set<SecondRecoveryVolumeSelectionRequestResult>(["started", "notAllowed", "unavailable"]);
+
+const firstRecoveryKeyReentryRequestResults = new Set<FirstRecoveryKeyReentryRequestResult>([
+  "started",
+  "notAllowed",
+  "unavailable",
+]);
 
 const firstTimeSetupRequestResults = new Set<FirstTimeSetupRequestResult>([
   "started",
@@ -201,6 +211,18 @@ export async function requestSecondRecoveryVolumeSelection(): Promise<SecondReco
         result as SecondRecoveryVolumeSelectionRequestResult,
       )
       ? (result as SecondRecoveryVolumeSelectionRequestResult)
+      : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export async function requestFirstRecoveryKeyReentry(): Promise<FirstRecoveryKeyReentryRequestResult> {
+  try {
+    const result = await invoke<unknown>("request_first_recovery_key_reentry");
+    return typeof result === "string" &&
+      firstRecoveryKeyReentryRequestResults.has(result as FirstRecoveryKeyReentryRequestResult)
+      ? (result as FirstRecoveryKeyReentryRequestResult)
       : "unavailable";
   } catch {
     return "unavailable";

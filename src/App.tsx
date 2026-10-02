@@ -13,6 +13,7 @@ import {
   getMigrationInitiationAvailable,
   getStartupStatus,
   requestFirstTimeSetup,
+  requestFirstRecoveryKeyReentry,
   requestProductionDatabaseMigration,
   requestPostRecoveryMigrationExecutionConfirmation,
   requestSecondRecoveryVolumeSelection,
@@ -61,6 +62,9 @@ interface StartupBoundaryProps {
   firstTimeSetupAvailable: boolean;
   migrationConfirmationError: string | null;
   migrationConfirmationPending: boolean;
+  firstRecoveryKeyReentryError: string | null;
+  firstRecoveryKeyReentryPending: boolean;
+  onRequestFirstRecoveryKeyReentry: () => void;
   onRequestSecondRecoveryVolume: () => void;
   onRequestMigrationConfirmation: () => void;
   onRetryCustody: () => void;
@@ -78,6 +82,9 @@ function StartupBoundary({
   firstTimeSetupAvailable,
   migrationConfirmationError,
   migrationConfirmationPending,
+  firstRecoveryKeyReentryError,
+  firstRecoveryKeyReentryPending,
+  onRequestFirstRecoveryKeyReentry,
   onRequestSecondRecoveryVolume,
   onRequestMigrationConfirmation,
   onRetryCustody,
@@ -104,6 +111,8 @@ function StartupBoundary({
       "Recovery protection has been verified. Preparing the recovery destinations.",
     firstRecoveryVolumeAcceptedAwaitingSecondDevice:
       "The first recovery destination was accepted. Select a second independent recovery destination to continue.",
+    migrationRecoveryKeyReentryAwaitingVerification:
+      "Recovery-key verification is required before recovery publication can continue.",
     twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution:
       "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
     migrationExecutionConfirmedAwaitingWritablePreparation:
@@ -155,6 +164,23 @@ function StartupBoundary({
             {secondRecoveryVolumeError !== null && <p role="alert">{secondRecoveryVolumeError}</p>}
           </div>
         )}
+        {status === "migrationRecoveryKeyReentryAwaitingVerification" && (
+          <div aria-busy={firstRecoveryKeyReentryPending} className={styles.setupAction}>
+            <p>Enter the recovery key only in the trusted Windows verification dialog.</p>
+            <button
+              disabled={firstRecoveryKeyReentryPending}
+              onClick={onRequestFirstRecoveryKeyReentry}
+              type="button"
+            >
+              {firstRecoveryKeyReentryPending
+                ? "Opening recovery-key verification…"
+                : "Verify recovery key"}
+            </button>
+            {firstRecoveryKeyReentryError !== null && (
+              <p role="alert">{firstRecoveryKeyReentryError}</p>
+            )}
+          </div>
+        )}
         {status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" && (
           <div aria-busy={migrationConfirmationPending} className={styles.setupAction}>
             <p>Review the trusted Windows confirmation before authorizing the future migration.</p>
@@ -189,6 +215,10 @@ export function App() {
   const [migrationConfirmationError, setMigrationConfirmationError] = useState<string | null>(null);
   const [secondRecoveryVolumePending, setSecondRecoveryVolumePending] = useState(false);
   const [secondRecoveryVolumeError, setSecondRecoveryVolumeError] = useState<string | null>(null);
+  const [firstRecoveryKeyReentryPending, setFirstRecoveryKeyReentryPending] = useState(false);
+  const [firstRecoveryKeyReentryError, setFirstRecoveryKeyReentryError] = useState<string | null>(
+    null,
+  );
   const [businessFeaturesAvailable, setBusinessFeaturesAvailable] = useState<boolean | null>(null);
   const [migrationInitiationAvailable, setMigrationInitiationAvailable] = useState<boolean | null>(
     null,
@@ -215,6 +245,7 @@ export function App() {
         status === "migrationRecoveryKeyCustodyAwaitingRetry" ||
         status === "migrationRecoveryKeyCustodyVerifiedAwaitingPublication" ||
         status === "firstRecoveryVolumeAcceptedAwaitingSecondDevice" ||
+        status === "migrationRecoveryKeyReentryAwaitingVerification" ||
         status === "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution" ||
         status === "writableV1MigrationPreparedAwaitingTransaction" ||
         status === "stopping";
@@ -241,6 +272,9 @@ export function App() {
     }
     if (startupStatus !== "firstRecoveryVolumeAcceptedAwaitingSecondDevice") {
       setSecondRecoveryVolumeError(null);
+    }
+    if (startupStatus !== "migrationRecoveryKeyReentryAwaitingVerification") {
+      setFirstRecoveryKeyReentryError(null);
     }
   }, [startupStatus]);
 
@@ -339,6 +373,23 @@ export function App() {
     setSecondRecoveryVolumePending(false);
   }
 
+  async function requestFirstRecoveryVerification() {
+    if (firstRecoveryKeyReentryPending) return;
+
+    setFirstRecoveryKeyReentryPending(true);
+    setFirstRecoveryKeyReentryError(null);
+    const result = await requestFirstRecoveryKeyReentry();
+    if (result === "notAllowed") {
+      setFirstRecoveryKeyReentryError(
+        "Recovery-key verification is not available in the current application state.",
+      );
+    } else if (result === "unavailable") {
+      setFirstRecoveryKeyReentryError("Recovery-key verification could not be opened.");
+    }
+    setStatusRefreshKey((key) => key + 1);
+    setFirstRecoveryKeyReentryPending(false);
+  }
+
   async function requestMigrationInitiation() {
     if (migrationInitiationPending) return;
 
@@ -360,6 +411,9 @@ export function App() {
         firstTimeSetupAvailable={firstTimeSetupAvailable}
         migrationConfirmationError={migrationConfirmationError}
         migrationConfirmationPending={migrationConfirmationPending}
+        firstRecoveryKeyReentryError={firstRecoveryKeyReentryError}
+        firstRecoveryKeyReentryPending={firstRecoveryKeyReentryPending}
+        onRequestFirstRecoveryKeyReentry={() => void requestFirstRecoveryVerification()}
         onRequestSecondRecoveryVolume={() => void requestSecondRecoveryVolume()}
         onRequestMigrationConfirmation={() => void requestMigrationConfirmation()}
         onRetryCustody={() => void retryCustody()}

@@ -140,6 +140,10 @@ describe("application foundation", () => {
       "The first recovery destination was accepted. Select a second independent recovery destination to continue.",
     ],
     [
+      "migrationRecoveryKeyReentryAwaitingVerification",
+      "Recovery-key verification is required before recovery publication can continue.",
+    ],
+    [
       "twoCompleteRecoverySetsVerifiedAwaitingMigrationExecution",
       "Both recovery sets are verified. Migration execution is awaiting your confirmation.",
     ],
@@ -162,6 +166,9 @@ describe("application foundation", () => {
       expect(
         screen.queryByRole("button", { name: "Confirm migration authorization" }),
       ).not.toBeInTheDocument();
+    }
+    if (status !== "migrationRecoveryKeyReentryAwaitingVerification") {
+      expect(screen.queryByRole("button", { name: "Verify recovery key" })).not.toBeInTheDocument();
     }
     if (status === "ready") {
       expect(screen.getByRole("navigation", { name: "Staff areas" })).toBeInTheDocument();
@@ -328,6 +335,85 @@ describe("application foundation", () => {
       mockedInvoke.mock.calls.filter(([command]) => command === "startup_status"),
     ).toHaveLength(1);
   });
+
+  it("renders only the first recovery-key verification action at the exact awaiting state", async () => {
+    mockedInvoke.mockImplementation((command) =>
+      command === "startup_status"
+        ? Promise.resolve("migrationRecoveryKeyReentryAwaitingVerification")
+        : Promise.reject(new Error("unexpected command")),
+    );
+    renderApp();
+
+    expect(
+      await screen.findByText(
+        "Recovery-key verification is required before recovery publication can continue.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Enter the recovery key only in the trusted Windows verification dialog."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Verify recovery key" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Set up Church App" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Select second recovery device" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Staff areas" })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Parish request workflows");
+  });
+
+  it("keeps polling while first recovery-key verification remains pending", async () => {
+    let startupReadCount = 0;
+    mockedInvoke.mockImplementation((command) => {
+      if (command === "startup_status") {
+        startupReadCount += 1;
+        return Promise.resolve(
+          startupReadCount === 1
+            ? "migrationRecoveryKeyReentryAwaitingVerification"
+            : "unavailable",
+        );
+      }
+      if (command === "first_time_setup_available") return Promise.resolve(false);
+      return Promise.reject(new Error("unexpected command"));
+    });
+    renderApp();
+
+    expect(
+      await screen.findByText(
+        "Recovery-key verification is required before recovery publication can continue.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("The application is unavailable.", {}, { timeout: 1_500 }),
+    ).toBeInTheDocument();
+    expect(startupReadCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it.each(["started", "notAllowed", "unavailable"] as const)(
+    "handles %s from the argument-free first recovery-key request by refreshing canonical status",
+    async (result) => {
+      let startupReadCount = 0;
+      mockedInvoke.mockImplementation((command) => {
+        if (command === "startup_status") {
+          startupReadCount += 1;
+          return Promise.resolve("migrationRecoveryKeyReentryAwaitingVerification");
+        }
+        if (command === "request_first_recovery_key_reentry") return Promise.resolve(result);
+        return Promise.reject(new Error("unexpected command"));
+      });
+      const user = userEvent.setup();
+      renderApp();
+
+      await user.click(await screen.findByRole("button", { name: "Verify recovery key" }));
+
+      expect(
+        mockedInvoke.mock.calls.filter(
+          ([command]) => command === "request_first_recovery_key_reentry",
+        ),
+      ).toEqual([["request_first_recovery_key_reentry"]]);
+      await waitFor(() => expect(startupReadCount).toBeGreaterThanOrEqual(2));
+      expect(screen.queryByRole("navigation", { name: "Staff areas" })).not.toBeInTheDocument();
+    },
+  );
 
   it("requests second recovery-device selection without renderer-supplied authority", async () => {
     mockedInvoke.mockImplementation((command) => {
